@@ -72,3 +72,26 @@ internal fun compileText(
     return compileFile(platform, optimize, filePath.parent, filePath.name, outputDir,
         errors=errors, writeAssembly=writeAssembly, varshigh=varshigh, slabshigh=slabshigh)
 }
+
+/**
+ * Takes ProgB [sourceText] as a String, writes it to a temporary
+ * .pb file and runs the compiler on it.
+ * @see compileFile
+ * @see compileText
+ */
+internal fun compileTextPB(
+    platform: ICompilationTarget,
+    optimize: Boolean,
+    sourceText: String,
+    outputDir: Path,
+    errors: IErrorReporter? = null,
+    writeAssembly: Boolean = true,
+    varshigh: Int? = null,
+    slabshigh: Int? = null
+) : CompilationResult? {
+    val filePath = outputDir.resolve("on_the_fly_test_${sourceText.hashCode().toUInt().toString(16)}.pb")
+    // we don't assumeNotExists(filePath) - should be ok to just overwrite it
+    filePath.toFile().writeText(sourceText)
+    return compileFile(platform, optimize, filePath.parent, filePath.name, outputDir,
+        errors=errors, writeAssembly=writeAssembly, varshigh=varshigh, slabshigh=slabshigh)
+}

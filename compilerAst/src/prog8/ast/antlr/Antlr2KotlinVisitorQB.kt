@@ -657,7 +657,25 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     }
 
     override fun visitInlineasm(ctx: InlineasmContext): InlineAssembly {
-        val isIR = ctx.asmtype.text.uppercase() == "IR"
+        // Check if using ASMBLOCK_CONTENT (ASM ... END ASM syntax)
+        val asmBlockContent = ctx.ASMBLOCK_CONTENT()
+        if (asmBlockContent != null) {
+            val fullText = asmBlockContent.text
+            // Extract: remove "ASM\n" from start and "\nEND ASM" from end (case-insensitive)
+            val lines = fullText.lines()
+            val firstLine = lines.first().trim().uppercase()
+            val isIR = firstLine.startsWith("IR")
+            // Skip first line (ASM/IR) and last line (END ASM/END IR)
+            val asmText = if (lines.size > 2) {
+                lines.drop(1).dropLast(1).joinToString("\n")
+            } else {
+                ""
+            }
+            return InlineAssembly(asmText, isIR, ctx.toPosition())
+        }
+        
+        // Otherwise using {{ }} syntax
+        val isIR = ctx.asmtype?.text?.uppercase() == "IR"
         val text = ctx.INLINEASMBLOCK()?.text ?: ""
         val asmText = if(text.length > 4) text.substring(2, text.length-2) else ""
         return InlineAssembly(asmText, isIR, ctx.toPosition())
@@ -859,7 +877,9 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     }
 
     override fun visitUntilloop(ctx: UntilloopContext): UntilLoop {
-        val condition = ctx.expression().accept(this) as Expression
+        // If no UNTIL condition, it's an infinite loop (condition = false, never exits)
+        val condition = ctx.expression()?.accept(this) as Expression?
+            ?: NumericLiteral.fromBoolean(false, ctx.toPosition())
         val statements = ctx.doloop_body().statement().map { it.accept(this) as Statement }.toMutableList()
         return UntilLoop(AnonymousScope(statements, ctx.toPosition()), condition, ctx.toPosition())
     }

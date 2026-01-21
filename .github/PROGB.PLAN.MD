@@ -874,44 +874,46 @@ END MODULE
 
 To build the compiler after making changes to the grammar or source code:
 
-```bash
-# Regenerate ANTLR parser from grammar (after modifying .g4 files)
-./gradlew :parser:generateGrammarSource
+```cmd
+REM Regenerate ANTLR parser from grammar (after modifying .g4 files)
+.\gradlew.bat :parser:generateGrammarSource
 
-# Build the full compiler
-./gradlew installdist installshadowdist
+REM Build the full compiler
+.\gradlew.bat installdist
 
-# The compiler launch script will be at:
-# compiler/build/install/compiler-shadow/bin/prog8c      (Unix/Mac)
-# compiler/build/install/compiler-shadow/bin/prog8c.bat  (Windows)
+REM The compiler launch script will be at:
+REM .\compiler\build\install\prog8c\bin\prog8c.bat
 ```
 
 ### Testing ProgB Files
 
-```bash
-# Compile a ProgB file for C64
-compiler/build/install/compiler-shadow/bin/prog8c -target c64 examples/progb/hello.pb
+```cmd
+REM Compile a ProgB file for C64
+.\compiler\build\install\prog8c\bin\prog8c.bat -target c64 examples\progb\hello.pb
 
-# Compile a ProgB file for Commander X16
-compiler/build/install/compiler-shadow/bin/prog8c -target cx16 examples/progb/hello.pb
+REM Compile a ProgB file for Commander X16
+.\compiler\build\install\prog8c\bin\prog8c.bat -target cx16 examples\progb\hello.pb
 
-# Run all tests
-./gradlew test
+REM Compile a ProgB file for Virtual target
+.\compiler\build\install\prog8c\bin\prog8c.bat -target virtual examples\progb\hello.pb
+
+REM Run all tests
+.\gradlew.bat test
 ```
 
 ### Quick Test Cycle
 
 For rapid iteration when debugging grammar or visitor issues:
 
-```bash
-# 1. Regenerate grammar
-./gradlew :parser:generateGrammarSource
+```cmd
+REM 1. Regenerate grammar
+.\gradlew.bat :parser:generateGrammarSource
 
-# 2. Build compiler
-./gradlew installdist installshadowdist
+REM 2. Build compiler
+.\gradlew.bat installdist
 
-# 3. Test your file
-compiler/build/install/compiler-shadow/bin/prog8c -target c64 your_test_file.pb
+REM 3. Test your file
+.\compiler\build\install\prog8c\bin\prog8c.bat -target virtual your_test_file.pb
 ```
 
 ---

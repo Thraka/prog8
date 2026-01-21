@@ -25,6 +25,14 @@ package prog8.parser;
 // LEXER RULES (must come before parser rules in combined grammar)
 // ============================================================================
 
+// ASM block content - MUST BE FIRST to capture entire blocks before other tokens
+// Captures everything between ASM/IR and END ASM/END IR as a single token
+ASMBLOCK_CONTENT :
+    (A S M | I R) [ \t]* ('\r'? '\n' | '\r' | '\n')
+    .*?
+    ('\r'? '\n' | '\r' | '\n') [ \t]* E N D [ \t]+ (A S M | I R)
+    ;
+
 // Case-insensitive keyword fragments
 fragment A: [aA];
 fragment B: [bB];
@@ -61,9 +69,16 @@ fragment DEC_DIGIT: [0-9] ;
 EOL :  ('\r'? '\n' | '\r' | '\n')+ ;
 WS :  [ \t] -> skip ;
 
-// Comments - BASIC style (must be before other rules that might match ')
+// Character literal - matches 'x' where x is a single character or escape sequence
+SINGLECHAR :
+    '\u0027' ( STRING_ESCAPE_SEQ | ~[\\\r\n\f\u0027] ) '\u0027'
+    ;
+
+// Comments - BASIC style
+// Comment must start with ' followed by space/tab, or ' followed by 2+ chars before any '
+// This prevents 'a' (char literal) from being matched as a comment
 LINECOMMENT : EOL [ \t]* COMMENT -> channel(HIDDEN);
-COMMENT :  '\'' ~[\r\n]* -> channel(HIDDEN) ;
+COMMENT :  '\'' ( [ \t] ~[\r\n]* | ~[' \t\r\n] ~['\r\n] ~[\r\n]* | ~[' \t\r\n]? ) -> channel(HIDDEN) ;
 REM_COMMENT : R E M [ \t] ~[\r\n]* -> channel(HIDDEN) ;
 BLOCK_COMMENT : '/\'' ( BLOCK_COMMENT | ~'\'' | '\'' ~'/' )*? '\'/' -> skip ;
 
@@ -80,6 +95,7 @@ PLUSEQ: '+=' ;
 MINUSEQ: '-=' ;
 STAREQ: '*=' ;
 SLASHEQ: '/=' ;
+MODEQ: '%=' ;
 ANDEQ: '&=' ;
 OREQ: '|=' ;
 XOREQ: '^=' ;
@@ -248,15 +264,16 @@ AS: A S ;
 AT: A T ;
 
 // Literals and identifiers (order matters - more specific first)
+// DEC_INTEGER must come before FLOAT_NUMBER so plain integers like 0 aren't matched as floats
+DEC_INTEGER :  DEC_DIGIT (DEC_DIGIT | '_')* ;
 HEX_INTEGER :  '$' HEX_DIGIT (HEX_DIGIT | '_')* ;
 BIN_INTEGER :  '%' BIN_DIGIT (BIN_DIGIT | '_')* ;
 FLOAT_NUMBER :  FNUMBER (('E'|'e') ('+' | '-')? DEC_INTEGER)? ;
 fragment FNUMBER : FDOTNUMBER |  FNUMDOTNUMBER ;
 fragment FDOTNUMBER : DOT (DEC_DIGIT | '_')+ ;
-fragment FNUMDOTNUMBER : DEC_DIGIT (DEC_DIGIT | '_')* FDOTNUMBER? ;
-DEC_INTEGER :  DEC_DIGIT (DEC_DIGIT | '_')* ;
+fragment FNUMDOTNUMBER : DEC_DIGIT (DEC_DIGIT | '_')* FDOTNUMBER ;
 
-STRING_ESCAPE_SEQ :  '\\' [\u0021-\u007E] | '\\x' HEX_DIGIT HEX_DIGIT | '\\u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT;
+fragment STRING_ESCAPE_SEQ :  '\\' [\u0021-\u007E] | '\\x' HEX_DIGIT HEX_DIGIT | '\\u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT;
 STRING_LIT :
     '"' ( STRING_ESCAPE_SEQ | ~[\\\r\n\f"] )* '"'
     ;
@@ -265,17 +282,13 @@ INLINEASMBLOCK :
     '{{' .+? '}}'
     ;
 
-SINGLECHAR :
-    '\u0027' ( STRING_ESCAPE_SEQ | ~[\\\r\n\f\u0027] ) '\u0027'
-    ;
-
 TAG: ATSIGN ([a-zA-Z0-9])+ ;
 
 EMPTYARRAYSIG : LBRACKET [ \t]* RBRACKET ;
 
 // Identifiers (must come after keywords)
 UNICODEDNAME :  [\p{Letter}][\p{Letter}\p{Mark}\p{Digit}_]* ;
-UNDERSCORENAME :  '_' [\p{Letter}\p{Mark}\p{Digit}_]+ ;
+UNDERSCORENAME :  '_' UNICODEDNAME ;
 
 
 // ============================================================================
@@ -434,7 +447,7 @@ arrayindex:  LBRACKET expression RBRACKET ;
 assignment :  (assign_target ASSIGN expression) | (assign_target ASSIGN assignment) | (multi_assign_target ASSIGN expression);
 
 augassignment :
-    assign_target operator=(PLUSEQ | MINUSEQ | SLASHEQ | STAREQ | ANDEQ | OREQ | XOREQ | SHLEQ | SHREQ) expression
+    assign_target operator=(PLUSEQ | MINUSEQ | SLASHEQ | STAREQ | MODEQ | ANDEQ | OREQ | XOREQ | SHLEQ | SHREQ) expression
     ;
 
 assign_target:
@@ -562,8 +575,9 @@ literalvalue :
     ;
 
 // ASM ... END ASM  or  IR ... END IR
-inlineasm :  asmtype=(ASM | IR) EOL? INLINEASMBLOCK? EOL? END asmtype2=(ASM | IR)
-           | asmtype=(ASM | IR) EOL? INLINEASMBLOCK
+// Can use either {{ }} block syntax or ASM/END ASM block syntax
+inlineasm :  asmtype=(ASM | IR) EOL? INLINEASMBLOCK
+           | ASMBLOCK_CONTENT
            ;
 
 // ============================================================================
@@ -651,8 +665,8 @@ whileloop:  WHILE expression EOL? whileloop_body WEND ;
 
 whileloop_body: (statement | EOL)* ;
 
-// DO ... LOOP UNTIL condition
-untilloop:  DO EOL? doloop_body LOOP UNTIL expression ;
+// DO ... LOOP [UNTIL condition]  (without UNTIL = infinite loop)
+untilloop:  DO EOL? doloop_body LOOP (UNTIL expression)? ;
 
 doloop_body: (statement | EOL)* ;
 

@@ -13,12 +13,11 @@ MODULE main
             color++
             
             ' Low-level wait using assembly
-            ASM {{
+            ASM
                 lda #$10
-            .wait:
-                cmp $d012
-                bne .wait
-            }}
+            -   cmp $d012
+                bne -
+            END ASM
         LOOP
     END SUB
 
