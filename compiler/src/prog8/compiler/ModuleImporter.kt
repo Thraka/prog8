@@ -12,6 +12,7 @@ import prog8.code.sanitize
 import prog8.code.source.ImportFileSystem
 import prog8.code.source.SourceCode
 import prog8.parser.Prog8Parser
+import prog8.parser.ProgBParser
 import java.io.File
 import java.nio.file.Path
 import kotlin.io.path.Path
@@ -56,7 +57,12 @@ class ModuleImporter(private val program: Program,
     }
 
     private fun importModule(src: SourceCode) : Module {
-        val moduleAst = Prog8Parser.parseModule(src)
+        // Select parser based on file extension
+        val moduleAst = if(src.origin.endsWith(".pb")) {
+            ProgBParser.parseModule(src)
+        } else {
+            Prog8Parser.parseModule(src)
+        }
         program.addModule(moduleAst)
 
         // accept additional imports
@@ -80,7 +86,8 @@ class ModuleImporter(private val program: Program,
         if(import.directive!="%import" || import.args.size!=1)
             throw SyntaxError("invalid import directive", import.position)
         val moduleName = import.args[0].string!!
-        if("$moduleName.p8" == import.position.file)
+        // Check for self-import (both .p8 and .pb extensions)
+        if("$moduleName.p8" == import.position.file || "$moduleName.pb" == import.position.file)
             throw SyntaxError("cannot import self", import.position)
 
         val existing = program.modules.singleOrNull { it.name.equals(moduleName, ignoreCase = true) }
@@ -92,7 +99,7 @@ class ModuleImporter(private val program: Program,
             return existing
         }
 
-        // try internal library first
+        // try internal library first (only .p8 for libraries)
         val moduleResourceSrc = getModuleFromResource("$moduleName.p8", compilationTargetName)
         val importedModule =
             moduleResourceSrc.fold(
@@ -136,7 +143,8 @@ class ModuleImporter(private val program: Program,
     }
 
     private fun getModuleFromFile(name: String, importingModule: Module?): Result<SourceCode, NoSuchFileException> {
-        val fileName = "$name.p8"
+        // Try both .p8 (Prog8) and .pb (ProgB) extensions
+        val extensions = listOf(".p8", ".pb")
 
         val normalLocations =
             if (importingModule == null) {
@@ -146,20 +154,28 @@ class ModuleImporter(private val program: Program,
                 listOf(pathFromImportingModule) + sourcePaths
             }
 
-        libraryPaths.forEach {
-            try {
-                return Ok(ImportFileSystem.getFile(it.resolve(fileName), true))
-            } catch (_: NoSuchFileException) {
+        // Search in library paths first
+        for(ext in extensions) {
+            val fileName = "$name$ext"
+            libraryPaths.forEach {
+                try {
+                    return Ok(ImportFileSystem.getFile(it.resolve(fileName), true))
+                } catch (_: NoSuchFileException) {
+                }
             }
         }
 
-        normalLocations.forEach {
-            try {
-                return Ok(ImportFileSystem.getFile(it.resolve(fileName)))
-            } catch (_: NoSuchFileException) {
+        // Search in normal locations
+        for(ext in extensions) {
+            val fileName = "$name$ext"
+            normalLocations.forEach {
+                try {
+                    return Ok(ImportFileSystem.getFile(it.resolve(fileName)))
+                } catch (_: NoSuchFileException) {
+                }
             }
         }
 
-        return Err(NoSuchFileException(File("name")))
+        return Err(NoSuchFileException(File(name)))
     }
 }
