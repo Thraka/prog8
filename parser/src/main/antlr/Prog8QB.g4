@@ -264,7 +264,9 @@ AS: A S ;
 AT: A T ;
 
 // Literals and identifiers (order matters - more specific first)
+// DIRECTIVE_NAME must come before BIN_INTEGER since both start with %
 // DEC_INTEGER must come before FLOAT_NUMBER so plain integers like 0 aren't matched as floats
+DIRECTIVE_NAME: '%' [a-zA-Z_][a-zA-Z0-9_]* ;
 DEC_INTEGER :  DEC_DIGIT (DEC_DIGIT | '_')* ;
 HEX_INTEGER :  '$' HEX_DIGIT (HEX_DIGIT | '_')* ;
 BIN_INTEGER :  '%' BIN_DIGIT (BIN_DIGIT | '_')* ;
@@ -400,6 +402,7 @@ directive:
     | mergedir
     | forceoutputdir
     | verafxmulsdir
+    | genericdirective       // Prog8-compatible fallback for any %directive
     ;
 
 importdirective: IMPORT identifier ;
@@ -420,6 +423,12 @@ jmptabledir: JMPTABLE scoped_identifier (COMMA scoped_identifier)* ;
 mergedir: MERGE ;
 forceoutputdir: FORCE_OUTPUT ;
 verafxmulsdir: VERAFXMULS ;
+
+// Generic Prog8-compatible directive: %name args or %name (list)
+// Allows any directive syntax, validation done at compile time
+genericdirective: DIRECTIVE_NAME (directivenamelist | (directivearg (',' directivearg)*)?) ;
+directivenamelist: LPAREN EOL? scoped_identifier (COMMA EOL? scoped_identifier)* COMMA? EOL? RPAREN ;
+directivearg: stringliteral | identifier | integerliteral ;
 
 // ============================================================================
 // VARIABLE DECLARATIONS

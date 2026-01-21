@@ -63,6 +63,31 @@ ProgB is an alternative syntax frontend for the Prog8 compiler that provides a Q
 | `%option force_output` | `FORCE_OUTPUT` |
 | `%option verafxmuls` | `VERAFXMULS` |
 
+### Generic Directive Syntax (Prog8-Compatible)
+
+For compatibility with Prog8 and future directives, ProgB also accepts the Prog8-style `%directive` syntax:
+
+```basic
+' ProgB - BASIC-style (preferred)
+IMPORT textio
+ZEROPAGE basicsafe
+JMPTABLE sub1, sub2, sub3
+
+' ProgB - Prog8-compatible style (also valid)
+%import textio
+%zeropage basicsafe
+%jmptable (sub1, sub2, sub3)
+
+' Any Prog8 directive works, even future ones
+%newdirective arg1, arg2
+%anydirective (name1, name2)
+```
+
+This allows:
+- Pasting Prog8 code directly into ProgB files
+- Using new directives without grammar updates
+- Validation at compile-time (same as Prog8)
+
 ### Program Structure
 
 | Prog8 | ProgB |
@@ -330,6 +355,10 @@ when x {
 ' ProgB
 ON x GOTO label1, label2, label3
 ON x GOSUB sub1, sub2, sub3
+ON x CALL sub1, sub2, sub3      ' CALL also supported
+
+' With ELSE fallback (when x is out of range)
+ON x GOTO label1, label2 ELSE default_label
 ```
 
 ```prog8
@@ -380,6 +409,17 @@ on x call sub1, sub2, sub3
 | `x ^= $ff` | `x = x XOR $FF` or `x ^= $FF` |
 | `x <<= 2` | `x = x SHL 2` or `x <<= 2` |
 | `x >>= 2` | `x = x SHR 2` or `x >>= 2` |
+| `x %= 5` | `x %= 5` or `x = x MOD 5` |
+
+### Chained Assignment
+
+Multiple variables can be assigned in a single statement:
+
+```basic
+' ProgB
+x = y = z = 0       ' All three set to 0
+a = b = getValue()  ' Both get the return value
+```
 
 ### Literals
 
@@ -397,6 +437,8 @@ on x call sub1, sub2, sub3
 | `sc:"hello"` | `sc:"hello"` | Screencodes string (same) |
 | `petscii:"text"` | `petscii:"text"` | Explicit encoding (same) |
 | `[1,2,3]` | `[1,2,3]` | Array literal (same!) |
+| `[1,2,3,]` | `[1,2,3,]` | Trailing comma allowed |
+| `[]` | `[]` | Empty array literal |
 | `[1,2,3] * 10` | `[1,2,3] * 10` | Repeated array (same!) |
 
 ### Address-of Operators
@@ -420,7 +462,7 @@ on x call sub1, sub2, sub3
 ### Inline Assembly
 
 ```basic
-' ProgB
+' ProgB - block style (preferred)
 ASM
     lda #$00
     sta $d020
@@ -430,6 +472,12 @@ END ASM
 IR
     load.b r0, 0
 END IR
+
+' Alternate brace style (Prog8-compatible)
+ASM {{
+    lda #$00
+    sta $d020
+}}
 ```
 
 ```prog8
@@ -688,6 +736,44 @@ END SUB
 sub myfast(uword value @R0, ubyte count @R1) {
     ; R0 and R1 will hold the parameters
 }
+```
+
+### Line Continuation
+
+Expressions can span multiple lines. Line breaks are allowed after binary operators and within parentheses:
+
+```basic
+' ProgB - long expressions can be split across lines
+result = very_long_variable_name +
+         another_long_name *
+         some_factor
+
+total = (first_value +
+         second_value +
+         third_value)
+
+IF x > 10 AND
+   y < 20 THEN
+    ' ...
+END IF
+```
+
+### Contextual Keywords
+
+The following keywords can also be used as variable names, subroutine names, or struct field names when the context is unambiguous:
+
+`on`, `call`, `inline`, `step`, `import`, `zeropage`, `address`, `memtop`, `encoding`, `output`, `launcher`, `option`, `zpreserved`, `zpallowed`, `breakpoint`, `asmbinary`, `asminclude`, `align`, `jmptable`, `merge`, `force_output`, `verafxmuls`
+
+```basic
+' These are valid variable names
+DIM step AS UBYTE = 5
+DIM option AS BOOL = TRUE
+DIM import AS UWORD
+
+' "step" is a keyword in FOR context, but variable elsewhere
+FOR i = 0 TO 10 STEP step
+    txt.print_ub(i)
+NEXT
 ```
 
 ---
