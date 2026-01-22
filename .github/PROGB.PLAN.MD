@@ -98,7 +98,6 @@ This allows:
 | `sub name() -> ubyte { ... }` | `FUNCTION name() AS UBYTE ... END FUNCTION` |
 | `sub name() -> ubyte, ubyte { ... }` | `FUNCTION name() AS UBYTE, UBYTE ... END FUNCTION` |
 | `asmsub name() { ... }` | `ASMSUB name() ... END ASMSUB` |
-| `inline sub name() { ... }` | `INLINE SUB name() ... END SUB` |
 | `inline asmsub name() { ... }` | `INLINE ASMSUB name() ... END ASMSUB` |
 | `extsub $ffd2 = name()` | `EXTSUB $FFD2 = name()` |
 | `extsub @bank 4 $c000 = name()` | `EXTSUB AT BANK 4 $C000 = name()` |
