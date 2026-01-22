@@ -1098,9 +1098,12 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     private fun parseParamRegister(registerText: String, pos: Position): Pair<RegisterOrPair?, Statusflag?> {
         var registerorpair: RegisterOrPair? = null
         var statusregister: Statusflag? = null
-        when (registerText.uppercase()) {
-            in RegisterOrPair.names -> registerorpair = RegisterOrPair.valueOf(registerText.uppercase())
-            in Statusflag.names -> statusregister = Statusflag.valueOf(registerText.uppercase())
+        val upperText = registerText.uppercase()
+        when {
+            upperText in RegisterOrPair.names -> registerorpair = RegisterOrPair.valueOf(upperText)
+            upperText in Statusflag.names.map { it.uppercase() } -> {
+                statusregister = Statusflag.entries.first { it.name.uppercase() == upperText }
+            }
             else -> {
                 throw SyntaxError("invalid register or status flag: $registerText", pos)
             }
@@ -1122,9 +1125,12 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         val registerText = rctx.TAG().text.substring(1)  // strip @ prefix from TAG token
         var registerorpair: RegisterOrPair? = null
         var statusregister: Statusflag? = null
-        when (registerText.uppercase()) {
-            in RegisterOrPair.names -> registerorpair = RegisterOrPair.valueOf(registerText.uppercase())
-            in Statusflag.names -> statusregister = Statusflag.valueOf(registerText.uppercase())
+        val upperText = registerText.uppercase()
+        when {
+            upperText in RegisterOrPair.names -> registerorpair = RegisterOrPair.valueOf(upperText)
+            upperText in Statusflag.names.map { it.uppercase() } -> {
+                statusregister = Statusflag.entries.first { it.name.uppercase() == upperText }
+            }
             else -> throw SyntaxError("invalid register or status flag: $registerText", rctx.toPosition())
         }
         return AsmSubroutineReturn(
