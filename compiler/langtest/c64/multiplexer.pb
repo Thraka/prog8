@@ -33,7 +33,7 @@ MODULE main
             sys.memcopy(balloonsprite, sprdat, 64)
             DIM cptr AS UBYTE
             FOR cptr = 0 TO 7
-                sprdat[7+cptr*3] = @($d400+(i+sc:'a')*$0008 + cptr)
+                sprdat[7+cptr*3] = @($d400+(i+sc:"a"c)*$0008 + cptr)
             NEXT
             DIM sprite AS ^^Sprite = sprites[i]
             sprite.dataptr = lsb(spritedata_base/64) + i

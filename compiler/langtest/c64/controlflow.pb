@@ -34,7 +34,7 @@ MODULE main
         
         ' Repeat loop
         REPEAT 5
-            txt.chrout('*')
+            txt.chrout("*"c)
         END REPEAT
         
         txt.nl()

@@ -25,7 +25,7 @@ MODULE main
         c = a SHR 1
         
         ' Comparison
-        flag = a = b
+        flag = a == b
         flag = a <> b
         flag = a < b
         flag = a > b
