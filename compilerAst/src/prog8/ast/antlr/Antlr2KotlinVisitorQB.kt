@@ -289,6 +289,44 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         return Directive("%option", listOf(DirectiveArg("verafxmuls", null, ctx.toPosition())), ctx.toPosition())
     }
 
+    // Generic Prog8-compatible directive: %name args
+    override fun visitGenericdirective(ctx: GenericdirectiveContext): Directive {
+        val directiveName = ctx.DIRECTIVE_NAME().text  // includes the % prefix
+        val args = mutableListOf<DirectiveArg>()
+        
+        // Handle directive name list: %directive (name1, name2, ...)
+        ctx.directivenamelist()?.let { nameList ->
+            val identifiers = nameList.scoped_identifier().map { it.accept(this) as IdentifierReference }
+            args.addAll(identifiers.map { DirectiveArg(it.nameInSource.joinToString("."), null, it.position) })
+        }
+        
+        // Handle directive args: %directive arg1, arg2, ...
+        ctx.directivearg().forEach { argCtx ->
+            args.add(visitDirectivearg(argCtx))
+        }
+        
+        return Directive(directiveName, args, ctx.toPosition())
+    }
+
+    override fun visitDirectivenamelist(ctx: DirectivenamelistContext): Node {
+        throw FatalAstException("should not be called directly")
+    }
+
+    override fun visitDirectivearg(ctx: DirectiveargContext): DirectiveArg {
+        ctx.stringliteral()?.let {
+            val text = it.STRING_LIT().text
+            return DirectiveArg(text.substring(1, text.length - 1), null, ctx.toPosition())
+        }
+        ctx.identifier()?.let {
+            return DirectiveArg(getname(it), null, ctx.toPosition())
+        }
+        ctx.integerliteral()?.let {
+            val value = (it.accept(this) as NumericLiteral).number.toUInt()
+            return DirectiveArg(null, value, ctx.toPosition())
+        }
+        throw FatalAstException("invalid directive arg at ${ctx.toPosition()}")
+    }
+
     // ============================================================================
     // VARIABLE DECLARATIONS
     // ============================================================================
@@ -686,7 +724,6 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     // ============================================================================
 
     override fun visitSubroutine(ctx: SubroutineContext): Subroutine {
-        val inline = ctx.INLINE() != null
         val name = getname(ctx.identifier())
         val parameters = ctx.sub_params()?.sub_param()?.map { subParam(it) } ?: emptyList()
         val statements = ctx.subroutine_body().statement().map { it.accept(this) as Statement }.toMutableList()
@@ -699,14 +736,13 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
             emptySet(),
             asmAddress = null,
             isAsmSubroutine = false,
-            inline = inline,
+            inline = false,
             statements = statements,
             position = ctx.toPosition()
         )
     }
 
     override fun visitFunctiondecl(ctx: FunctiondeclContext): Subroutine {
-        val inline = ctx.INLINE() != null
         val name = getname(ctx.identifier())
         val parameters = ctx.sub_params()?.sub_param()?.map { subParam(it) } ?: emptyList()
         val returntypes = ctx.datatype().map { dataTypeFor(it)!! }
@@ -720,7 +756,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
             emptySet(),
             asmAddress = null,
             isAsmSubroutine = false,
-            inline = inline,
+            inline = false,
             statements = statements,
             position = ctx.toPosition()
         )

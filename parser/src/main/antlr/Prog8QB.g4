@@ -434,9 +434,9 @@ directivearg: stringliteral | identifier | integerliteral ;
 // VARIABLE DECLARATIONS
 // ============================================================================
 
-// DIM varname[size] AS TYPE [= value] [@tags] [AT address]
+// DIM varname[size] AS TYPE [@tags] [= value] [AT address]
 dimstmt:
-    DIM identifierlist (arrayindex | EMPTYARRAYSIG)? AS datatype (ASSIGN expression)? TAG* (AT expression)?
+    DIM identifierlist (arrayindex | EMPTYARRAYSIG)? AS datatype TAG* (ASSIGN expression)? (AT expression)?
     ;
 
 constdecl: CONST identifierlist AS datatype ASSIGN expression ;
@@ -595,12 +595,12 @@ inlineasm :  asmtype=(ASM | IR) EOL? INLINEASMBLOCK
 
 // SUB name(params) ... END SUB
 subroutine :
-    INLINE? SUB identifier LPAREN sub_params? RPAREN EOL? subroutine_body END SUB
+    SUB identifier LPAREN sub_params? RPAREN EOL? subroutine_body END SUB
     ;
 
 // FUNCTION name(params) AS returntype[, returntype] ... END FUNCTION
 functiondecl :
-    INLINE? FUNCTION identifier LPAREN sub_params? RPAREN AS datatype (COMMA datatype)* EOL? subroutine_body END FUNCTION
+    FUNCTION identifier LPAREN sub_params? RPAREN AS datatype (COMMA datatype)* EOL? subroutine_body END FUNCTION
     ;
 
 subroutine_body: (statement | EOL)* ;
@@ -638,9 +638,10 @@ asmsub_return :  datatype TAG identifier ;
 // ============================================================================
 
 // IF condition THEN ... [ELSEIF ... THEN ...] [ELSE ...] END IF
-// or single-line: IF condition THEN statement
+// or single-line: IF condition THEN statement (no else on same line - prevents dangling else ambiguity)
 if_stmt :
-    IF expression THEN? EOL? (statement | if_body) (elseif_part)* else_part? (END IF)?
+    IF expression THEN statement                                              // single-line if: no else, no end if
+    | IF expression THEN? EOL if_body (elseif_part)* else_part? END IF        // block if: requires END IF
     ;
 
 if_body: (statement | EOL)* ;
