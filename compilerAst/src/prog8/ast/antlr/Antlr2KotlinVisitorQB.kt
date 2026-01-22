@@ -673,7 +673,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     }
 
     override fun visitCharliteral(ctx: CharliteralContext): CharLiteral {
-        val text = ctx.SINGLECHAR().text
+        val text = ctx.CHARLITERAL().text
         val enc = ctx.encoding?.text
         val encoding =
             if(enc!=null)
@@ -681,7 +681,8 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
                     ?: throw SyntaxError("invalid encoding", ctx.toPosition())
             else
                 Encoding.DEFAULT
-        val raw = text.substring(1, text.length - 1)
+        // Remove surrounding quotes and the 'c' or 'C' suffix: "x"c -> x
+        val raw = text.substring(1, text.length - 2)
         try {
             return CharLiteral.fromEscaped(raw, encoding, ctx.toPosition())
         } catch(ex: IllegalArgumentException) {

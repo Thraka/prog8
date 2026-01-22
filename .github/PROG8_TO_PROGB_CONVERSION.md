@@ -33,8 +33,6 @@ This document provides systematic instructions for converting Prog8 source code 
    comment '/
 ```
 
-**Important exception:** Inside `ASM` blocks, use semicolon `;` for comments (standard assembly syntax), not apostrophe `'`. See section 17 for details.
-
 ---
 
 ## 2. Module-Level Directives
@@ -773,17 +771,6 @@ ASM {{
 }}
 ```
 
-**Note about comments in ASM blocks:**
-Inside `ASM` blocks, use the semicolon `;` for comments (standard assembly syntax). Do not use the apostrophe `'` for comments within assembly code, even though `'` is the standard comment syntax in ProgB outside of ASM blocks.
-
-**Example:**
-```basic
-ASM
-    lda #$42    ; This is a proper assembly comment
-    sta $d020   ; Not: ' this would be incorrect
-END ASM
-```
-
 ---
 
 ## 18. Defer
@@ -849,10 +836,16 @@ END DEFER
 | Decimal | `123` | `123` |
 | Boolean | `true` / `false` | `TRUE` / `FALSE` |
 | Float | `3.14` | `3.14` |
-| Character | `'A'` | `'A'` |
+| Character | `'A'` | `"A"c` |
 | String | `"hello"` | `"hello"` |
 | Screencode string | `sc:"text"` | `sc:"text"` |
 | Array | `[1,2,3]` | `[1,2,3]` |
+
+**Note on Character Literals:** ProgB uses the syntax `"."c` where `.` is a single character or escape sequence. Examples:
+- Space character: `" "c`
+- Letter: `"g"c`
+- Tab escape: `"\t"c`
+- Hex escape: `"\x41"c`
 
 ---
 

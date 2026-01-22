@@ -69,17 +69,13 @@ fragment DEC_DIGIT: [0-9] ;
 EOL :  ('\r'? '\n' | '\r' | '\n')+ ;
 WS :  [ \t] -> skip ;
 
-// Character literal - matches 'x' where x is a single character or escape sequence
-SINGLECHAR :
-    '\u0027' ( STRING_ESCAPE_SEQ | ~[\\\r\n\f\u0027] ) '\u0027'
-    ;
-
-// Comments - BASIC style using ' (apostrophe)
-// To avoid conflict with ' ' (space char literal), COMMENT requires that after ' + space/tab,
-// the next char is NOT a quote (which would make it a char literal)
+// Comments - BASIC style using ' (apostrophe) or REM
+// Single quote starts a comment that runs to end of line
+// Comment patterns:
+//   - ' followed by anything to end of line (handles: 'comment, ' comment, 'this is 'a' comment)
 LINECOMMENT : EOL [ \t]* '\'' ~[\r\n]* -> channel(HIDDEN);
-COMMENT :  '\'' [ \t] ~['\r\n] ~[\r\n]* -> channel(HIDDEN) ;   // ' + space/tab + NOT-quote + rest
-REM_COMMENT : R E M [ \t] ~[\r\n]* -> channel(HIDDEN) ;
+COMMENT : '\'' ~[\r\n]* -> channel(HIDDEN) ;
+REM_COMMENT : R E M ([ \t] ~[\r\n]*)? -> channel(HIDDEN) ;
 BLOCK_COMMENT : '/\'' ( BLOCK_COMMENT | ~'\'' | '\'' ~'/' )*? '\'/' -> skip ;
 
 // Multi-character operators (must come before single-character)
@@ -277,6 +273,13 @@ fragment FDOTNUMBER : DOT (DEC_DIGIT | '_')+ ;
 fragment FNUMDOTNUMBER : DEC_DIGIT (DEC_DIGIT | '_')* FDOTNUMBER ;
 
 fragment STRING_ESCAPE_SEQ :  '\\' [\u0021-\u007E] | '\\x' HEX_DIGIT HEX_DIGIT | '\\u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT;
+
+// Character literal must come BEFORE STRING_LIT to match first
+// Matches: " "c, "g"c, "\t"c, etc.
+CHARLITERAL :
+    '"' ( STRING_ESCAPE_SEQ | ~[\\\r\n\f"] ) '"' [cC]
+    ;
+
 STRING_LIT :
     '"' ( STRING_ESCAPE_SEQ | ~[\\\r\n\f"] )* '"'
     ;
@@ -572,7 +575,7 @@ arrayliteral :  EMPTYARRAYSIG | LBRACKET EOL? expression? (COMMA EOL? expression
 
 stringliteral : (encoding=UNICODEDNAME COLON)? STRING_LIT ;
 
-charliteral : (encoding=UNICODEDNAME COLON)? SINGLECHAR ;
+charliteral : (encoding=UNICODEDNAME COLON)? CHARLITERAL ;
 
 floatliteral :  FLOAT_NUMBER ;
 
@@ -581,8 +584,8 @@ literalvalue :
     integerliteral
     | booleanliteral
     | arrayliteral
-    | stringliteral
     | charliteral
+    | stringliteral
     | floatliteral
     ;
 
