@@ -811,7 +811,11 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
 
         // Build true part from if_body or single statement
         val trueStatements = mutableListOf<Statement>()
-        ctx.statement()?.let { trueStatements.add(it.accept(this) as Statement) }
+        val statements = ctx.statement()
+        if(statements.isNotEmpty()) {
+            // Single-line if: statement(0) is the THEN part
+            trueStatements.add(statements[0].accept(this) as Statement)
+        }
         ctx.if_body()?.let { body ->
             trueStatements.addAll(body.statement().map { it.accept(this) as Statement })
         }
@@ -856,6 +860,11 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
                 elseStatements.addAll(body.statement().map { it.accept(this) as Statement })
             }
             elsepart = AnonymousScope(elseStatements, elsePart.toPosition())
+        } else if(statements.size > 1) {
+            // Single-line if-else: statement(1) is the ELSE part
+            val elseStatements = mutableListOf<Statement>()
+            elseStatements.add(statements[1].accept(this) as Statement)
+            elsepart = AnonymousScope(elseStatements, ctx.toPosition())
         }
 
         return IfElse(condition, truepart, elsepart, ctx.toPosition())

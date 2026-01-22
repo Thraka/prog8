@@ -644,9 +644,9 @@ asmsub_return :  datatype TAG ;
 // ============================================================================
 
 // IF condition THEN ... [ELSEIF ... THEN ...] [ELSE ...] END IF
-// or single-line: IF condition THEN statement (no else on same line - prevents dangling else ambiguity)
+// or single-line: IF condition THEN statement [ELSE statement] (no END IF on single line)
 if_stmt :
-    IF expression THEN statement                                              // single-line if: no else, no end if
+    IF expression THEN statement (ELSE statement)?                            // single-line if-else: no END IF
     | IF expression THEN? EOL if_body (elseif_part)* else_part? END IF        // block if: requires END IF
     ;
 
