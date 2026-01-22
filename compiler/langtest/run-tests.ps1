@@ -32,9 +32,14 @@ Write-Host "Target: $Target" -ForegroundColor Cyan
 Write-Host ""
 
 # Paths
-$ProgbDir = Join-Path $PSScriptRoot "progb"
-$Prog8Dir = Join-Path $PSScriptRoot "prog8"
+$TargetDir = Join-Path $PSScriptRoot $Target
 $OutputDir = Join-Path $PSScriptRoot "output"
+
+# Verify target directory exists
+if (-not (Test-Path $TargetDir)) {
+    Write-Error "Target directory not found: $TargetDir"
+    exit 1
+}
 
 # Create output directory
 if (Test-Path $OutputDir) {
@@ -175,8 +180,8 @@ function Compare-AsmFiles {
 }
 
 # Get test files
-$progbFiles = Get-ChildItem -Path $ProgbDir -Filter "*.pb" -ErrorAction SilentlyContinue
-$prog8Files = Get-ChildItem -Path $Prog8Dir -Filter "*.p8" -ErrorAction SilentlyContinue
+$progbFiles = Get-ChildItem -Path $TargetDir -Filter "*.pb" -ErrorAction SilentlyContinue
+$prog8Files = Get-ChildItem -Path $TargetDir -Filter "*.p8" -ErrorAction SilentlyContinue
 
 # Filter to specific test if requested
 if ($TestName) {
@@ -184,18 +189,18 @@ if ($TestName) {
     $prog8Files = $prog8Files | Where-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.Name) -eq $TestName }
     
     if (-not $progbFiles -or $progbFiles.Count -eq 0) {
-        Write-Host "Test file not found: $ProgbDir\$TestName.pb" -ForegroundColor Red
+        Write-Host "Test file not found: $TargetDir\$TestName.pb" -ForegroundColor Red
         exit 1
     }
     if (-not $prog8Files -or $prog8Files.Count -eq 0) {
-        Write-Host "Test file not found: $Prog8Dir\$TestName.p8" -ForegroundColor Red
+        Write-Host "Test file not found: $TargetDir\$TestName.p8" -ForegroundColor Red
         exit 1
     }
 }
 
 if (-not $progbFiles -or $progbFiles.Count -eq 0) {
-    Write-Host "No .pb files found in $ProgbDir" -ForegroundColor Yellow
-    Write-Host "Add test files to the 'progb' and 'prog8' folders." -ForegroundColor Yellow
+    Write-Host "No .pb files found in $TargetDir" -ForegroundColor Yellow
+    Write-Host "Add test files to the target folder ($Target)." -ForegroundColor Yellow
     exit 0
 }
 
