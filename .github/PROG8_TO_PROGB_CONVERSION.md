@@ -357,6 +357,8 @@ IF condition THEN statement
 
 ### For Loops
 
+#### Range-Based For Loops
+
 | Prog8 | ProgB |
 |-------|-------|
 | `for i in 1 to 10 { }` | `FOR i = 1 TO 10 ... NEXT` |
@@ -376,6 +378,52 @@ FOR i = 0 TO 9
     txt.print_ub(i)
 NEXT
 ```
+
+#### Array Iteration For Loops
+
+Both Prog8 and ProgB support iterating over arrays using `IN`:
+
+| Prog8 | ProgB |
+|-------|-------|
+| `for i in [1, 2, 3] { }` | `FOR i IN [1, 2, 3] ... NEXT` |
+| `for i in arrayvar { }` | `FOR i IN arrayvar ... NEXT` |
+
+**Example with array literal:**
+```prog8
+for cx16.r0 in [321, 719, 194, 550, 187] {
+    txt.print_uw(cx16.r0)
+    txt.nl()
+}
+```
+→
+```basic
+FOR cx16.r0 IN [321, 719, 194, 550, 187]
+    txt.print_uw(cx16.r0)
+    txt.nl()
+NEXT
+```
+
+**Example with array variable:**
+```prog8
+uword[] values = [100, 200, 300, 400, 500]
+for cx16.r0 in values {
+    txt.print_uw(cx16.r0)
+}
+```
+→
+```basic
+DIM values[] AS UWORD = [100, 200, 300, 400, 500]
+FOR cx16.r0 IN values
+    txt.print_uw(cx16.r0)
+NEXT
+```
+
+**Key points:**
+- Use `IN` instead of `=` for array iteration loops
+- Works with array literals `[1, 2, 3]` or array variables
+- Works with any data type (bytes, words, etc.)
+- For literals, the array is stored in heap memory at compile time
+- This is useful for iterating over any array expression
 
 ### While Loops
 

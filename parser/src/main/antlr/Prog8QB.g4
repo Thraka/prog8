@@ -666,7 +666,8 @@ branchcondition: IF_CS | IF_CC | IF_EQ | IF_Z | IF_NE | IF_NZ | IF_PL | IF_POS |
 
 
 // FOR i = start TO end [STEP n] ... NEXT
-forloop :  FOR scoped_identifier ASSIGN expression (TO | DOWNTO) expression (STEP expression)? EOL? forloop_body NEXT ;
+// FOR i IN [val1, val2, val3] ... NEXT
+forloop :  FOR scoped_identifier (ASSIGN expression (TO | DOWNTO) expression (STEP expression)? | IN expression) EOL? forloop_body NEXT ;
 
 forloop_body: (statement | EOL)* ;
 

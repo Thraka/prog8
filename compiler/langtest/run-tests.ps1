@@ -7,6 +7,7 @@ param(
     [string]$TestName = "",          # Optional: specific test name to run (without extension)
     [switch]$KeepOutput,
     [switch]$KeepComments,           # Don't strip comments when comparing assembly
+    [switch]$SwapOrder,              # Compile Prog8 first instead of ProgB
     [switch]$Verbose
 )
 
@@ -79,6 +80,27 @@ function Strip-AsmComments {
     return ($result -join "`n")
 }
 
+# Copy any sibling files whose names are referenced in the source (case-insensitive)
+function Copy-IncludedFiles {
+    param(
+        [string]$SourceFile,
+        [string]$DestinationDir,
+        [string]$SourceContent
+    )
+
+    $sourceDir = Split-Path -Parent $SourceFile
+    $sourceName = [System.IO.Path]::GetFileName($SourceFile)
+
+    foreach ($file in Get-ChildItem -Path $sourceDir -File) {
+        if ($file.Name -ieq $sourceName) { continue }
+
+        $pattern = [regex]::Escape($file.Name)
+        if ($SourceContent -imatch $pattern) {
+            Copy-Item -Path $file.FullName -Destination (Join-Path $DestinationDir $file.Name) -Force
+        }
+    }
+}
+
 # Function to compile a file
 function Compile-File {
     param(
@@ -88,9 +110,12 @@ function Compile-File {
     
     $fileName = [System.IO.Path]::GetFileNameWithoutExtension($SourceFile)
     $workDir = Join-Path $OutputDir $OutputSubDir
+
+    $sourceContent = Get-Content -Path $SourceFile -Raw
     
     # Copy source to work directory
     Copy-Item $SourceFile -Destination $workDir
+    Copy-IncludedFiles -SourceFile $SourceFile -DestinationDir $workDir -SourceContent $sourceContent
     
     $sourceInWorkDir = Join-Path $workDir ([System.IO.Path]::GetFileName($SourceFile))
     
@@ -237,25 +262,43 @@ $errors = 0
 foreach ($pair in $testPairs) {
     Write-Host "Testing: $($pair.Name)" -ForegroundColor White
     
-    # Compile ProgB version
-    Write-Host "  Compiling ProgB..." -NoNewline
-    $progbAsm = Compile-File -SourceFile $pair.ProgB -OutputSubDir "progb"
-    if (-not $progbAsm) {
-        Write-Host " ERROR" -ForegroundColor Red
-        $errors++
-        continue
+    if ($SwapOrder) {
+        Write-Host "  Compiling Prog8..." -NoNewline
+        $prog8Asm = Compile-File -SourceFile $pair.Prog8 -OutputSubDir "prog8"
+        if (-not $prog8Asm) {
+            Write-Host " ERROR" -ForegroundColor Red
+            $errors++
+            continue
+        }
+        Write-Host " OK" -ForegroundColor Green
+
+        Write-Host "  Compiling ProgB..." -NoNewline
+        $progbAsm = Compile-File -SourceFile $pair.ProgB -OutputSubDir "progb"
+        if (-not $progbAsm) {
+            Write-Host " ERROR" -ForegroundColor Red
+            $errors++
+            continue
+        }
+        Write-Host " OK" -ForegroundColor Green
+    } else {
+        Write-Host "  Compiling ProgB..." -NoNewline
+        $progbAsm = Compile-File -SourceFile $pair.ProgB -OutputSubDir "progb"
+        if (-not $progbAsm) {
+            Write-Host " ERROR" -ForegroundColor Red
+            $errors++
+            continue
+        }
+        Write-Host " OK" -ForegroundColor Green
+        
+        Write-Host "  Compiling Prog8..." -NoNewline
+        $prog8Asm = Compile-File -SourceFile $pair.Prog8 -OutputSubDir "prog8"
+        if (-not $prog8Asm) {
+            Write-Host " ERROR" -ForegroundColor Red
+            $errors++
+            continue
+        }
+        Write-Host " OK" -ForegroundColor Green
     }
-    Write-Host " OK" -ForegroundColor Green
-    
-    # Compile Prog8 version
-    Write-Host "  Compiling Prog8..." -NoNewline
-    $prog8Asm = Compile-File -SourceFile $pair.Prog8 -OutputSubDir "prog8"
-    if (-not $prog8Asm) {
-        Write-Host " ERROR" -ForegroundColor Red
-        $errors++
-        continue
-    }
-    Write-Host " OK" -ForegroundColor Green
     
     # Compare assembly
     Write-Host "  Comparing assembly..." -NoNewline

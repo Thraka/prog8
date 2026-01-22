@@ -200,7 +200,7 @@ if condition {
 #### For Loop
 
 ```basic
-' ProgB
+' ProgB - Range-based loops
 FOR i = 1 TO 10
     statements
 NEXT
@@ -212,10 +212,19 @@ NEXT
 FOR i = 10 DOWNTO 1
     statements
 NEXT
+
+' ProgB - Array literal loops
+FOR cx16.r0 IN [321, 719, 194, 550, 187]
+    statements
+NEXT
+
+FOR value IN [10, 20, 30, 40, 50]
+    txt.print_ub(value)
+NEXT
 ```
 
 ```prog8
-; Prog8 equivalent
+; Prog8 equivalent - range-based
 for i in 1 to 10 {
     statements
 }
@@ -226,6 +235,15 @@ for i in 10 to 1 step -1 {
 
 for i in 10 downto 1 {
     statements
+}
+
+; Prog8 equivalent - array literal
+for cx16.r0 in [321, 719, 194, 550, 187] {
+    statements
+}
+
+for value in [10, 20, 30, 40, 50] {
+    txt.print_ub(value)
 }
 ```
 

@@ -892,15 +892,24 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
 
     override fun visitForloop(ctx: ForloopContext): ForLoop {
         val loopvar = ctx.scoped_identifier().accept(this) as IdentifierReference
-        val from = ctx.expression(0).accept(this) as Expression
-        val to = ctx.expression(1).accept(this) as Expression
-        val step = ctx.expression(2)?.accept(this) as Expression?
+        
+        // Check if this is a range-based loop (TO/DOWNTO) or an IN-based loop
+        val iterable = if (ctx.TO() != null || ctx.DOWNTO() != null) {
+            // Range-based: FOR i = start TO end [STEP n]
+            val from = ctx.expression(0).accept(this) as Expression
+            val to = ctx.expression(1).accept(this) as Expression
+            val step = ctx.expression(2)?.accept(this) as Expression?
 
-        val isDownto = ctx.DOWNTO() != null
-        val defaultStep = if(isDownto) -1 else 1
-        val actualStep = step ?: NumericLiteral.optimalInteger(defaultStep, ctx.toPosition())
+            val isDownto = ctx.DOWNTO() != null
+            val defaultStep = if(isDownto) -1 else 1
+            val actualStep = step ?: NumericLiteral.optimalInteger(defaultStep, ctx.toPosition())
 
-        val iterable = RangeExpression(from, to, actualStep, ctx.toPosition())
+            RangeExpression(from, to, actualStep, ctx.toPosition())
+        } else {
+            // IN-based: FOR i IN expression (array literal or any iterable)
+            ctx.expression(0).accept(this) as Expression
+        }
+
         val statements = ctx.forloop_body().statement().map { it.accept(this) as Statement }.toMutableList()
         val scope = AnonymousScope(statements, ctx.toPosition())
         return ForLoop(loopvar, iterable, scope, ctx.toPosition())
