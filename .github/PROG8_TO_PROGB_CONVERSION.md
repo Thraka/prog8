@@ -33,6 +33,8 @@ This document provides systematic instructions for converting Prog8 source code 
    comment '/
 ```
 
+**Important exception:** Inside `ASM` blocks, use semicolon `;` for comments (standard assembly syntax), not apostrophe `'`. See section 17 for details.
+
 ---
 
 ## 2. Module-Level Directives
@@ -550,9 +552,15 @@ END SELECT
 
 | Prog8 | ProgB |
 |-------|-------|
-| `==` | `=` |
+| `==` | `=` or `==` |
 | `!=` | `<>` |
 | `<` `>` `<=` `>=` | `<` `>` `<=` `>=` (unchanged) |
+
+**Note:** ProgB accepts both `=` and `==` for equality comparisons in expressions. Use whichever feels more natural:
+```basic
+IF a = 5 THEN      ' BASIC style
+IF a == 5 THEN     ' C/Prog8 style
+```
 
 ### Shift Operators
 
@@ -615,7 +623,60 @@ END IF
 
 ---
 
-## 13. Special Expressions
+## 13. Chained Assignments
+
+Both Prog8 and ProgB support chaining multiple assignments:
+
+| Prog8 | ProgB |
+|-------|-------|
+| `a = b = c = 0` | `a = b = c = 0` |
+| `x = y = 42` | `x = y = 42` |
+
+This sets all variables to the same value (rightmost value).
+
+### Assignment vs Comparison Disambiguation
+
+In ProgB, `=` is used for both assignment and equality comparison. The parser resolves this based on context:
+
+**Statements (assignment context):**
+```basic
+a = b = 0         ' Chained assignment: both a and b become 0
+a = b = c = 42    ' All three variables become 42
+```
+
+**Expressions (comparison context):**
+```basic
+IF a = 0 THEN     ' Comparison: checks if a equals 0
+IF a = b THEN     ' Comparison: checks if a equals b
+x = (a = b)       ' Assignment of comparison result (bool) to x
+```
+
+**Important:** When you want to assign the result of a comparison to a variable, use parentheses or `==`:
+```basic
+' These assign the boolean result of comparison to x:
+x = (a = 0)       ' x gets TRUE if a equals 0
+x = a == 0        ' Same - using == makes intent clearer
+```
+
+**Example showing the difference:**
+```prog8
+; Prog8
+a = b = 0         ; chained assignment
+x = a == 0        ; assign comparison result
+if a == 0 { }     ; comparison in condition
+```
+→
+```basic
+' ProgB
+a = b = 0         ' chained assignment - both become 0
+x = a == 0        ' assign comparison result (TRUE/FALSE) to x
+IF a = 0 THEN     ' comparison in condition
+END IF
+```
+
+---
+
+## 14. Special Expressions
 
 ### Typecast
 
@@ -654,7 +715,7 @@ END IF
 
 ---
 
-## 14. Function Calls
+## 15. Function Calls
 
 | Prog8 | ProgB |
 |-------|-------|
@@ -665,7 +726,7 @@ END IF
 
 ---
 
-## 15. Branch Conditions (CPU Flag Tests)
+## 16. Branch Conditions (CPU Flag Tests)
 
 | Prog8 | ProgB |
 |-------|-------|
@@ -680,7 +741,7 @@ END IF
 
 ---
 
-## 16. Inline Assembly
+## 17. Inline Assembly
 
 ```prog8
 %asm {{
@@ -712,9 +773,20 @@ ASM {{
 }}
 ```
 
+**Note about comments in ASM blocks:**
+Inside `ASM` blocks, use the semicolon `;` for comments (standard assembly syntax). Do not use the apostrophe `'` for comments within assembly code, even though `'` is the standard comment syntax in ProgB outside of ASM blocks.
+
+**Example:**
+```basic
+ASM
+    lda #$42    ; This is a proper assembly comment
+    sta $d020   ; Not: ' this would be incorrect
+END ASM
+```
+
 ---
 
-## 17. Defer
+## 18. Defer
 
 ```prog8
 defer cleanup()
@@ -732,7 +804,7 @@ END DEFER
 
 ---
 
-## 18. Alias
+## 19. Alias
 
 | Prog8 | ProgB |
 |-------|-------|
@@ -740,7 +812,7 @@ END DEFER
 
 ---
 
-## 19. Break and Continue
+## 20. Break and Continue
 
 | Prog8 | ProgB |
 |-------|-------|
@@ -749,7 +821,7 @@ END DEFER
 
 ---
 
-## 20. Return Statements
+## 21. Return Statements
 
 | Prog8 | ProgB |
 |-------|-------|
@@ -759,7 +831,7 @@ END DEFER
 
 ---
 
-## 21. Labels and Goto
+## 22. Labels and Goto
 
 | Prog8 | ProgB |
 |-------|-------|
@@ -768,7 +840,7 @@ END DEFER
 
 ---
 
-## 22. Literals (Mostly Unchanged)
+## 23. Literals (Mostly Unchanged)
 
 | Type | Prog8 | ProgB |
 |------|-------|-------|

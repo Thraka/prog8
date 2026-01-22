@@ -133,7 +133,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         "BITOR", "|" -> "|"
         "BITXOR", "^" -> "^"
         "<>" -> "!="
-        "=" -> "=="
+        "=", "==" -> "=="   // both = and == map to equality comparison in expressions
         else -> op.lowercase()
     }
 

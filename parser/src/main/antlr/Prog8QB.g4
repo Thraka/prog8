@@ -74,11 +74,11 @@ SINGLECHAR :
     '\u0027' ( STRING_ESCAPE_SEQ | ~[\\\r\n\f\u0027] ) '\u0027'
     ;
 
-// Comments - BASIC style
-// Comment must start with ' followed by space/tab, or ' followed by 2+ chars before any '
-// This prevents 'a' (char literal) from being matched as a comment
-LINECOMMENT : EOL [ \t]* COMMENT -> channel(HIDDEN);
-COMMENT :  '\'' ( [ \t] ~[\r\n]* | ~[' \t\r\n] ~['\r\n] ~[\r\n]* | ~[' \t\r\n]? ) -> channel(HIDDEN) ;
+// Comments - BASIC style using ' (apostrophe)
+// To avoid conflict with ' ' (space char literal), COMMENT requires that after ' + space/tab,
+// the next char is NOT a quote (which would make it a char literal)
+LINECOMMENT : EOL [ \t]* '\'' ~[\r\n]* -> channel(HIDDEN);
+COMMENT :  '\'' [ \t] ~['\r\n] ~[\r\n]* -> channel(HIDDEN) ;   // ' + space/tab + NOT-quote + rest
 REM_COMMENT : R E M [ \t] ~[\r\n]* -> channel(HIDDEN) ;
 BLOCK_COMMENT : '/\'' ( BLOCK_COMMENT | ~'\'' | '\'' ~'/' )*? '\'/' -> skip ;
 
@@ -105,6 +105,7 @@ ARROW: '->' ;
 NE: '<>' ;
 LE: '<=' ;
 GE: '>=' ;
+EQ: '==' ;
 
 // Single-character operators and punctuation
 LPAREN: '(' ;
@@ -325,12 +326,12 @@ statement :
     | ongoto
     | variabledeclaration
     | structdeclaration
+    | functioncall_stmt      // must come before assignment - func() is unambiguous, id = ... needs lookahead
     | assignment
     | augassignment
     | unconditionaljump
     | postincrdecr
     | incdecstmt
-    | functioncall_stmt
     | pokestmt
     | if_stmt
     | branch_stmt
@@ -453,7 +454,9 @@ arrayindex:  LBRACKET expression RBRACKET ;
 // ASSIGNMENTS
 // ============================================================================
 
-assignment :  (assign_target ASSIGN expression) | (assign_target ASSIGN assignment) | (multi_assign_target ASSIGN expression);
+// Order matters: try chained assignment first so 'a = b = 0' parses as chained assignment
+// rather than 'a = (b == 0)' comparison
+assignment :  (assign_target ASSIGN assignment) | (assign_target ASSIGN expression) | (multi_assign_target ASSIGN expression);
 
 augassignment :
     assign_target operator=(PLUSEQ | MINUSEQ | SLASHEQ | STAREQ | MODEQ | ANDEQ | OREQ | XOREQ | SHLEQ | SHREQ) expression
@@ -489,7 +492,7 @@ expression :
     | peekexpr
     | addressof_expr
     | functioncall
-    | left = expression EOL? bop = DOT EOL? right = expression
+    | left = expression EOL? bop = DOT EOL? right = expression          // scope traversal operator
     | <assoc=right> prefix = (PLUS|MINUS|TILDE|NOT|BITNOT) expression
     | left = expression EOL? bop = (STAR | SLASH | MOD ) EOL? right = expression
     | left = expression EOL? bop = (PLUS | MINUS ) EOL? right = expression
@@ -498,7 +501,7 @@ expression :
     | left = expression EOL? bop = (CARET | BITXOR) EOL? right = expression
     | left = expression EOL? bop = (PIPE | BITOR) EOL? right = expression
     | left = expression EOL? bop = (LT | GT | LE | GE) EOL? right = expression
-    | left = expression EOL? bop = (ASSIGN | NE) EOL? right = expression
+    | left = expression EOL? bop = (EQ | ASSIGN | NE) EOL? right = expression    // EQ (==) or ASSIGN (=) for equality, NE (<>) for not-equal
     | rangefrom = expression rto = (TO|DOWNTO) rangeto = expression (STEP rangestep = expression)?
     | left = expression EOL? bop = IN EOL? right = expression
     | left = expression EOL? NOT IN EOL? right = expression
