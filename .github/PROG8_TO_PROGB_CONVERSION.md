@@ -480,7 +480,7 @@ END SELECT
 
 ## 10. Operators
 
-### Logical/Bitwise Operators
+### Logical Operators
 
 | Prog8 | ProgB |
 |-------|-------|
@@ -488,6 +488,11 @@ END SELECT
 | `or` | `OR` |
 | `xor` | `XOR` |
 | `not` | `NOT` |
+
+### Bitwise Operators
+
+| Prog8 | ProgB |
+|-------|-------|
 | `~` | `BITNOT` or `~` |
 | `&` | `BITAND` or `&` |
 | `\|` | `BITOR` or `\|` |
