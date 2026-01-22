@@ -763,12 +763,12 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     }
 
     private fun subParam(pctx: Sub_paramContext): SubroutineParameter {
-        val name = getname(pctx.identifier(0))
+        val name = getname(pctx.identifier())
         var datatype = dataTypeFor(pctx.datatype()) ?: DataType.UNDEFINED
         if(pctx.EMPTYARRAYSIG()!=null || pctx.arrayindex()!=null)
             datatype = datatype.elementToArray()
 
-        val registerText = pctx.TAG()?.let { pctx.identifier(1)?.text }
+        val registerText = pctx.TAG()?.text?.substring(1)  // strip @ prefix from TAG token
         val (registerorpair, _) = if(registerText != null) parseParamRegister(registerText, pctx.toPosition()) else Pair(null, null)
 
         return SubroutineParameter(name, datatype, ZeropageWish.DONTCARE, registerorpair, pctx.toPosition())
@@ -922,7 +922,11 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
 
     override fun visitRepeatloop(ctx: RepeatloopContext): RepeatLoop {
         val iterations = ctx.expression()?.accept(this) as Expression?
-        val statements = ctx.repeatloop_body().statement().map { it.accept(this) as Statement }.toMutableList()
+        val statements = mutableListOf<Statement>()
+        ctx.statement()?.let { statements.add(it.accept(this) as Statement) }
+        ctx.repeatloop_body()?.let { body ->
+            statements.addAll(body.statement().map { it.accept(this) as Statement })
+        }
         return RepeatLoop(iterations, AnonymousScope(statements, ctx.toPosition()), ctx.toPosition())
     }
 
@@ -1105,17 +1109,17 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     }
 
     private fun asmSubroutineParam(pctx: Asmsub_paramContext): AsmSubroutineParameter {
-        val name = getname(pctx.identifier(0))
+        val name = getname(pctx.identifier())
         var datatype = dataTypeFor(pctx.datatype()) ?: DataType.UNDEFINED
         if(pctx.EMPTYARRAYSIG()!=null || pctx.arrayindex()!=null)
             datatype = datatype.elementToArray()
-        val registerText = pctx.identifier(1).text
+        val registerText = pctx.TAG().text.substring(1)  // strip @ prefix from TAG token
         val (registerorpair, statusregister) = parseParamRegister(registerText, pctx.toPosition())
         return AsmSubroutineParameter(name, datatype, registerorpair, statusregister, pctx.toPosition())
     }
 
     private fun asmReturn(rctx: Asmsub_returnContext): AsmSubroutineReturn {
-        val registerText = rctx.identifier().text
+        val registerText = rctx.TAG().text.substring(1)  // strip @ prefix from TAG token
         var registerorpair: RegisterOrPair? = null
         var statusregister: Statusflag? = null
         when (registerText.uppercase()) {

@@ -607,7 +607,7 @@ subroutine_body: (statement | EOL)* ;
 
 sub_params :  sub_param (COMMA EOL? sub_param)* ;
 
-sub_param: identifier (arrayindex | EMPTYARRAYSIG)? AS datatype (TAG identifier)? ;
+sub_param: identifier (arrayindex | EMPTYARRAYSIG)? AS datatype TAG? ;
 
 // ASMSUB name(params) [CLOBBERS(regs)] [AS returntype @reg] ... END ASMSUB
 asmsubroutine :
@@ -622,7 +622,7 @@ asmsub_decl : identifier LPAREN asmsub_params? RPAREN asmsub_clobbers? asmsub_re
 
 asmsub_params :  asmsub_param (COMMA EOL? asmsub_param)* ;
 
-asmsub_param :  identifier (arrayindex | EMPTYARRAYSIG)? AS datatype TAG identifier ;
+asmsub_param :  identifier (arrayindex | EMPTYARRAYSIG)? AS datatype TAG ;
 
 asmsub_clobbers : CLOBBERS LPAREN clobber? RPAREN ;
 
@@ -630,7 +630,7 @@ clobber :  identifier (COMMA identifier)* ;
 
 asmsub_returns :  AS asmsub_return (COMMA EOL? asmsub_return)* ;
 
-asmsub_return :  datatype TAG identifier ;
+asmsub_return :  datatype TAG ;
 
 
 // ============================================================================
@@ -681,7 +681,11 @@ untilloop:  DO EOL? doloop_body LOOP (UNTIL expression)? ;
 doloop_body: (statement | EOL)* ;
 
 // REPEAT [n] ... END REPEAT
-repeatloop:  REPEAT expression? EOL? repeatloop_body END REPEAT ;
+// or single-line: REPEAT [n] statement
+repeatloop:
+    REPEAT expression? statement                                              // single-line repeat
+    | REPEAT expression? EOL? repeatloop_body END REPEAT                      // block repeat: requires END REPEAT
+    ;
 
 repeatloop_body: (statement | EOL)* ;
 
