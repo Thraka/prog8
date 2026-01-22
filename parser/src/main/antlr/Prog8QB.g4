@@ -307,7 +307,7 @@ module_element:
 // MODULE name [AT $addr] ... END MODULE
 block: MODULE identifier (AT integerliteral)? EOL? block_body END MODULE;
 
-block_body: (block_statement | EOL)* ;
+block_body: (block_statement | EOL | COLON)* ;
 
 block_statement:
     directive
@@ -375,7 +375,7 @@ alias: ALIAS identifier ASSIGN scoped_identifier ;
 
 defer: DEFER (statement | statement_block) ;
 
-labeldef :  identifier COLON  ;
+labeldef :  identifier COLON EOL ;    // EOL required to disambiguate from : statement separator
 
 unconditionaljump :  GOTO expression ;
 
@@ -603,7 +603,7 @@ functiondecl :
     FUNCTION identifier LPAREN sub_params? RPAREN AS datatype (COMMA datatype)* EOL? subroutine_body END FUNCTION
     ;
 
-subroutine_body: (statement | EOL)* ;
+subroutine_body: (statement | EOL | COLON)* ;
 
 sub_params :  sub_param (COMMA EOL? sub_param)* ;
 
@@ -644,7 +644,7 @@ if_stmt :
     | IF expression THEN? EOL if_body (elseif_part)* else_part? END IF        // block if: requires END IF
     ;
 
-if_body: (statement | EOL)* ;
+if_body: (statement | EOL | COLON)* ;
 
 elseif_part: ELSEIF expression THEN? EOL? (statement | if_body) ;
 
@@ -669,17 +669,17 @@ branchcondition: IF_CS | IF_CC | IF_EQ | IF_Z | IF_NE | IF_NZ | IF_PL | IF_POS |
 // FOR i IN [val1, val2, val3] ... NEXT
 forloop :  FOR scoped_identifier (ASSIGN expression (TO | DOWNTO) expression (STEP expression)? | IN expression) EOL? forloop_body NEXT ;
 
-forloop_body: (statement | EOL)* ;
+forloop_body: (statement | EOL | COLON)* ;
 
 // WHILE condition ... WEND
 whileloop:  WHILE expression EOL? whileloop_body WEND ;
 
-whileloop_body: (statement | EOL)* ;
+whileloop_body: (statement | EOL | COLON)* ;
 
 // DO ... LOOP [UNTIL condition]  (without UNTIL = infinite loop)
 untilloop:  DO EOL? doloop_body LOOP (UNTIL expression)? ;
 
-doloop_body: (statement | EOL)* ;
+doloop_body: (statement | EOL | COLON)* ;
 
 // REPEAT [n] ... END REPEAT
 // or single-line: REPEAT [n] statement
@@ -688,19 +688,19 @@ repeatloop:
     | REPEAT expression? EOL? repeatloop_body END REPEAT                      // block repeat: requires END REPEAT
     ;
 
-repeatloop_body: (statement | EOL)* ;
+repeatloop_body: (statement | EOL | COLON)* ;
 
 // UNROLL n ... END UNROLL
 unrollloop:  UNROLL expression EOL? unrollloop_body END UNROLL ;
 
-unrollloop_body: (statement | EOL)* ;
+unrollloop_body: (statement | EOL | COLON)* ;
 
 // SELECT CASE expr ... CASE val ... CASE ELSE ... END SELECT
 whenstmt: SELECT CASE expression EOL? (when_choice | EOL)* END SELECT ;
 
 when_choice:  (CASE expression_list | CASE ELSE) EOL? when_body ;
 
-when_body: (statement | EOL)* ;
+when_body: (statement | EOL | COLON)* ;
 
 // ON expr GOTO/GOSUB label1, label2, ...
 ongoto: ON expression kind=(GOTO | GOSUB | CALL) identifierlist EOL? else_part? ;
@@ -712,6 +712,6 @@ staticstructinitializer: POINTER? scoped_identifier COLON arrayliteral ;
 // Block statement for branch_stmt and defer
 statement_block :
     EOL?
-        (statement | EOL) *
+        (statement | EOL | COLON) *
     END (IF | SUB | FUNCTION | ASMSUB | MODULE | FOR | WHILE | DO | REPEAT | UNROLL | SELECT | DEFER | ASM | IR | TYPE)?
     ;
