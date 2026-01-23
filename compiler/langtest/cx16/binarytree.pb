@@ -7,7 +7,7 @@ ZEROPAGE basicsafe
 
 MODULE main
     SUB start()
-        FOR cx16.r0 IN [321, 719, 194, 550, 187, 203, 520, 562, 221, 676, 97, 852, 273, 326, 589, 606, 275, 794, 63, 716] : btree.add(cx16.r0) : NEXT
+        FOR EACH cx16.r0 IN [321, 719, 194, 550, 187, 203, 520, 562, 221, 676, 97, 852, 273, 326, 589, 606, 275, 794, 63, 716] : btree.add(cx16.r0) : NEXT
 
         txt.print_ub(btree.size())
         txt.print(" sorted values: ")

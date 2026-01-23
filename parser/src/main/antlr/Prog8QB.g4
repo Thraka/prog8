@@ -178,6 +178,7 @@ ALIAS: A L I A S ;
 ELSEIF: E L S E I F ;
 ELSE: E L S E ;
 THEN: T H E N ;
+IIF: I I F ;
 IF: I F ;
 
 DOWNTO: D O W N T O ;
@@ -195,6 +196,7 @@ DO: D O ;
 
 REPEAT: R E P E A T ;
 UNROLL: U N R O L L ;
+EACH: E A C H ;
 
 DEFER: D E F E R ;
 
@@ -656,7 +658,7 @@ elseif_part: ELSEIF expression THEN? EOL? (statement | if_body) ;
 
 else_part :  ELSE EOL? (statement | if_body) ;
 
-if_expression :  IF expression THEN? EOL? expression EOL? ELSE EOL? expression ;
+if_expression :  IIF expression THEN? EOL? expression EOL? ELSE EOL? expression ;
 
 branchcondition_expression:  branchcondition THEN? expression EOL? ELSE EOL? expression ;
 
@@ -672,8 +674,8 @@ branchcondition: IF_CS | IF_CC | IF_EQ | IF_Z | IF_NE | IF_NZ | IF_PL | IF_POS |
 
 
 // FOR i = start TO end [STEP n] ... NEXT
-// FOR i IN [val1, val2, val3] ... NEXT
-forloop :  FOR scoped_identifier (ASSIGN expression (TO | DOWNTO) expression (STEP expression)? | IN expression) EOL? forloop_body NEXT ;
+// FOR EACH i IN [val1, val2, val3] ... NEXT
+forloop :  FOR (scoped_identifier ASSIGN expression (TO | DOWNTO) expression (STEP expression)? | EACH scoped_identifier IN expression) EOL? forloop_body NEXT ;
 
 forloop_body: (statement | EOL | COLON)* ;
 

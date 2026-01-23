@@ -59,10 +59,23 @@ MODULE main
             txt.nl()
         END IF
         
-        DIM test1 AS BOOL
-        DIM test2 AS BOOL = true
+        DIM test1 AS BOOL = true
+        DIM test2 AS BOOL = false
 
         test1 = (test2 = true)
+        ' Test 7: Test boolean assignment and comparison
+        IF NOT test1 THEN
+            test1 = FALSE
+            txt.print("boolean assign and compare works")
+            txt.nl()
+        END IF
+
+        test1 = IIF test2 THEN true ELSE false
+        ' Test 8: Test IIF assignment
+        IF NOT test1 THEN
+            txt.print("Checking IIF works")
+            txt.nl()
+        END IF
 
         txt.print("all tests passed!")
         txt.nl()

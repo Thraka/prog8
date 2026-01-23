@@ -59,10 +59,23 @@ main {
             txt.nl()
         }
         
-        bool test1
-        bool test2 = true
+        bool test1 = true
+        bool test2 = false
 
         test1 = (test2 == true)
+        ; Test 7: Test boolean assignment and comparison
+        if not test1 {
+            test1 = false
+            txt.print("boolean assign and compare works")
+            txt.nl()
+        }
+
+        test1 = if test2 true else false
+        ; Test 8: Test IIF assignment
+        if not test1 {
+            txt.print("Checking IIF works")
+            txt.nl()
+        }
 
         txt.print("all tests passed!")
         txt.nl()
