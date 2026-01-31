@@ -54,10 +54,38 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
             return FunctionCallExpression(sizeof, mutableListOf(arg), ctx.toPosition())
         }
 
-        // PEEK(address) expression
+        // PEEK(address) expression - basic byte peek becomes direct memory read
         if(ctx.peekexpr()!=null) {
             val address = ctx.peekexpr().expression().accept(this) as Expression
             return DirectMemoryRead(address, ctx.toPosition())
+        }
+
+        // PEEKW(address) - word peek
+        if(ctx.peekwexpr()!=null) {
+            val address = ctx.peekwexpr().expression().accept(this) as Expression
+            val func = IdentifierReference(listOf("peekw"), ctx.toPosition())
+            return FunctionCallExpression(func, mutableListOf(address), ctx.toPosition())
+        }
+
+        // PEEKL(address) - long peek
+        if(ctx.peeklexpr()!=null) {
+            val address = ctx.peeklexpr().expression().accept(this) as Expression
+            val func = IdentifierReference(listOf("peekl"), ctx.toPosition())
+            return FunctionCallExpression(func, mutableListOf(address), ctx.toPosition())
+        }
+
+        // PEEKBOOL(address) - bool peek
+        if(ctx.peekboolexpr()!=null) {
+            val address = ctx.peekboolexpr().expression().accept(this) as Expression
+            val func = IdentifierReference(listOf("peekbool"), ctx.toPosition())
+            return FunctionCallExpression(func, mutableListOf(address), ctx.toPosition())
+        }
+
+        // PEEKF(address) - float peek
+        if(ctx.peekfexpr()!=null) {
+            val address = ctx.peekfexpr().expression().accept(this) as Expression
+            val func = IdentifierReference(listOf("peekf"), ctx.toPosition())
+            return FunctionCallExpression(func, mutableListOf(address), ctx.toPosition())
         }
 
         // ADDRESSOF(var) or TYPEDADDR(var) expressions
@@ -507,6 +535,38 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         val value = ctx.expression(1).accept(this) as Expression
         val target = AssignTarget(null, null, DirectMemoryWrite(address, ctx.toPosition()), null, false, position=ctx.toPosition())
         return Assignment(target, value, AssignmentOrigin.USERCODE, ctx.toPosition())
+    }
+
+    // POKEW address, value - word poke
+    override fun visitPokewstmt(ctx: PokewstmtContext): FunctionCallStatement {
+        val address = ctx.expression(0).accept(this) as Expression
+        val value = ctx.expression(1).accept(this) as Expression
+        val func = IdentifierReference(listOf("pokew"), ctx.toPosition())
+        return FunctionCallStatement(func, mutableListOf(address, value), true, ctx.toPosition())
+    }
+
+    // POKEL address, value - long poke
+    override fun visitPokelstmt(ctx: PokelstmtContext): FunctionCallStatement {
+        val address = ctx.expression(0).accept(this) as Expression
+        val value = ctx.expression(1).accept(this) as Expression
+        val func = IdentifierReference(listOf("pokel"), ctx.toPosition())
+        return FunctionCallStatement(func, mutableListOf(address, value), true, ctx.toPosition())
+    }
+
+    // POKEBOOL address, value - bool poke
+    override fun visitPokeboolstmt(ctx: PokeboolstmtContext): FunctionCallStatement {
+        val address = ctx.expression(0).accept(this) as Expression
+        val value = ctx.expression(1).accept(this) as Expression
+        val func = IdentifierReference(listOf("pokebool"), ctx.toPosition())
+        return FunctionCallStatement(func, mutableListOf(address, value), true, ctx.toPosition())
+    }
+
+    // POKEF address, value - float poke
+    override fun visitPokefstmt(ctx: PokefstmtContext): FunctionCallStatement {
+        val address = ctx.expression(0).accept(this) as Expression
+        val value = ctx.expression(1).accept(this) as Expression
+        val func = IdentifierReference(listOf("pokef"), ctx.toPosition())
+        return FunctionCallStatement(func, mutableListOf(address, value), true, ctx.toPosition())
     }
 
     // ============================================================================
@@ -1071,6 +1131,10 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     override fun visitWhen_body(ctx: When_bodyContext) = throw FatalAstException("should not be called")
     override fun visitStatement_block(ctx: Statement_blockContext) = throw FatalAstException("should not be called")
     override fun visitPeekexpr(ctx: PeekexprContext) = throw FatalAstException("should not be called")
+    override fun visitPeekwexpr(ctx: PeekwexprContext) = throw FatalAstException("should not be called")
+    override fun visitPeeklexpr(ctx: PeeklexprContext) = throw FatalAstException("should not be called")
+    override fun visitPeekboolexpr(ctx: PeekboolexprContext) = throw FatalAstException("should not be called")
+    override fun visitPeekfexpr(ctx: PeekfexprContext) = throw FatalAstException("should not be called")
     override fun visitAddressof_expr(ctx: Addressof_exprContext) = throw FatalAstException("should not be called")
 
     // ============================================================================

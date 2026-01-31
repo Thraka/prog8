@@ -4,6 +4,7 @@
 ' 3. Equality comparison with = and ==
 
 IMPORT textio
+OPTION enable_floats
 
 MODULE main
     SUB start()
@@ -59,10 +60,10 @@ MODULE main
             txt.nl()
         END IF
         
-        DIM test1 AS BOOL = true
-        DIM test2 AS BOOL = false
+        DIM test1 AS BOOL = TRUE
+        DIM test2 AS BOOL = FALSE
 
-        test1 = (test2 = true)
+        test1 = (test2 = TRUE)
         ' Test 7: Test boolean assignment and comparison
         IF NOT test1 THEN
             test1 = FALSE
@@ -70,7 +71,7 @@ MODULE main
             txt.nl()
         END IF
 
-        test1 = IIF test2 THEN true ELSE false
+        test1 = IIF test2 THEN TRUE ELSE FALSE
         ' Test 8: Test IIF assignment
         IF NOT test1 THEN
             txt.print("Checking IIF works")
@@ -79,5 +80,18 @@ MODULE main
 
         txt.print("all tests passed!")
         txt.nl()
+
+        ' Expressions (read from memory)
+        DIM w AS UWORD = PEEKW($1000)     ' read word from address
+        DIM l AS LONG = PEEKL($2000)      ' read long from address
+        DIM bo AS BOOL = PEEKBOOL($3000)   ' read bool from address
+        DIM f AS FLOAT = PEEKF($4000)     ' read float from address
+
+        ' Statements (write to memory)
+        POKEW $1000, w                    ' write word to address
+        POKEL $2000, l                    ' write long to address
+        POKEBOOL $3000, bo                 ' write bool to address
+        'POKEF $4000, f   
+
     END SUB
 END MODULE

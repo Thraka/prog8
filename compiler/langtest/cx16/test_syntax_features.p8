@@ -4,6 +4,8 @@
 ; 3. Equality comparison with = and ==
 
 %import textio
+%option enable_floats
+
 
 main {
     sub start() {
@@ -79,5 +81,17 @@ main {
 
         txt.print("all tests passed!")
         txt.nl()
+
+        ; Expressions (read from memory)
+        uword w = peekw($1000)     ; read word from address
+        long l = peekl($2000)      ; read long from address
+        bool bo = peekbool($3000)   ; read bool from address
+        float f = peekf($4000)     ; read float from address
+
+        ; Statements (write to memory)
+        pokew($1000, w)                    ; write word to address
+        pokel($2000, l)                    ; write long to address
+        pokebool($3000, bo)                 ; write bool to address
+        ;pokef($4000, f)   
     }
 }

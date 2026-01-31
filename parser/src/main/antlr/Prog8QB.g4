@@ -247,7 +247,16 @@ FALSE: F A L S E ;
 TRUE: T R U E ;
 
 // BASIC memory operations
+// Longer keywords must come BEFORE shorter ones (PEEKW before PEEK, etc.)
 SIZEOF: S I Z E O F ;
+PEEKBOOL: P E E K B O O L ;
+POKEBOOL: P O K E B O O L ;
+PEEKW: P E E K W ;
+POKEW: P O K E W ;
+PEEKL: P E E K L ;
+POKEL: P O K E L ;
+PEEKF: P E E K F ;
+POKEF: P O K E F ;
 PEEK: P E E K ;
 POKE: P O K E ;
 
@@ -338,6 +347,10 @@ statement :
     | postincrdecr
     | incdecstmt
     | pokestmt
+    | pokewstmt
+    | pokelstmt
+    | pokeboolstmt
+    | pokefstmt
     | if_stmt
     | branch_stmt
     | subroutinedeclaration
@@ -495,6 +508,10 @@ expression :
     LPAREN expression RPAREN
     | sizeof_expression = SIZEOF LPAREN sizeof_argument RPAREN
     | peekexpr
+    | peekwexpr
+    | peeklexpr
+    | peekboolexpr
+    | peekfexpr
     | addressof_expr
     | functioncall
     | left = expression EOL? bop = DOT EOL? right = expression          // scope traversal operator
@@ -528,8 +545,18 @@ expression :
 
 sizeof_argument: basedatatype | expression | pointertype ;
 
-// PEEK(address)
+// PEEK(address) and typed variants
 peekexpr: PEEK LPAREN expression RPAREN ;
+peekwexpr: PEEKW LPAREN expression RPAREN ;
+peeklexpr: PEEKL LPAREN expression RPAREN ;
+peekboolexpr: PEEKBOOL LPAREN expression RPAREN ;
+peekfexpr: PEEKF LPAREN expression RPAREN ;
+
+// POKE address, value - typed variants: POKEW address, value
+pokewstmt: POKEW expression COMMA expression ;
+pokelstmt: POKEL expression COMMA expression ;
+pokeboolstmt: POKEBOOL expression COMMA expression ;
+pokefstmt: POKEF expression COMMA expression ;
 
 // ADDRESSOF(var) or TYPEDADDR(var)
 addressof_expr: (ADDRESSOF_KW | TYPEDADDR_KW) LPAREN scoped_identifier arrayindex? RPAREN ;
