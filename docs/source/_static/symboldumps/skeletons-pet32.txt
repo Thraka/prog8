@@ -177,8 +177,20 @@ diskio  {
     const ubyte  WRITE_IO_CHANNEL 
     ubyte @shared  drivenumber 
     str  list_filename 
+    delete  (str filenameptr) 
+    directory  () -> bool 
+    diskname  () -> str 
+    exists  (str filename) -> bool 
+    get_loadaddress  (str filename) -> uword 
+    list_filenames  (str pattern_ptr, uword filenames_buffer, uword filenames_buf_size) -> ubyte 
+    load  (str filenameptr, uword address_override) -> uword 
+    load_raw  (str filenameptr, uword start_address) -> uword 
+    rename  (str oldfileptr, str newfileptr) 
     reset_read_channel  () 
     reset_write_channel  () 
+    save  (str filenameptr, uword startaddress, uword savesize) -> bool 
+    save_raw  (str filenameptr, uword startaddress, uword savesize) -> bool 
+    send_command  (str commandptr) 
     status  () -> str 
     status_code  () -> ubyte 
 }
@@ -212,6 +224,8 @@ floats  {
     FMULTT  ()  clobbers (A,X,Y)  = $cb61
     FOUT  ()  clobbers (X) -> uword @AY  = $cf93
     FPWRT  ()  clobbers (A,X,Y)  = $d112
+    FREADSA  (byte value @A)  clobbers (A,X,Y) 
+    FREADUY  (ubyte value @Y)  clobbers (A,X,Y) 
     FSUB  (uword mflpt @AY)  clobbers (A,X,Y)  = $c986
     FSUBT  ()  clobbers (A,X,Y)  = $c989
     GETADR  ()  clobbers (X) -> ubyte @Y, ubyte @A  = $c92d
@@ -293,6 +307,7 @@ math  {
     direction  (ubyte x1, ubyte y1, ubyte x2, ubyte y2) -> ubyte 
     direction_qd  (ubyte quadrant @A, ubyte xdelta @X, ubyte ydelta @Y) -> ubyte @A 
     direction_sc  (byte x1, byte y1, byte x2, byte y2) -> ubyte 
+    gcd  (uword a, uword b) -> uword 
     interpolate  (ubyte v, ubyte inputMin, ubyte inputMax, ubyte outputMin, ubyte outputMax) -> ubyte 
     interpolatef   alias for: floats.interpolate
     lerp  (ubyte v0, ubyte v1, ubyte t) -> ubyte 
@@ -317,6 +332,16 @@ math  {
     sin8u  (ubyte angle @A)  clobbers (Y) -> ubyte @A 
     sinr8  (ubyte radians @A)  clobbers (Y) -> byte @A 
     sinr8u  (ubyte radians @A)  clobbers (Y) -> ubyte @A 
+}
+
+
+LIBRARY MODULE NAME: petgfx
+---------------------------
+
+petgfx  {
+    hline  (ubyte x, ubyte y, ubyte length) 
+    plot  (ubyte x, ubyte y) 
+    vline  (ubyte x, ubyte y, ubyte length) 
 }
 
 
@@ -382,6 +407,7 @@ LIBRARY MODULE NAME: strings
 ----------------------------
 
 strings  {
+    ^^ubyte  last_token_source 
     append  (str target @R0, str suffix @R1)  clobbers (Y) -> ubyte @A 
     compare  (str string1 @R0, str string2 @AY)  clobbers (Y) -> byte @A 
     compare_nocase  (str string1 @R0, str string2 @AY)  clobbers (Y) -> byte @A 
@@ -411,6 +437,7 @@ strings  {
     ltrimmed  (str s) -> str 
     nappend  (str target @R0, str suffix @R1, ubyte maxlength @X)  clobbers (Y) -> ubyte @A 
     ncopy  (str source @R0, str target @AY, ubyte maxlength @X)  clobbers (A,X) -> ubyte @Y 
+    next_token  (str source, str delimiters) -> str 
     pattern_match  (str string @AY, str pattern @R0)  clobbers (Y) -> bool @A 
     pattern_match_nocase  (str string @AY, str lowercase_pattern @R0, bool iso @Pc)  clobbers (Y) -> bool @A 
     rfind  (str string @AY, ubyte character @X) -> ubyte @A, bool @Pc 
@@ -418,6 +445,7 @@ strings  {
     rstrip  (str s) 
     rtrim  (str s) 
     slice  (str source @R0, ubyte start @A, ubyte length @Y, str target @R1)  clobbers (A,Y) 
+    split  (str s, ^^uword parts, ubyte maxparts) -> ubyte 
     startswith  (str st, str prefix) -> bool 
     strip  (str s) 
     trim  (str s) 
@@ -741,7 +769,11 @@ txt  {
     clear_screencolors  (ubyte color) 
     cls  () 
     color  (ubyte txtcol) 
+    column  (ubyte col @A) 
     fill_screen  (ubyte character @A, ubyte color @Y)  clobbers (A) 
+    get_column  () -> ubyte @A 
+    get_cursor  () -> ubyte @X, ubyte @Y 
+    get_row  () -> ubyte @A 
     getchr  (ubyte col @A, ubyte row @Y)  clobbers (Y) -> ubyte @A 
     getclr  (ubyte col @A, ubyte row @Y) -> ubyte @A 
     height  ()  clobbers (X,Y) -> ubyte @A 
@@ -769,6 +801,7 @@ txt  {
     print_uwbin  (uword value @AY, bool prefix @Pc)  clobbers (A,X,Y) 
     print_uwhex  (uword value @AY, bool prefix @Pc)  clobbers (A,X,Y) 
     print_w  (word value @AY)  clobbers (A,X,Y) 
+    row  (ubyte rownum @A) 
     rvs_off  () 
     rvs_on  () 
     scroll_down  ()  clobbers (A,X) 

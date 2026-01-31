@@ -4,14 +4,18 @@ TODO
 Weird Heisenbug
 ^^^^^^^^^^^^^^^
 - BUG: examples/cube3d-float crashes with div by zero error on C64 (works on cx16. ALready broken in v11, v10 still worked)
-  caused by the RTS after JMP removal in optimizeJsrRtsAndOtherCombinations (replacing it with a NOP makes the problem disappear !??!?)
+  caused by the RTS after JMP removal in optimizeJsrRtsAndOtherCombinations (replacing it with a NOP makes the problem disappear !??!?).
+  Also observed in the boingball example for the C64 when some code was removed from the start and end.
 
 
 Future Things and Ideas
 ^^^^^^^^^^^^^^^^^^^^^^^
 - make builtin functions capable of returning multiple values, then make divmod() return the 2 results rather than accepting 2 extra variables as arguments
 - then also introduce lmh(longvalue) -or whatever sensible name- builtin function that returns the low, mid, hi (bank) bytes of a long.
+- and rewrite the divmod (and others?) function to just return the 2 results instead of taking target variables as arguments.
+- allow alias to blocks?
 - add a -profile option (for now X16 only) that instruments the start (and returns?) -of every prog8 subroutine with code that dumps to the X16 emulator debug console: name of sub, stack pointer (for call depth!), emudbg cycle count. Save/restore all used registers!  Start of program must set cycle count to zero.
+- add @private to variables and subroutines declared in a scope to make them invisible from outside that scope?
 - when implementing unsigned longs: remove the (multiple) "TODO "hack" to allow unsigned long constants to be used as values for signed longs, without needing a cast"
 - structs: properly fix the symbol name prefix hack in StStruct.sameas(), see github issue 198
 - struct/ptr: support const pointers (simple and struct types) (make sure to change codegen properly in all cases, change remark about this limitation in docs too)
@@ -36,6 +40,7 @@ Future Things and Ideas
 - improve ANTLR grammar with better error handling (as suggested by Qwen AI)
 - add documentation for more library modules instead of just linking to the source code
 - add an Index to the documentation
+- can we just use index numbers instead of object hashes for struct instance labels (and other places?)  see labelnameForStructInstance
 - sizeof(pointer) is now always 2 (an uword), make this a variable in the ICompilationTarget so that it could be 4 at the time we might ad a 32-bits 68000 target for example. Much code assumes word size addresses though.
 - Two- or even multidimensional arrays and chained indexing, purely as syntactic sugar over regular arrays?
 - when a complete block is removed because unused, suppress all info messages about everything in the block being removed
@@ -43,6 +48,7 @@ Future Things and Ideas
 - romable: should we have a way to explicitly set the memory address for the BSS area (add a -varsaddress and -slabsaddress options?)
 - romable: fix remaining codegens (some for loops, see ForLoopsAsmGen)
 - Kotlin: can we use inline value classes in certain spots? (domain types instead of primitives)
+- Kotlin: can private setters / backing fields be used? (internal mutableList, external List)
 - add float support to the configurable compiler targets. Restrictions: just have "cbm-style floats" as an option (to that it can slot into the current float codegen), where all you have to specify is the addresses of AYINT and GIVAYF and FADDT and all their friends.
 - Improve the SublimeText syntax file for prog8, you can also install this for 'bat': https://github.com/sharkdp/bat?tab=readme-ov-file#adding-new-syntaxes--language-definitions
 - Change scoping rules for qualified symbols so that they don't always start from the root but behave like other programming languages (look in local scope first), maybe only when qualified symbol starts with '.' such as: .local.value = 33
@@ -66,6 +72,7 @@ IR/VM
 -----
 - getting it in shape for code generation: the IR file should be able to encode every detail about a prog8 program (the VM doesn't have to actually be able to run all of it though!)
 - encode asmsub/extsub clobber info in the call, or maybe include these definitions in the p8ir file itself too.  (return registers are already encoded in the CALL instruction)
+- SWAP opcode needs more addressing modes to avoid code bloat? for instance to swap 2 array elements by index
 - extend the index register datatype in the LOADX, STOREX, STOREZX instructions from byte to word (0-255 to 0-65535) (this not compatible with 8 bit 6502, but the 68000 can use that , well, up to 32767)
 - or just get rid of LOADX/STOREX/STOREZX, just use add + loadi / storei (because we have to translate that sequence anyway)?
 - if instruction has both integer and float registers, the sequence of the registers is sometimes weird in the .p8ir file (float regs always at the end even when otherwise the target -integer- register is the first one in the list, for example.)
@@ -105,10 +112,7 @@ IR/VM
 Libraries
 ---------
 - Add split-word array sorting routines to sorting module?
-- pet32: make syslib more complete (missing kernal routines)?
-- pet32: still missing floats.FREADSA and floats.GIVUAYFAY (and some others)
-- need help with: PET disk routines (OPEN, SETLFS etc are not exposed as kernal calls)
-
+- make a list of all floats.* routines that the compiler expects for full float support?
 
 Optimizations
 -------------
@@ -119,7 +123,6 @@ Optimizations
 - Compilation speed regression: test/comparisons/test_word_lte.p8 compilation takes almost twice as long as with prog8 11.4 and 10.5 is even faster. Largest slowdown in "ast optimizing" pass.
 - Compilation speed: try to join multiple modifications in 1 result in the AST processors instead of returning it straight away every time
 - Optimize the IfExpression code generation to be more like regular if-else code.  (both 6502 and IR) search for "TODO don't store condition as expression" ... but maybe postpone until codegen from IR, where it seems solved?
-- optimize floats.cast_from_long and floats.cast_as_long by directly accessing FAC bits?
 - VariableAllocator: can we think of a smarter strategy for allocating variables into zeropage, rather than first-come-first-served?
   for instance, vars used inside loops first, then loopvars, then uwords used as pointers (or these first??), then the rest
   This will probably need the register categorization from the IR explained there, for the old 6502 codegen there is not enough information to act on

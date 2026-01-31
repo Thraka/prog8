@@ -2630,4 +2630,63 @@ main {
         compileText(VMTarget(), false, src, outputDir, writeAssembly = true) shouldNotBe null
         compileText(C64Target(), false, src, outputDir, writeAssembly = true) shouldNotBe null
     }
+
+    test("struct instances expression give proper error for now") {
+        val src="""
+main {
+    struct Struct {
+        ubyte field
+    }
+    sub start() {
+        void function()
+    }
+
+    sub function() -> uword {
+        ^^Struct temp
+        return temp^^ as uword
+    }
+}"""
+
+        val errors=ErrorReporterForTests(keepMessagesAfterReporting = true)
+        compileText(VMTarget(), false, src, outputDir, errors=errors) shouldBe null
+        errors.errors.size shouldBe 1
+        errors.errors[0] shouldContain "struct instances"
+    }
+
+    test("avoiding invalid pointer arithmetic in joining expressions") {
+        val src="""
+main {
+    sub start() {
+        ^^Mblock mb = 4000
+
+        uword @shared temp
+        temp = mb
+        temp += 64
+
+        cx16.r0 = mb
+        temp = cx16.r0
+        temp += 64
+    }
+
+    struct Mblock {
+        uword size
+        bool free
+    }
+}"""
+        val result = compileText(VMTarget(), false, src, outputDir, writeAssembly = false)
+        val st = result!!.compilerAst.entrypoint.statements
+        st.size shouldBe 7
+        val a1 = st[3] as Assignment
+        a1.target.identifier!!.nameInSource shouldBe listOf("temp")
+        val v1 = a1.value as BinaryExpression
+        v1.operator shouldBe "+"
+        (v1.left as TypecastExpression).type shouldBe DataType.UWORD
+        v1.right shouldBe instanceOf<NumericLiteral>()
+        val a2 = st[5] as Assignment
+        a2.target.identifier!!.nameInSource shouldBe listOf("temp")
+        val v2 = a2.value as BinaryExpression
+        v2.operator shouldBe "+"
+        v2.left shouldBe instanceOf<IdentifierReference>()
+        v2.right shouldBe instanceOf<NumericLiteral>()
+    }
 })

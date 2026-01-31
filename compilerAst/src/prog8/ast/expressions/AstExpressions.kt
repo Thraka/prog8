@@ -198,7 +198,7 @@ class BinaryExpression(
                     InferredTypes.unknown()
                 else if(operator=="-" && leftDt.isNumeric && rightDt.isPointer) {
                     // x - pointer  is not pointer arithmetic like pointer-x or pointer+x, it's invalid, but return untyped pointer uword here
-                    return InferredTypes.knownFor(BaseDataType.UWORD)
+                    InferredTypes.knownFor(BaseDataType.UWORD)
                 }
                 else {
                     try {
@@ -322,7 +322,7 @@ class BinaryExpression(
 
             return when (leftDt.base) {
                 BaseDataType.BOOL -> {
-                    return if(rightDt.isBool)
+                    if(rightDt.isBool)
                         Pair(DataType.BOOL, null)
                     else
                         Pair(DataType.BOOL, right)
@@ -512,7 +512,7 @@ class TypecastExpression(var expression: Expression, var type: DataType, val imp
         return if(cast.isValid) {
             val newval = cast.valueOrZero()
             newval.linkParents(parent)
-            return newval
+            newval
         }
         else
             null
@@ -1037,7 +1037,9 @@ class CharLiteral private constructor(val value: Char,
     override fun copy() =
         CharLiteral(value, encoding, position)
     override fun referencesIdentifier(nameInSource: List<String>) = false
-    override fun constValue(program: Program): NumericLiteral {
+    override fun constValue(program: Program): NumericLiteral? {
+        if(encoding== Encoding.DEFAULT) // will be determined at a later stage, hopefully
+            return null
         val bytevalue = program.encoding.encodeString(value.toString(), encoding).single()
         return NumericLiteral(BaseDataType.UBYTE, bytevalue.toDouble(), position)
     }
@@ -1611,6 +1613,8 @@ class ContainmentCheck(var element: Expression,
                 is StringLiteral -> {
                     if(elementConst.type.isByte) {
                         val stringval = iterable as StringLiteral
+                        if(stringval.encoding== Encoding.DEFAULT)   // will be set at a later stage, hopefully
+                            return null
                         val exists = program.encoding.encodeString(stringval.value, stringval.encoding).contains(elementConst.number.toInt().toUByte() )
                         return NumericLiteral.fromBoolean(exists, position)
                     }
