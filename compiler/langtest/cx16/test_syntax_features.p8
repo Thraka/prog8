@@ -13,7 +13,7 @@ main {
         ubyte a
         ubyte b
         ubyte c
-        a = 1
+        a = ' '
         b = 2
         c = 3
         txt.print("colon separator: ")
@@ -57,10 +57,16 @@ main {
         ; Test 6: Combined - chained assign then compare
         a = b = 0
         if a == 0 and b == 0 {
-            txt.print("chained to 0, both equal 0")
+            txt.print(iso:"chained to 0, both equal 0")
             txt.nl()
         }
         
+        ubyte index = 3
+        str name = "this is a test"
+
+        name[index] = name[1]
+        txt.print(name)
+
         bool test1 = true
         bool test2 = false
 

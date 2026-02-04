@@ -12,7 +12,7 @@ MODULE main
         DIM a AS UBYTE
         DIM b AS UBYTE
         DIM c AS UBYTE
-        a = 1
+        a = " "c
         b = 2
         c = 3
         txt.print("colon separator: ")
@@ -56,10 +56,16 @@ MODULE main
         ' Test 6: Combined - chained assign then compare
         a = b = 0
         IF a = 0 AND b = 0 THEN
-            txt.print("chained to 0, both equal 0")
+            txt.print(iso:"chained to 0, both equal 0")
             txt.nl()
         END IF
         
+        DIM index AS UBYTE = 3
+        DIM name AS STRING = "this is a test"
+
+        name[index] = name[1]
+        txt.print(name)
+
         DIM test1 AS BOOL = TRUE
         DIM test2 AS BOOL = FALSE
 
