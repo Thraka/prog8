@@ -687,7 +687,7 @@ else_part :  ELSE EOL? (statement | if_body) ;
 
 if_expression :  IIF expression THEN? EOL? expression EOL? ELSE EOL? expression ;
 
-branchcondition_expression:  branchcondition THEN? expression EOL? ELSE EOL? expression ;
+branchcondition_expression:  branchcondition THEN expression EOL? ELSE EOL? expression END IF;
 
 pointerdereference:  (prefix = scoped_identifier DOT)? derefchain (DOT field = identifier)? ;
 
@@ -695,7 +695,7 @@ derefchain :  singlederef (DOT singlederef)* ;
 
 singlederef : identifier arrayindex? POINTER ;
 
-branch_stmt : branchcondition EOL? (statement | statement_block) EOL? else_part? ;
+branch_stmt : branchcondition THEN EOL? (statement | statement_block) EOL? else_part? END IF ;
 
 branchcondition: IF_CS | IF_CC | IF_EQ | IF_Z | IF_NE | IF_NZ | IF_PL | IF_POS | IF_MI | IF_NEG | IF_VS | IF_VC ;
 

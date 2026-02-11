@@ -769,14 +769,14 @@ POKEF addr, 3.14                      ' write float
 
 | Prog8 | ProgB |
 |-------|-------|
-| `if_cs { }` | `IF_CS ... END IF` |
-| `if_cc { }` | `IF_CC ... END IF` |
-| `if_eq { }` / `if_z { }` | `IF_EQ ... END IF` |
-| `if_ne { }` / `if_nz { }` | `IF_NE ... END IF` |
-| `if_pl { }` / `if_pos { }` | `IF_PL ... END IF` |
-| `if_mi { }` / `if_neg { }` | `IF_MI ... END IF` |
-| `if_vs { }` | `IF_VS ... END IF` |
-| `if_vc { }` | `IF_VC ... END IF` |
+| `if_cs { }` | `IF_CS THEN ... END IF` |
+| `if_cc { }` | `IF_CC THEN ... END IF` |
+| `if_eq { }` / `if_z { }` | `IF_EQ THEN ... END IF` |
+| `if_ne { }` / `if_nz { }` | `IF_NE THEN ... END IF` |
+| `if_pl { }` / `if_pos { }` | `IF_PL THEN ... END IF` |
+| `if_mi { }` / `if_neg { }` | `IF_MI THEN ... END IF` |
+| `if_vs { }` | `IF_VS THEN ... END IF` |
+| `if_vc { }` | `IF_VC THEN ... END IF` |
 
 ---
 
