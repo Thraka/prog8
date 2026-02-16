@@ -88,16 +88,16 @@ MODULE main
         txt.nl()
 
         ' Expressions (read from memory)
-        DIM w AS UWORD = PEEKW($1000)     ' read word from address
-        DIM l AS LONG = PEEKL($2000)      ' read long from address
-        DIM bo AS BOOL = PEEKBOOL($3000)   ' read bool from address
-        DIM f AS FLOAT = PEEKF($4000)     ' read float from address
+        DIM w AS UWORD = peekw($1000)     ' read word from address
+        DIM l AS LONG = peekl($2000)      ' read long from address
+        DIM bo AS BOOL = peekbool($3000)   ' read bool from address
+        DIM f AS FLOAT = peekf($4000)     ' read float from address
 
         ' Statements (write to memory)
-        POKEW $1000, w                    ' write word to address
-        POKEL $2000, l                    ' write long to address
-        POKEBOOL $3000, bo                 ' write bool to address
-        'POKEF $4000, f   
+        pokew($1000, w)                    ' write word to address
+        pokel($2000, l)                    ' write long to address
+        pokebool($3000, bo)                 ' write bool to address
+        'pokef($4000, f)   
 
     END SUB
 END MODULE

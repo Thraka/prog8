@@ -18,7 +18,7 @@ MODULE main
         IF_CS THEN txt.print_b(11) END IF
         IF_CS THEN txt.print_b(12) ELSE txt.print_b(13) END IF
 
-        pokew 903, 65
+        pokew(903, 65)
 
         IF_CS THEN
             txt.print_b(14)

@@ -9,7 +9,7 @@ MODULE main
         DIM color AS UBYTE = 0
         
         DO
-            POKE $D020, color   ' or: @($D020) = color
+            poke($D020, color)   ' or: @($D020) = color
             color++
             
             ' Low-level wait using assembly

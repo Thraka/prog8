@@ -401,10 +401,10 @@ SUB PrintINT32(i32[] AS UBYTE)
 END SUB
 
 SUB RESTORE_LINES()
-    poke $9F25, 2
-    poke $9F2B, 0
-    poke $9F2C, 120
-    poke $9F25, 0
+    poke($9F25, 2)
+    poke($9F2B, 0)
+    poke($9F2C, 120)
+    poke($9F25, 0)
 END SUB
 
 
@@ -1421,10 +1421,10 @@ SUB SetFullScreen()
     cx16.VERA_DC_HSCALE = hScale
     cx16.VERA_DC_VSCALE = vScale
     IF MAKE_WIDE_SCREEN THEN
-       poke $9F25, 2
-       poke $9F2B, 30
-       poke $9F2C, 210
-       poke $9F25, 0
+       poke($9F25, 2)
+       poke($9F2B, 30)
+       poke($9F2C, 210)
+       poke($9F25, 0)
     END IF
 END SUB
 
