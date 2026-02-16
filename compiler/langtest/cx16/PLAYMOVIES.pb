@@ -820,7 +820,7 @@ internal_dir:
         cbm.SETLFS(11, drivenumber, 0)
         DIM status AS UBYTE = 1
         VOID cbm.OPEN()          ' open 11,8,0,"$"
-        IF_CS
+        IF_CS THEN
             GOTO io_error
         END IF
 
@@ -885,7 +885,7 @@ donewaitlist:                    nop
             status = cbm.READST()
             VOID cbm.STOP()
 breaker:
-            IF_Z
+            IF_Z THEN
                 BREAK
             END IF
         WEND

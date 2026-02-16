@@ -18,6 +18,8 @@ main {
         if_cs txt.print_b(11)
         if_cs txt.print_b(12) else txt.print_b(13)
 
+        pokew(903, 65)
+        
         if_cs {
             txt.print_b(14)
         }
