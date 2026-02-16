@@ -542,7 +542,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         val address = ctx.expression(0).accept(this) as Expression
         val value = ctx.expression(1).accept(this) as Expression
         val func = IdentifierReference(listOf("pokew"), ctx.toPosition())
-        return FunctionCallStatement(func, mutableListOf(address, value), true, ctx.toPosition())
+        return FunctionCallStatement(func, mutableListOf(address, value), false, ctx.toPosition())
     }
 
     // POKEL address, value - long poke
@@ -550,7 +550,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         val address = ctx.expression(0).accept(this) as Expression
         val value = ctx.expression(1).accept(this) as Expression
         val func = IdentifierReference(listOf("pokel"), ctx.toPosition())
-        return FunctionCallStatement(func, mutableListOf(address, value), true, ctx.toPosition())
+        return FunctionCallStatement(func, mutableListOf(address, value), false, ctx.toPosition())
     }
 
     // POKEBOOL address, value - bool poke
@@ -558,7 +558,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         val address = ctx.expression(0).accept(this) as Expression
         val value = ctx.expression(1).accept(this) as Expression
         val func = IdentifierReference(listOf("pokebool"), ctx.toPosition())
-        return FunctionCallStatement(func, mutableListOf(address, value), true, ctx.toPosition())
+        return FunctionCallStatement(func, mutableListOf(address, value), false, ctx.toPosition())
     }
 
     // POKEF address, value - float poke
@@ -566,7 +566,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         val address = ctx.expression(0).accept(this) as Expression
         val value = ctx.expression(1).accept(this) as Expression
         val func = IdentifierReference(listOf("pokef"), ctx.toPosition())
-        return FunctionCallStatement(func, mutableListOf(address, value), true, ctx.toPosition())
+        return FunctionCallStatement(func, mutableListOf(address, value), false, ctx.toPosition())
     }
 
     // ============================================================================
