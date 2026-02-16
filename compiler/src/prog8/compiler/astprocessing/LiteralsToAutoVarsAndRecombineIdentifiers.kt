@@ -126,18 +126,8 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
         return noModifications
     }
 
-    override fun after(alias: Alias, parent: Node): Iterable<IAstModification> {
-        val target = alias.target.targetStatement()
-        if(target is Alias) {
-            // shortcut the alias that refers to another alias
-            val newAlias = Alias(alias.alias, target.target, alias.position)
-            return listOf(IAstModification.ReplaceNode(alias, newAlias, parent))
-        }
-        return noModifications
-    }
-
     override fun after(identifier: IdentifierReference, parent: Node): Iterable<IAstModification> {
-        val target = identifier.targetStatement()
+        val target = identifier.targetStatement(program.builtinFunctions)
 
         if(target is StructFieldRef) {
             // replace a.b.c.d   by  a^^.b^^.c^^.d
@@ -153,56 +143,45 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
             // maybe the first component of the scoped name is an alias?
             val tgt2 = identifier.definingScope.lookup(identifier.nameInSource.take(1)) as? Alias
             if(tgt2!=null && parent !is Alias) {
-                if(tgt2.target.targetStatement() !is Alias) {
+                if(tgt2.target.targetStatement(program.builtinFunctions) !is Alias) {
                     val actual = IdentifierReference(tgt2.target.nameInSource + identifier.nameInSource.drop(1), identifier.position)
                     return listOf(IAstModification.ReplaceNode(identifier, actual, parent))
                 }
             }
         }
 
-        // don't replace an identifier in an Alias or when the alias points to another alias (that will be resolved first elsewhere)
-        if(target is Alias && parent !is Alias) {
-            val targetStatement = target.target.targetStatement()
-            if (targetStatement !is Alias) {
-                val replacement: IdentifierReference =
-                    when (targetStatement) {
-                        is StructFieldRef -> {
-                            // replace with target struct field reference
-                            target.target.copy(position = identifier.position)
-                        }
-                        is VarDecl -> {
-                            val scoped = if (targetStatement.names.isNotEmpty()) {
-                                // points to a vardecl of multiple names in 1 statement
-                                (targetStatement.parent as INamedStatement).scopedName + target.target.nameInSource.last()
-                            } else {
-                                (targetStatement as INamedStatement).scopedName
-                            }
-                            require(scoped.last() != "<multiple>")
-                            IdentifierReference(scoped, identifier.position)
-                        }
-                        else -> {
-                            // replace with scoped identifier
-                            val scoped = (targetStatement as INamedStatement).scopedName
-                            require(scoped.last() != "<multiple>")
-                            IdentifierReference(scoped, identifier.position)
-                        }
+        if(target is Alias && parent !is Alias) {     // don't replace an identifier in an Alias
+            val targetStatement = target.target.targetStatement(program.builtinFunctions)
+            val replacement: IdentifierReference =
+                when (targetStatement) {
+                    is StructFieldRef -> {
+                        // replace with target struct field reference
+                        target.target.copy(position = identifier.position)
                     }
+                    is VarDecl -> {
+                        val scoped = if (targetStatement.names.isNotEmpty()) {
+                            // points to a vardecl of multiple names in 1 statement
+                            (targetStatement.parent as INamedStatement).scopedName + target.target.nameInSource.last()
+                        } else {
+                            (targetStatement as INamedStatement).scopedName
+                        }
+                        require(scoped.last() != "<multiple>")
+                        IdentifierReference(scoped, identifier.position)
+                    }
+                    is BuiltinFunctionPlaceholder -> {
+                        // replace with unscoped identifier
+                        IdentifierReference(listOf(targetStatement.name), identifier.position)
+                    }
+                    else -> {
+                        // replace with scoped identifier
+                        val scoped = (targetStatement as INamedStatement).scopedName
+                        require(scoped.last() != "<multiple>")
+                        IdentifierReference(scoped, identifier.position)
+                    }
+                }
 
-                return listOf(IAstModification.ReplaceNode(identifier, replacement, parent))
-            }
+            return listOf(IAstModification.ReplaceNode(identifier, replacement, parent))
         }
-
-// experimental code to be able to alias blocks too:
-//        if(target is INamedStatement) {
-//            if (identifier.nameInSource != target.scopedName) {
-//                val blockAlias = identifier.definingScope.lookup(identifier.nameInSource.take(1))
-//                if(blockAlias is Alias) {
-//                    val newname = mutableListOf(blockAlias.target.nameInSource.single())
-//                    newname.addAll(identifier.nameInSource.drop(1))
-//                    return listOf(IAstModification.ReplaceNode(identifier, IdentifierReference(newname, position = identifier.position), parent))
-//                }
-//            }
-//        }
         return noModifications
     }
 
@@ -212,7 +191,7 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
             val rightIndex = expr.right as? ArrayIndexedExpression
             if (leftIdent != null && rightIndex != null) {
                 // maybe recombine   IDENTIFIER . ARRAY[IDX]  -->  COMBINEDIDENTIFIER[IDX]
-                val leftTarget = leftIdent.targetStatement()
+                val leftTarget = leftIdent.targetStatement(program.builtinFunctions)
                 if(leftTarget==null || leftTarget !is StructDecl) {
                     if(rightIndex.plainarrayvar!=null) {
                         val combinedName = leftIdent.nameInSource + rightIndex.plainarrayvar!!.nameInSource
@@ -228,17 +207,12 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
         return noModifications
     }
 
-    override fun after(deref: ArrayIndexedPtrDereference, parent: Node): Iterable<IAstModification> {
-        // TODO handle aliases?
-        return noModifications
-    }
-
     override fun after(deref: PtrDereference, parent: Node): Iterable<IAstModification> {
         // handle aliases
         // maybe the first component of the dereference chain is an alias?
         val tgt2 = deref.definingScope.lookup(deref.chain.take(1)) as? Alias
         if(tgt2!=null && parent !is Alias) {
-            if(tgt2.target.targetStatement() !is Alias) {
+            if(tgt2.target.targetStatement(program.builtinFunctions) !is Alias) {
                 val unaliased = PtrDereference(tgt2.target.nameInSource + deref.chain.drop(1), deref.derefLast, deref.position)
                 return listOf(IAstModification.ReplaceNode(deref, unaliased, parent))
             }

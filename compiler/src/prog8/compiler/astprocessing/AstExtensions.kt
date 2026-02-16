@@ -84,6 +84,12 @@ internal fun Program.charLiteralsToUByteLiterals(target: ICompilationTarget, err
             }
             return noModifications
         }
+
+        override fun after(alias: Alias, parent: Node): Iterable<IAstModification> {
+            // remove all alias nodes, every aliased identifier should have been replaced in the previous step
+            return listOf(IAstModification.Remove(alias, parent as IStatementContainer))
+        }
+
     }
 
     walker.visit(this)
@@ -241,11 +247,13 @@ internal fun IdentifierReference.checkFunctionOrLabelExists(program: Program, st
             else
                 errors.err("cannot call that: ${this.nameInSource.joinToString(".")}", this.position)
         }
-        is Alias, is StructDecl, is StructFieldRef -> {
+        is StructFieldRef, is StructDecl, is Alias -> {
             return targetStatement
         }
         null -> {
-            errors.undefined(this.nameInSource, this.firstTarget(program.builtinFunctions)==null, this.position)
+            val alias = definingScope.lookup(this.nameInSource.take(1))
+            if(alias !is Alias || alias.target.targetStatement(program.builtinFunctions)==null)
+                errors.undefined(this.nameInSource, this.firstTarget(program.builtinFunctions)==null, this.position)
         }
         else -> errors.err("cannot call that: ${this.nameInSource.joinToString(".")}", this.position)
     }
