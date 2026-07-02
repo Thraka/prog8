@@ -312,6 +312,10 @@ internal class AstChecker(private val program: Program,
         super.visit(jump)
     }
 
+    override fun visit(alias: Alias) {
+        throw FatalAstException("all Alias nodes should have been removed from the AST ${alias.position}")
+    }
+
     override fun visit(block: Block) {
         if(block.name.startsWith('_'))
             errors.err("identifiers cannot start with an underscore", block.position)
@@ -1221,14 +1225,14 @@ internal class AstChecker(private val program: Program,
                     err("this directive may only occur in a block or at module level")
                 if(directive.args.isEmpty())
                     err("missing option directive argument(s)")
-                else if(directive.args.map{it.string in arrayOf("enable_floats", "force_output", "no_sysinit", "merge", "verafxmuls", "no_symbol_prefixing", "ignore_unused", "romable")}.any { !it })
+                else if(directive.args.map{it.string in setOf("enable_floats", "force_output", "no_sysinit", "merge", "verafxmuls", "no_symbol_prefixing", "ignore_unused", "romable")}.any { !it })
                     err("invalid option directive argument(s)")
                 if(directive.parent is Block) {
-                    if(directive.args.any {it.string !in arrayOf("force_output", "merge", "verafxmuls", "no_symbol_prefixing", "ignore_unused")})
+                    if(directive.args.any {it.string !in setOf("force_output", "merge", "verafxmuls", "no_symbol_prefixing", "ignore_unused")})
                         err("using an option that is not valid for blocks")
                 }
                 if(directive.parent is Module) {
-                    if(directive.args.any {it.string !in arrayOf("enable_floats", "no_sysinit", "no_symbol_prefixing", "ignore_unused", "romable")})
+                    if(directive.args.any {it.string !in setOf("enable_floats", "no_sysinit", "no_symbol_prefixing", "ignore_unused", "romable")})
                         err("using an option that is not valid for modules")
                 }
                 if(directive.args.any { it.string=="verafxmuls" } && compilerOptions.compTarget.name != Cx16Target.NAME)
@@ -1247,7 +1251,7 @@ internal class AstChecker(private val program: Program,
                 for(arg in directive.args) {
                     val target = directive.definingScope.lookup(arg.string!!.split('.'))
                     if(target==null)
-                        errors.err("undefined symbol: ${arg.string}", arg.position)
+                        errors.undefined(listOf(arg.string!!), position = arg.position)
                     else if (target !is Subroutine)
                         errors.err("jmptable entry can only be a subroutine: ${arg.string}", arg.position)
                 }
@@ -1591,7 +1595,7 @@ internal class AstChecker(private val program: Program,
         if(leftDt.isBool || rightDt.isBool ||
             (expr.left as? TypecastExpression)?.expression?.inferType(program)?.isBool==true ||
             (expr.right as? TypecastExpression)?.expression?.inferType(program)?.isBool==true) {
-            if(expr.operator in arrayOf("<", "<=", ">", ">=")) {
+            if(expr.operator in setOf("<", "<=", ">", ">=")) {
                 errors.err("can't use boolean operand with this comparison operator", expr.position)
             }
 // for now, don't enforce bool type with only logical operators...
@@ -2186,7 +2190,7 @@ internal class AstChecker(private val program: Program,
         if (deref.inferType(program).isUnknown) {
             val symbol = deref.definingScope.lookup(deref.chain.take(1))
             if(symbol==null)
-                errors.err("undefined symbol: ${deref.chain[0]}", deref.position)
+                errors.undefined(deref.chain.take(1), position=deref.position)
             else
                 errors.err("unable to determine type of dereferenced pointer expression", deref.position)
         }

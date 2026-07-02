@@ -146,10 +146,11 @@ main {
 }"""
             val errors = ErrorReporterForTests()
             compileText(VMTarget(), false, src, outputDir, writeAssembly=false, errors = errors) shouldBe null
-            errors.errors.size shouldBe 3
-            errors.errors[0] shouldContain "references itself"
+            errors.errors.size shouldBe 4
+            errors.errors[0] shouldContain "alias loop"
             errors.errors[1] shouldContain "undefined symbol: xx.yy"
-            errors.errors[2] shouldContain "references itself"
+            errors.errors[2] shouldContain "alias loop"
+            errors.errors[3] shouldContain "alias loop"
         }
 
         test("alias scopes") {
@@ -263,6 +264,36 @@ main {
             errors.errors[3] shouldContain "invalid number of arguments: expected 2 but got 0"
             errors.errors[4] shouldContain "invalid number of arguments: expected 1 but got 0"
             errors.errors[5] shouldContain "invalid number of arguments: expected 2 but got 0"
+        }
+
+        xtest("chained aliasing") {
+            val src="""
+main {
+    sub start() {
+        alias s1 = testblock.sub1
+        alias s2 = s1.sub2      ; TODO fix alias error
+        alias vx = s2.var2      ; TODO fix alias error
+        vx = 999
+
+        alias tb = testblock
+        alias vv = tb.variable      ; TODO fix alias error
+        vv = 99
+    }
+}
+
+
+testblock {
+    ubyte @shared variable
+
+    sub sub1() {
+        sub sub2() {
+            ubyte @shared var2
+        }
+    }
+}"""
+            val errors = ErrorReporterForTests()
+            compileText(C64Target(), optimize=false, src, outputDir, writeAssembly=false, errors=errors) shouldNotBe null
+            errors.errors.size shouldBe 0
         }
     }
 
