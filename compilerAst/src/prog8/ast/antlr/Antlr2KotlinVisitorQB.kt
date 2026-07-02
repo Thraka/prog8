@@ -1025,6 +1025,19 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         return dt to identifiers.map { getname(it) }
     }
 
+    override fun visitEnum(ctx: EnumContext): Enumeration {
+        val name = getname(ctx.identifier())
+        val members1 = ctx.enum_member().map {
+            getname(it.identifier()) to it.integerliteral()?.accept(this) as NumericLiteral?
+        }
+        val datatypes = members1.mapNotNull { it.second?.type }
+        val largestType = datatypes.fold(BaseDataType.UBYTE) { acc, dt -> if (dt.largerSizeThan(acc)) dt else acc }
+        val members = members1.map {
+            it.first to it.second?.number?.toInt()
+        }.toTypedArray()
+        return Enumeration(name, largestType, members, ctx.PRIVATE() != null, ctx.toPosition())
+    }
+
     // ============================================================================
     // VISITOR OVERRIDES (delegate to children or throw)
     // ============================================================================
@@ -1053,6 +1066,8 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     override fun visitClobber(ctx: ClobberContext) = throw FatalAstException("should not be called")
     override fun visitAsmsub_returns(ctx: Asmsub_returnsContext) = throw FatalAstException("should not be called")
     override fun visitAsmsub_return(ctx: Asmsub_returnContext) = throw FatalAstException("should not be called")
+    override fun visitEnum_member(ctx: Enum_memberContext) = throw FatalAstException("should not be called")
+    override fun visitEnum_separator(ctx: Enum_separatorContext) = throw FatalAstException("should not be called")
     override fun visitStructfielddecl(ctx: StructfielddeclContext) = throw FatalAstException("should not be called")
     override fun visitDerefchain(ctx: DerefchainContext) = throw FatalAstException("should not be called")
     override fun visitSinglederef(ctx: SinglederefContext) = throw FatalAstException("should not be called")

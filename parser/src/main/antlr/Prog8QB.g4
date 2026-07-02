@@ -175,6 +175,7 @@ SUB: S U B ;
 TYPEDADDR_KW: T Y P E D A D D R ;
 TYPE: T Y P E ;
 ALIAS: A L I A S ;
+ENUM: E N U M ;
 
 ELSEIF: E L S E I F ;
 ELSE: E L S E ;
@@ -323,6 +324,7 @@ block_statement:
     | inlineasm
     | labeldef
     | alias
+    | enum
     ;
 
 
@@ -353,6 +355,7 @@ statement :
     | labeldef
     | defer
     | alias
+    | enum
     ;
 
 
@@ -377,6 +380,20 @@ subroutinedeclaration :
     ;
 
 alias: PRIVATE? ALIAS identifier ASSIGN scoped_identifier ;
+
+enum:
+    PRIVATE? ENUM identifier EOL? END ENUM
+    | PRIVATE? ENUM identifier EOL? enum_member (enum_separator enum_member)* enum_separator? END ENUM
+    ;
+
+enum_separator:
+    COMMA EOL*
+    | EOL+
+    ;
+
+enum_member:
+    identifier (ASSIGN integerliteral)?
+    ;
 
 defer: DEFER (statement | statement_block) ;
 
