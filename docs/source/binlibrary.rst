@@ -42,7 +42,7 @@ No system initialization and startup code
 Variable initialization
     The library still has to initialize any variables it might use and clear
     uninitialized "BSS" variables! Otherwise the code will not run predictably as prog8 code.
-    So, the library must still have a "start" entrypoint subroutine like any outher prog8 program,
+    So, the library must still have a "start" entrypoint subroutine like any other prog8 program,
     that must be called before any other library routine can be called.
 
 Binary output and loaded into a fixed memory address
@@ -79,7 +79,7 @@ Jump table
 For ease of use, libraries should probably have a fixed "jump table" where the offsets of the
 library routines stay the same across different versions of the library. Without needing new syntax,
 there's a trick in Prog8 that you can use to build such a jumptable:
-add a non-splitted word array at the top of the library main block that contains JMP instructions
+add a non-split word array at the top of the library main block that contains JMP instructions
 and the addresses of the individual library subroutines. Do NOT change the order of the subroutines
 in this table!
 Also note that the Prog8 compiler will insert a single JMP instruction at the very start of the library,
@@ -105,12 +105,13 @@ Assuming the load address of the library is $A000:
 
     BLOAD "LIBRARY.BIN",8,1,$A000
     SYS $A000 : REM TO INITIALIZE VARIABLES, REQUIRED!
-    SYS $A004 : REM CALL FIRST ROUTINE
-    SYS $A008 : REM CALL SECOND ROUTINE, ETC.
+    SYS $A003 : REM CALL FIRST ROUTINE
+    SYS $A006 : REM CALL SECOND ROUTINE, ETC.
 
 
-**From Prog8**
 .. index:: single: Examples; Library from Prog8
+
+**From Prog8:**
 
 The ``diskio`` module actually provides a convenience routine called ``loadlib`` that loads a Prog8-compiled
 library blob into memory. It internally automatically uses either regular load() or load_raw(),
@@ -122,8 +123,8 @@ differences if you want to write portable code)::
     main {
 
         extsub $A000 = lib_init() clobbers(A)
-        extsub $A004 = lib_func1() clobbers(A,X,Y)
-        extsub $A008 = lib_func2() clobbers(A,X,Y)
+        extsub $A003 = lib_func1() clobbers(A,X,Y)
+        extsub $A006 = lib_func2() clobbers(A,X,Y)
 
         sub start() {
             if diskio.loadlib("library.bin", $a000) != 0 {
@@ -144,12 +145,12 @@ differences if you want to write portable code)::
 
     int main() {
         void (*lib_init)(void) = (void (*)()) 0xa000;
-        void (*lib_func1)(void) = (void (*)()) 0xa004;
-        void (*lib_func2)(void) = (void (*)()) 0xa008;
+        void (*lib_func1)(void) = (void (*)()) 0xa003;
+        void (*lib_func2)(void) = (void (*)()) 0xa006;
 
-	    cbm_k_setlfs(0, 8, 2);
-	    cbm_k_setnam("library.bin");
-	    cbm_k_load(0, 0xa000);
+        cbm_k_setlfs(0, 8, 2);
+        cbm_k_setnam("library.bin");
+        cbm_k_load(0, 0xa000);
 
         lib_init();
         lib_func1();
@@ -178,8 +179,8 @@ differences if you want to write portable code)::
         jsr  $ffd2      ; CHROUT
 
         jsr  $A000      ; library init
-        jsr  $A004      ; lib func 1
-        jsr  $A008      ; lib func 2
+        jsr  $A003      ; lib func 1
+        jsr  $A006      ; lib func 2
 
         rts
 

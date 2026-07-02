@@ -4,14 +4,6 @@ import prog8.code.core.toHex
 import prog8.code.target.IVirtualMachineRunner
 import prog8.code.target.VMTarget
 import prog8.intermediate.*
-import java.awt.Color
-import java.awt.Toolkit
-import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
-import kotlin.io.path.Path
-import kotlin.io.path.inputStream
-import kotlin.io.path.outputStream
 import kotlin.math.*
 import kotlin.random.Random
 
@@ -40,16 +32,23 @@ class BreakpointException(val pcChunk: IRCodeChunk, val pcIndex: Int): Exception
 class VirtualMachine(irProgram: IRProgram) {
     class CallSiteContext(val returnChunk: IRCodeChunk, val returnIndex: Int, val fcallSpec: FunctionCallArgs)
 
-    private var fileOutputStream: OutputStream? = null
-    private var fileInputStream: InputStream? = null
+    // Constants for performance and maintainability
+    private companion object {
+        private const val VALUE_STACK_MAX = 128
+        private const val MIPS_COUNTER_MASK = 0xffffff
+    }
+
+    internal var fileOutputStream: java.io.RandomAccessFile? = null
+    internal var fileInputStream: java.io.RandomAccessFile? = null
     val memory = Memory()
     val machine = VMTarget()
     val program: List<IRCodeChunk>
-    val artificialLabelAddresses: Map<Int, IRCodeChunk>
+    val artificialLabelAddresses: Map<UInt, IRCodeChunk>
     val registers = Registers()
     val callStack = ArrayDeque<CallSiteContext>()
-    val valueStack = ArrayDeque<UByte>()       // max 128 entries
+    val valueStack = ArrayDeque<UByte>()       // max VALUE_STACK_MAX entries
     var breakpointHandler: ((pcChunk: IRCodeChunk, pcIndex: Int) -> Unit)? = null       // can set custom breakpoint handler
+    var traceEnabled: Boolean = false        // enable instruction tracing
     var pcChunk = IRCodeChunk(null, null)
     var pcIndex = 0
     var stepCount = 0
@@ -90,7 +89,7 @@ class VirtualMachine(irProgram: IRProgram) {
 //                    Thread.sleep(1)  // avoid 100% cpu core usage
 //                }
 
-                if(stepCount and 0xffffff == 0) {
+                if(stepCount and MIPS_COUNTER_MASK == 0) {
                     val now = System.nanoTime()
                     val duration = now-before
                     before = now
@@ -156,8 +155,8 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun nextPc() {
-        pcIndex ++
-        if(pcIndex>=pcChunk.instructions.size)
+        pcIndex++
+        if(pcIndex >= pcChunk.instructions.size)
             stepNextChunk()
     }
 
@@ -169,7 +168,7 @@ class VirtualMachine(irProgram: IRProgram) {
             }
             null -> {
                 if(i.address!=null)
-                    throw IllegalArgumentException("vm program can't jump to system memory address (${i.opcode} ${i.address!!.toHex()})")
+                    throw IllegalArgumentException("vm program can't jump to system memory address (${i.opcode} ${i.address!!.value.toInt().toHex()})")
                 else if(i.labelSymbol!=null)
                     throw IllegalArgumentException("vm program can't jump to system memory address (${i.opcode} ${i.labelSymbol})")
                 else if(i.reg1!=null)
@@ -183,12 +182,15 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun dispatch(ins: IRInstruction) {
+        if (traceEnabled) {
+            val chunkLabel = pcChunk.label ?: "?"
+            println("[$chunkLabel:$pcIndex] $ins")
+        }
         when(ins.opcode) {
             Opcode.NOP -> nextPc()
             Opcode.LOAD -> InsLOAD(ins)
             Opcode.LOADM -> InsLOADM(ins)
             Opcode.LOADX -> InsLOADX(ins)
-            Opcode.LOADI -> InsLOADI(ins)
             Opcode.LOADR -> InsLOADR(ins)
             Opcode.LOADHA -> InsLOADHA(ins)
             Opcode.LOADHX -> InsLOADHX(ins)
@@ -198,10 +200,10 @@ class VirtualMachine(irProgram: IRProgram) {
             Opcode.LOADHXY -> InsLOADHXY(ins)
             Opcode.LOADHFACZERO -> InsLOADHFACZERO(ins)
             Opcode.LOADHFACONE -> InsLOADHFACONE(ins)
-            Opcode.LOADFIELD -> InsLOADFIELD(ins)
+            Opcode.LOADI -> InsLOADI(ins)
             Opcode.STOREM -> InsSTOREM(ins)
             Opcode.STOREX -> InsSTOREX(ins)
-            Opcode.STOREI -> InsSTOREI(ins)
+            Opcode.STOREI-> InsSTOREI(ins)
             Opcode.STOREZM -> InsSTOREZM(ins)
             Opcode.STOREZX -> InsSTOREZX(ins)
             Opcode.STOREZI -> InsSTOREZI(ins)
@@ -213,7 +215,6 @@ class VirtualMachine(irProgram: IRProgram) {
             Opcode.STOREHXY -> InsSTOREHXY(ins)
             Opcode.STOREHFACZERO -> InsSTOREHFACZERO(ins)
             Opcode.STOREHFACONE-> InsSTOREHFACONE(ins)
-            Opcode.STOREFIELD-> InsSTOREFIELD(ins)
             Opcode.JUMP -> InsJUMP(ins)
             Opcode.JUMPI -> InsJUMPI(ins)
             Opcode.CALLI -> throw IllegalArgumentException("VM cannot run code from memory bytes")
@@ -269,8 +270,12 @@ class VirtualMachine(irProgram: IRProgram) {
             Opcode.DIVSM -> InsDIVSM(ins)
             Opcode.MODR -> InsMODR(ins)
             Opcode.MOD -> InsMOD(ins)
+            Opcode.MODSR -> InsMODSR(ins)
+            Opcode.MODS -> InsMODS(ins)
             Opcode.DIVMODR -> InsDIVMODR(ins)
             Opcode.DIVMOD -> InsDIVMOD(ins)
+            Opcode.SDIVMODR -> InsSDIVMODR(ins)
+            Opcode.SDIVMOD -> InsSDIVMOD(ins)
             Opcode.SGN -> InsSGN(ins)
             Opcode.CMP -> InsCMP(ins)
             Opcode.CMPI -> InsCMPI(ins)
@@ -314,8 +319,8 @@ class VirtualMachine(irProgram: IRProgram) {
             Opcode.MSIGB -> InsMSIGB(ins)
             Opcode.MSIGW -> InsMSIGW(ins)
             Opcode.BSIGB -> InsBSIGB(ins)
+            Opcode.MIDB -> InsMIDB(ins)
             Opcode.CONCAT -> InsCONCAT(ins)
-            Opcode.SWAP -> InsSWAP(ins)
             Opcode.PUSH -> InsPUSH(ins)
             Opcode.POP -> InsPOP(ins)
             Opcode.PUSHST -> InsPUSHST()
@@ -352,30 +357,30 @@ class VirtualMachine(irProgram: IRProgram) {
         }
     }
 
-    private inline fun setResultReg(reg: Int, value: Int, type: IRDataType) {
+    private fun setResultReg(reg: Int, value: Int, type: IRDataType) {
         when(type) {
             IRDataType.BYTE -> {
                 registers.setUB(reg, value.toUByte())
-                statusZero = value==0
+                statusZero = value == 0
                 statusNegative = value !in 0..<0x80
             }
             IRDataType.WORD -> {
                 registers.setUW(reg, value.toUShort())
-                statusZero = value==0
+                statusZero = value == 0
                 statusNegative = value !in 0..<0x8000
             }
             IRDataType.LONG -> {
                 registers.setSL(reg, value)
-                statusZero = value==0
-                statusNegative = value<0
+                statusZero = value == 0
+                statusNegative = value < 0
             }
             IRDataType.FLOAT -> throw IllegalArgumentException("attempt to set integer result register but float type")
         }
     }
 
     private fun InsPUSH(i: IRInstruction) {
-        if(valueStack.size>=128)
-            throw StackOverflowError("valuestack limit 128 exceeded")
+        if(valueStack.size >= VALUE_STACK_MAX)
+            throw StackOverflowError("valuestack limit $VALUE_STACK_MAX exceeded")
 
         when(i.type!!) {
             IRDataType.BYTE -> {
@@ -458,8 +463,15 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsLOAD(i: IRInstruction) {
-        if(i.type==IRDataType.FLOAT)
-            registers.setFloat(i.fpReg1!!, i.immediateFp!!)
+        if(i.type==IRDataType.FLOAT) {
+            if (i.immediateFp != null)
+                registers.setFloat(i.fpReg1!!, i.immediateFp!!)
+            else {
+                if (i.labelSymbol == null)
+                    throw IllegalArgumentException("expected LOAD of immediate or labelsymbol")
+                registers.setFloat(i.fpReg1!!, i.address!!.value.toDouble())
+            }
+        }
         else {
             if(i.immediate!=null) {
                 setResultReg(i.reg1!!, i.immediate!!, i.type!!)
@@ -468,8 +480,8 @@ class VirtualMachine(irProgram: IRProgram) {
             else {
                 if(i.labelSymbol==null)
                     throw IllegalArgumentException("expected LOAD of address of labelsymbol")
-                setResultReg(i.reg1!!, i.address!!, i.type!!)
-                statusbitsNZ(i.address!!, i.type!!)
+                setResultReg(i.reg1!!, i.address!!.value.toInt(), i.type!!)
+                statusbitsNZ(i.address!!.value.toInt(), i.type!!)
             }
         }
         nextPc()
@@ -478,68 +490,46 @@ class VirtualMachine(irProgram: IRProgram) {
     private fun InsLOADM(i: IRInstruction) {
         when(i.type!!) {
             IRDataType.BYTE -> {
-                val value = memory.getUB(i.address!!)
+                val value = memory.getUB(i.address!!.value)
                 registers.setUB(i.reg1!!, value)
                 statusbitsNZ(value.toInt(), i.type!!)
             }
             IRDataType.WORD -> {
-                val value = memory.getUW(i.address!!)
+                val value = memory.getUW(i.address!!.value)
                 registers.setUW(i.reg1!!, value)
                 statusbitsNZ(value.toInt(), i.type!!)
             }
             IRDataType.LONG -> {
-                val value = memory.getSL(i.address!!)
+                val value = memory.getSL(i.address!!.value)
                 registers.setSL(i.reg1!!, value)
                 statusbitsNZ(value, i.type!!)
             }
-            IRDataType.FLOAT -> registers.setFloat(i.fpReg1!!, memory.getFloat(i.address!!))
+            IRDataType.FLOAT -> registers.setFloat(i.fpReg1!!, memory.getFloat(i.address!!.value))
         }
         nextPc()
     }
 
     private fun InsLOADI(i: IRInstruction) {
-        when(i.type!!) {
-            IRDataType.BYTE -> {
-                val value = memory.getUB(registers.getUW(i.reg2!!).toInt())
-                registers.setUB(i.reg1!!, value)
-                statusbitsNZ(value.toInt(), i.type!!)
-            }
-            IRDataType.WORD -> {
-                val value = memory.getUW(registers.getUW(i.reg2!!).toInt())
-                registers.setUW(i.reg1!!, value)
-                statusbitsNZ(value.toInt(), i.type!!)
-            }
-            IRDataType.LONG -> {
-                val value = memory.getSL(registers.getUW(i.reg2!!).toInt())
-                registers.setSL(i.reg1!!, value)
-                statusbitsNZ(value, i.type!!)
-            }
-            IRDataType.FLOAT -> registers.setFloat(i.fpReg1!!, memory.getFloat(registers.getUW(i.reg1!!).toInt()))
-        }
-        nextPc()
-    }
-
-    private fun InsLOADFIELD(i: IRInstruction) {
         val offset = i.immediate!!
         require(offset in 0..65535)
         when(i.type!!) {
             IRDataType.BYTE -> {
-                val value = memory.getUB(registers.getUW(i.reg2!!).toInt() + offset)
+                val value = memory.getUB(registers.getUW(i.reg2!!).toUInt() + offset.toUInt())
                 registers.setUB(i.reg1!!, value)
                 statusbitsNZ(value.toInt(), i.type!!)
             }
             IRDataType.WORD -> {
-                val value = memory.getUW(registers.getUW(i.reg2!!).toInt() + offset)
+                val value = memory.getUW(registers.getUW(i.reg2!!).toUInt() + offset.toUInt())
                 registers.setUW(i.reg1!!, value)
                 statusbitsNZ(value.toInt(), i.type!!)
             }
             IRDataType.LONG -> {
-                val value = memory.getSL(registers.getUW(i.reg2!!).toInt() + offset)
+                val value = memory.getSL(registers.getUW(i.reg2!!).toUInt() + offset.toUInt())
                 registers.setSL(i.reg1!!, value)
                 statusbitsNZ(value, i.type!!)
             }
             IRDataType.FLOAT -> {
-                registers.setFloat(i.fpReg1!!, memory.getFloat(registers.getUW(i.reg1!!).toInt() + offset))
+                registers.setFloat(i.fpReg1!!, memory.getFloat(registers.getUW(i.reg1!!).toUInt() + offset.toUInt()))
             }
         }
         nextPc()
@@ -548,21 +538,21 @@ class VirtualMachine(irProgram: IRProgram) {
     private fun InsLOADX(i: IRInstruction) {
         when (i.type!!) {
             IRDataType.BYTE -> {
-                val value = memory.getUB(i.address!! + registers.getUB(i.reg2!!).toInt())
+                val value = memory.getUB(i.address!!.value + registers.getUB(i.reg2!!).toUInt())
                 registers.setUB(i.reg1!!, value)
                 statusbitsNZ(value.toInt(), i.type!!)
             }
             IRDataType.WORD -> {
-                val value = memory.getUW(i.address!! + registers.getUB(i.reg2!!).toInt())
+                val value = memory.getUW(i.address!!.value + registers.getUB(i.reg2!!).toUInt())
                 registers.setUW(i.reg1!!, value)
                 statusbitsNZ(value.toInt(), i.type!!)
             }
             IRDataType.LONG -> {
-                val value = memory.getSL(i.address!! + registers.getUB(i.reg2!!).toInt())
+                val value = memory.getSL(i.address!!.value + registers.getUB(i.reg2!!).toUInt())
                 registers.setSL(i.reg1!!, value)
                 statusbitsNZ(value, i.type!!)
             }
-            IRDataType.FLOAT -> registers.setFloat(i.fpReg1!!, memory.getFloat(i.address!! + registers.getUB(i.reg1!!).toInt()))
+            IRDataType.FLOAT -> registers.setFloat(i.fpReg1!!, memory.getFloat(i.address!!.value + registers.getUB(i.reg1!!).toUInt()))
         }
         nextPc()
     }
@@ -591,72 +581,64 @@ class VirtualMachine(irProgram: IRProgram) {
 
     private fun InsSTOREM(i: IRInstruction) {
         when(i.type!!) {
-            IRDataType.BYTE -> memory.setUB(i.address!!, registers.getUB(i.reg1!!))
-            IRDataType.WORD -> memory.setUW(i.address!!, registers.getUW(i.reg1!!))
-            IRDataType.LONG -> memory.setSL(i.address!!, registers.getSL(i.reg1!!))
-            IRDataType.FLOAT -> memory.setFloat(i.address!!, registers.getFloat(i.fpReg1!!))
+            IRDataType.BYTE -> memory.setUB(i.address!!.value, registers.getUB(i.reg1!!))
+            IRDataType.WORD -> memory.setUW(i.address!!.value, registers.getUW(i.reg1!!))
+            IRDataType.LONG -> memory.setSL(i.address!!.value, registers.getSL(i.reg1!!))
+            IRDataType.FLOAT -> memory.setFloat(i.address!!.value, registers.getFloat(i.fpReg1!!))
         }
         nextPc()
     }
 
     private fun InsSTOREI(i: IRInstruction) {
-        when (i.type!!) {
-            IRDataType.BYTE -> memory.setUB(registers.getUW(i.reg2!!).toInt(), registers.getUB(i.reg1!!))
-            IRDataType.WORD -> memory.setUW(registers.getUW(i.reg2!!).toInt(), registers.getUW(i.reg1!!))
-            IRDataType.LONG -> memory.setSL(registers.getUW(i.reg2!!).toInt(), registers.getSL(i.reg1!!))
-            IRDataType.FLOAT -> memory.setFloat(registers.getUW(i.reg1!!).toInt(), registers.getFloat(i.fpReg1!!))
-        }
-        nextPc()
-    }
-
-    private fun InsSTOREFIELD(i: IRInstruction) {
         val offset = i.immediate!!
         require(offset in 0..65535)
         when (i.type!!) {
-            IRDataType.BYTE -> memory.setUB(registers.getUW(i.reg2!!).toInt() + offset, registers.getUB(i.reg1!!))
-            IRDataType.WORD -> memory.setUW(registers.getUW(i.reg2!!).toInt() + offset, registers.getUW(i.reg1!!))
-            IRDataType.LONG -> memory.setSL(registers.getUW(i.reg2!!).toInt() + offset, registers.getSL(i.reg1!!))
-            IRDataType.FLOAT -> memory.setFloat(registers.getUW(i.reg1!!).toInt() + offset, registers.getFloat(i.fpReg1!!))
+            IRDataType.BYTE -> memory.setUB(registers.getUW(i.reg2!!).toUInt() + offset.toUInt(), registers.getUB(i.reg1!!))
+            IRDataType.WORD -> memory.setUW(registers.getUW(i.reg2!!).toUInt() + offset.toUInt(), registers.getUW(i.reg1!!))
+            IRDataType.LONG -> memory.setSL(registers.getUW(i.reg2!!).toUInt() + offset.toUInt(), registers.getSL(i.reg1!!))
+            IRDataType.FLOAT -> memory.setFloat(registers.getUW(i.reg1!!).toUInt() + offset.toUInt(), registers.getFloat(i.fpReg1!!))
         }
         nextPc()
     }
 
     private fun InsSTOREX(i: IRInstruction) {
         when (i.type!!) {
-            IRDataType.BYTE -> memory.setUB(i.address!! + registers.getUB(i.reg2!!).toInt(), registers.getUB(i.reg1!!))
-            IRDataType.WORD -> memory.setUW(i.address!! + registers.getUB(i.reg2!!).toInt(), registers.getUW(i.reg1!!))
-            IRDataType.LONG -> memory.setSL(i.address!! + registers.getUB(i.reg2!!).toInt(), registers.getSL(i.reg1!!))
-            IRDataType.FLOAT -> memory.setFloat(i.address!! + registers.getUB(i.reg1!!).toInt(), registers.getFloat(i.fpReg1!!))
+            IRDataType.BYTE -> memory.setUB(i.address!!.value + registers.getUB(i.reg2!!).toUInt(), registers.getUB(i.reg1!!))
+            IRDataType.WORD -> memory.setUW(i.address!!.value + registers.getUB(i.reg2!!).toUInt(), registers.getUW(i.reg1!!))
+            IRDataType.LONG -> memory.setSL(i.address!!.value + registers.getUB(i.reg2!!).toUInt(), registers.getSL(i.reg1!!))
+            IRDataType.FLOAT -> memory.setFloat(i.address!!.value + registers.getUB(i.reg1!!).toUInt(), registers.getFloat(i.fpReg1!!))
         }
         nextPc()
     }
 
     private fun InsSTOREZM(i: IRInstruction) {
         when(i.type!!) {
-            IRDataType.BYTE -> memory.setUB(i.address!!, 0u)
-            IRDataType.WORD -> memory.setUW(i.address!!, 0u)
-            IRDataType.LONG -> memory.setSL(i.address!!, 0)
-            IRDataType.FLOAT -> memory.setFloat(i.address!!, 0.0)
+            IRDataType.BYTE -> memory.setUB(i.address!!.value, 0u)
+            IRDataType.WORD -> memory.setUW(i.address!!.value, 0u)
+            IRDataType.LONG -> memory.setSL(i.address!!.value, 0)
+            IRDataType.FLOAT -> memory.setFloat(i.address!!.value, 0.0)
         }
         nextPc()
     }
 
     private fun InsSTOREZI(i: IRInstruction) {
+        val offset = i.immediate!!
+        require(offset in 0..65535)
         when (i.type!!) {
-            IRDataType.BYTE -> memory.setUB(registers.getUW(i.reg1!!).toInt(), 0u)
-            IRDataType.WORD -> memory.setUW(registers.getUW(i.reg1!!).toInt(), 0u)
-            IRDataType.LONG -> memory.setSL(registers.getUW(i.reg1!!).toInt(), 0)
-            IRDataType.FLOAT -> memory.setFloat(registers.getUW(i.reg1!!).toInt(), 0.0)
+            IRDataType.BYTE -> memory.setUB(registers.getUW(i.reg1!!).toUInt() + offset.toUInt(), 0u)
+            IRDataType.WORD -> memory.setUW(registers.getUW(i.reg1!!).toUInt() + offset.toUInt(), 0u)
+            IRDataType.LONG -> memory.setSL(registers.getUW(i.reg1!!).toUInt() + offset.toUInt(), 0)
+            IRDataType.FLOAT -> memory.setFloat(registers.getUW(i.reg1!!).toUInt() + offset.toUInt(), 0.0)
         }
         nextPc()
     }
 
     private fun InsSTOREZX(i: IRInstruction) {
         when (i.type!!) {
-            IRDataType.BYTE -> memory.setUB(i.address!! + registers.getUB(i.reg1!!).toInt(), 0u)
-            IRDataType.WORD -> memory.setUW(i.address!! + registers.getUB(i.reg1!!).toInt(), 0u)
-            IRDataType.LONG -> memory.setSL(i.address!! + registers.getUB(i.reg1!!).toInt(), 0)
-            IRDataType.FLOAT -> memory.setFloat(i.address!! + registers.getUB(i.reg1!!).toInt(), 0.0)
+            IRDataType.BYTE -> memory.setUB(i.address!!.value + registers.getUB(i.reg1!!).toUInt(), 0u)
+            IRDataType.WORD -> memory.setUW(i.address!!.value + registers.getUB(i.reg1!!).toUInt(), 0u)
+            IRDataType.LONG -> memory.setSL(i.address!!.value + registers.getUB(i.reg1!!).toUInt(), 0)
+            IRDataType.FLOAT -> memory.setFloat(i.address!!.value + registers.getUB(i.reg1!!).toUInt(), 0.0)
         }
         nextPc()
     }
@@ -666,7 +648,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsJUMPI(i: IRInstruction) {
-        val artificialAddress = registers.getUW(i.reg1!!).toInt()
+        val artificialAddress: UInt = registers.getUW(i.reg1!!).toUInt()
         if(!artificialLabelAddresses.contains(artificialAddress))
             throw IllegalArgumentException("vm program can't jump to system memory address (${i.opcode} ${artificialAddress.toHex()})")
         pcChunk = artificialLabelAddresses.getValue(artificialAddress)
@@ -710,27 +692,30 @@ class VirtualMachine(irProgram: IRProgram) {
             val returns = context.fcallSpec.returns
             when (i.type!!) {
                 IRDataType.BYTE -> {
-                    if(returns.isNotEmpty())
-                        registers.setUB(returns.single().registerNum, i.immediate!!.toUByte())
-                    else {
+                    if(returns.isNotEmpty()) {
+                        val value = i.immediate!!.toUByte()
+                        registers.setUB(returns.single().registerNum, value)
+                    } else {
                         val callInstr = context.returnChunk.instructions[context.returnIndex-1]
                         if(callInstr.opcode!=Opcode.CALL)
                             throw IllegalArgumentException("missing return value reg")
                     }
                 }
                 IRDataType.WORD -> {
-                    if(returns.isNotEmpty())
-                        registers.setUW(returns.single().registerNum, i.immediate!!.toUShort())
-                    else {
+                    if(returns.isNotEmpty()) {
+                        val value = i.immediate!!.toUShort()
+                        registers.setUW(returns.single().registerNum, value)
+                    } else {
                         val callInstr = context.returnChunk.instructions[context.returnIndex-1]
                         if(callInstr.opcode!=Opcode.CALL)
                             throw IllegalArgumentException("missing return value reg")
                     }
                 }
                 IRDataType.LONG -> {
-                    if(returns.isNotEmpty())
-                        registers.setSL(returns.single().registerNum, i.immediate!!)
-                    else {
+                    if(returns.isNotEmpty()) {
+                        val value = i.immediate!!
+                        registers.setSL(returns.single().registerNum, value)
+                    } else {
                         val callInstr = context.returnChunk.instructions[context.returnIndex-1]
                         if(callInstr.opcode!=Opcode.CALL)
                             throw IllegalArgumentException("missing return value reg")
@@ -759,27 +744,30 @@ class VirtualMachine(irProgram: IRProgram) {
             val returns = context.fcallSpec.returns
             when (i.type!!) {
                 IRDataType.BYTE -> {
-                    if(returns.isNotEmpty())
-                        registers.setUB(returns.single().registerNum, registers.getUB(i.reg1!!))
-                    else {
+                    if(returns.isNotEmpty()) {
+                        val value = registers.getUB(i.reg1!!)
+                        registers.setUB(returns.single().registerNum, value)
+                    } else {
                         val callInstr = context.returnChunk.instructions[context.returnIndex-1]
                         if(callInstr.opcode!=Opcode.CALL)
                             throw IllegalArgumentException("missing return value reg")
                     }
                 }
                 IRDataType.WORD -> {
-                    if(returns.isNotEmpty())
-                        registers.setUW(returns.single().registerNum, registers.getUW(i.reg1!!))
-                    else {
+                    if(returns.isNotEmpty()) {
+                        val value = registers.getUW(i.reg1!!)
+                        registers.setUW(returns.single().registerNum, value)
+                    } else {
                         val callInstr = context.returnChunk.instructions[context.returnIndex-1]
                         if(callInstr.opcode!=Opcode.CALL)
                             throw IllegalArgumentException("missing return value reg")
                     }
                 }
                 IRDataType.LONG -> {
-                    if(returns.isNotEmpty())
-                        registers.setSL(returns.single().registerNum, registers.getSL(i.reg1!!))
-                    else {
+                    if(returns.isNotEmpty()) {
+                        val value = registers.getSL(i.reg1!!)
+                        registers.setSL(returns.single().registerNum, value)
+                    } else {
                         val callInstr = context.returnChunk.instructions[context.returnIndex-1]
                         if(callInstr.opcode!=Opcode.CALL)
                             throw IllegalArgumentException("missing return value reg")
@@ -975,7 +963,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsINCM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> {
                 val value = (memory.getUB(address)+1u).toUByte()
@@ -1022,21 +1010,21 @@ class VirtualMachine(irProgram: IRProgram) {
     private fun InsDECM(i: IRInstruction) {
         when(i.type!!) {
             IRDataType.BYTE -> {
-                val value = (memory.getUB(i.address!!)-1u).toUByte()
-                memory.setUB(i.address!!, value)
+                val value = (memory.getUB(i.address!!.value)-1u).toUByte()
+                memory.setUB(i.address!!.value, value)
                 statusbitsNZ(value.toInt(), i.type!!)
             }
             IRDataType.WORD -> {
-                val value = (memory.getUW(i.address!!)-1u).toUShort()
-                memory.setUW(i.address!!, value)
+                val value = (memory.getUW(i.address!!.value)-1u).toUShort()
+                memory.setUW(i.address!!.value, value)
                 statusbitsNZ(value.toInt(), i.type!!)
             }
             IRDataType.LONG -> {
-                val value = memory.getSL(i.address!!)-1
-                memory.setSL(i.address!!, value)
+                val value = memory.getSL(i.address!!.value)-1
+                memory.setSL(i.address!!.value, value)
                 statusbitsNZ(value, i.type!!)
             }
-            IRDataType.FLOAT -> memory.setFloat(i.address!!, memory.getFloat(i.address!!)-1f)
+            IRDataType.FLOAT -> memory.setFloat(i.address!!.value, memory.getFloat(i.address!!.value)-1f)
         }
         nextPc()
     }
@@ -1064,7 +1052,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsNEGM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> {
                 val value = -memory.getUB(address).toInt()
@@ -1116,7 +1104,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsADDM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> plusMinusMultAnyByteInplace("+", i.reg1!!, address)
             IRDataType.WORD -> plusMinusMultAnyWordInplace("+", i.reg1!!, address)
@@ -1161,7 +1149,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsSUBM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> plusMinusMultAnyByteInplace("-", i.reg1!!, address)
             IRDataType.WORD -> plusMinusMultAnyWordInplace("-", i.reg1!!, address)
@@ -1206,7 +1194,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsMULM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> plusMinusMultAnyByteInplace("*", i.reg1!!, address)
             IRDataType.WORD -> plusMinusMultAnyWordInplace("*", i.reg1!!, address)
@@ -1251,7 +1239,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsMULSM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> multiplyAnyByteSignedInplace(i.reg1!!, address)
             IRDataType.WORD -> multiplyAnyWordSignedInplace(i.reg1!!, address)
@@ -1287,7 +1275,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsDIVM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> divModByteUnsignedInplace("/", i.reg1!!, address)
             IRDataType.WORD -> divModWordUnsignedInplace("/", i.reg1!!, address)
@@ -1327,7 +1315,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsDIVSM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> divModByteSignedInplace("/", i.reg1!!, address)
             IRDataType.WORD -> divModWordSignedInplace("/", i.reg1!!, address)
@@ -1362,6 +1350,26 @@ class VirtualMachine(irProgram: IRProgram) {
         nextPc()
     }
 
+    private fun InsMODSR(i: IRInstruction) {
+        when(i.type!!) {
+            IRDataType.BYTE -> divModByteSigned("%", i.reg1!!, i.reg2!!)
+            IRDataType.WORD -> divModWordSigned("%", i.reg1!!, i.reg2!!)
+            IRDataType.LONG -> divModLongSigned("%", i.reg1!!, i.reg2!!)
+            IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
+        }
+        nextPc()
+    }
+
+    private fun InsMODS(i: IRInstruction) {
+        when(i.type!!) {
+            IRDataType.BYTE -> divModConstByteSigned("%", i.reg1!!, i.immediate!!.toByte())
+            IRDataType.WORD -> divModConstWordSigned("%", i.reg1!!, i.immediate!!.toShort())
+            IRDataType.LONG -> divModConstLongSigned("%", i.reg1!!, i.immediate!!)
+            IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
+        }
+        nextPc()
+    }
+
     private fun InsDIVMODR(i: IRInstruction) {
         when(i.type!!) {
             IRDataType.BYTE -> divAndModUByte(i.reg1!!, i.reg2!!)       // division+remainder results on value stack
@@ -1382,27 +1390,35 @@ class VirtualMachine(irProgram: IRProgram) {
         nextPc()
     }
 
-    private fun InsSGN(i: IRInstruction) {
-        var sign: Int
+    private fun InsSDIVMODR(i: IRInstruction) {
         when(i.type!!) {
-            IRDataType.BYTE -> {
-                sign = registers.getSB(i.reg2!!).toInt().sign
-                registers.setSB(i.reg1!!, sign.toByte())
-            }
-            IRDataType.WORD -> {
-                sign = registers.getSW(i.reg2!!).toInt().sign
-                registers.setSB(i.reg1!!, sign.toByte())
-            }
-            IRDataType.LONG -> {
-                sign = registers.getSL(i.reg2!!).sign
-                registers.setSB(i.reg1!!, sign.toByte())
-            }
-            IRDataType.FLOAT -> {
-                sign = registers.getFloat(i.fpReg1!!).sign.toInt()
-                registers.setSB(i.reg1!!, sign.toByte())
-            }
+            IRDataType.BYTE -> divAndModSByte(i.reg1!!, i.reg2!!)       // signed division+remainder results on value stack
+            IRDataType.WORD -> divAndModSWord(i.reg1!!, i.reg2!!)       // signed division+remainder results on value stack
+            IRDataType.LONG -> throw IllegalArgumentException("divmodr signed long not supported")
+            IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
         }
-        statusbitsComparison(sign, i.type!!)
+        nextPc()
+    }
+
+    private fun InsSDIVMOD(i: IRInstruction) {
+        when(i.type!!) {
+            IRDataType.BYTE -> divAndModConstSByte(i.reg1!!, i.immediate!!.toByte())    // signed division+remainder results on value stack
+            IRDataType.WORD -> divAndModConstSWord(i.reg1!!, i.immediate!!.toShort())   // signed division+remainder results on value stack
+            IRDataType.LONG -> throw IllegalArgumentException("divmod signed long not supported")
+            IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
+        }
+        nextPc()
+    }
+
+    private fun InsSGN(i: IRInstruction) {
+        val sign: Int = when (i.type!!) {
+            IRDataType.BYTE -> registers.getSB(i.reg2!!).toInt().sign
+            IRDataType.WORD -> registers.getSW(i.reg2!!).toInt().sign
+            IRDataType.LONG -> registers.getSL(i.reg2!!).sign
+            IRDataType.FLOAT -> registers.getFloat(i.fpReg1!!).sign.toInt()
+        }
+        registers.setSB(i.reg1!!, sign.toByte())
+        statusbitsComparisonWithOverflow(sign, 0, IRDataType.BYTE)
         nextPc()
     }
 
@@ -1444,45 +1460,38 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsCMP(i: IRInstruction) {
-        val comparison = when(i.type!!) {
-            IRDataType.BYTE -> {
-                val reg1 = registers.getUB(i.reg1!!)
-                val reg2 = registers.getUB(i.reg2!!)
-                reg1.toInt() - reg2.toInt()
-            }
-            IRDataType.WORD -> {
-                val reg1 = registers.getUW(i.reg1!!)
-                val reg2 = registers.getUW(i.reg2!!)
-                reg1.toInt() - reg2.toInt()
-            }
-            IRDataType.LONG -> {
-                val reg1 = registers.getSL(i.reg1!!)
-                val reg2 = registers.getSL(i.reg2!!)
-                reg1 - reg2
-            }
+        val type = i.type!!
+        val left = when(type) {
+            IRDataType.BYTE -> registers.getUB(i.reg1!!).toInt()
+            IRDataType.WORD -> registers.getUW(i.reg1!!).toInt()
+            IRDataType.LONG -> registers.getSL(i.reg1!!)
             IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
         }
-        statusbitsComparison(comparison, i.type!!)
+        val right = when(type) {
+            IRDataType.BYTE -> registers.getUB(i.reg2!!).toInt()
+            IRDataType.WORD -> registers.getUW(i.reg2!!).toInt()
+            IRDataType.LONG -> registers.getSL(i.reg2!!)
+            IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
+        }
+        statusbitsComparisonWithOverflow(left, right, type)
         nextPc()
     }
 
     private fun InsCMPI(i: IRInstruction) {
-        val comparison = when(i.type!!) {
-            IRDataType.BYTE -> {
-                val reg1 = registers.getUB(i.reg1!!)
-                reg1.toInt() - (i.immediate!! and 255)
-            }
-            IRDataType.WORD -> {
-                val reg1 = registers.getUW(i.reg1!!)
-                reg1.toInt() - (i.immediate!! and 65535)
-            }
-            IRDataType.LONG -> {
-                val reg1 = registers.getSL(i.reg1!!)
-                reg1 - i.immediate!!
-            }
+        val type = i.type!!
+        val left = when(type) {
+            IRDataType.BYTE -> registers.getUB(i.reg1!!).toInt()
+            IRDataType.WORD -> registers.getUW(i.reg1!!).toInt()
+            IRDataType.LONG -> registers.getSL(i.reg1!!)
             IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
         }
-        statusbitsComparison(comparison, i.type!!)
+        val right = when(type) {
+            IRDataType.BYTE -> i.immediate!! and 0xff
+            IRDataType.WORD -> i.immediate!! and 0xffff
+            IRDataType.LONG -> i.immediate!!
+            IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
+        }
+        statusbitsComparisonWithOverflow(left, right, type)
         nextPc()
     }
 
@@ -1507,413 +1516,9 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
 
-    private fun statusbitsNZ(value: Int, type: IRDataType) {
-        statusZero = value==0
-        when(type) {
-            IRDataType.BYTE -> statusNegative = (value and 0x80)==0x80
-            IRDataType.WORD -> statusNegative = (value and 0x8000)==0x8000
-            IRDataType.LONG -> statusNegative = value<0
-            IRDataType.FLOAT -> { /* floats don't change the status bits */ }
-        }
-    }
-
-    private fun statusbitsComparison(comparison: Int, type: IRDataType) {
-        if(comparison==0) {
-            statusZero = true
-            statusCarry = true
-        } else if(comparison>0) {
-            statusZero = false
-            statusCarry = true
-        } else {
-            statusZero = false
-            statusCarry = false
-        }
-        when(type) {
-            IRDataType.BYTE -> statusNegative = (comparison and 0x80)!=0
-            IRDataType.WORD -> statusNegative = (comparison and 0x8000)!=0
-            IRDataType.LONG -> statusNegative = comparison<0
-            IRDataType.FLOAT -> { /* floats don't change the status bits */ }
-        }
-        // TODO determine statusOverflow in comparison
-    }
-
-    private fun plusMinusMultAnyByte(operator: String, reg1: Int, reg2: Int) {
-        val left = registers.getUB(reg1)
-        val right = registers.getUB(reg2)
-        val result = when(operator) {
-            "+" -> left + right
-            "-" -> left - right
-            "*" -> left * right
-            else -> throw IllegalArgumentException("operator byte $operator")
-        }
-        registers.setUB(reg1, result.toUByte())
-    }
-
-    private fun multiplyAnyByteSigned(reg1: Int, reg2: Int) {
-        val left = registers.getSB(reg1)
-        val right = registers.getSB(reg2)
-        val result = left * right
-        registers.setSB(reg1, result.toByte())
-    }
-
-    private fun plusMinusMultConstByte(operator: String, reg1: Int, value: UByte) {
-        val left = registers.getUB(reg1)
-        val result = when(operator) {
-            "+" -> left + value
-            "-" -> left - value
-            "*" -> left * value
-            else -> throw IllegalArgumentException("operator byte $operator")
-        }
-        registers.setUB(reg1, result.toUByte())
-    }
-
-    private fun multiplyConstByteSigned(reg1: Int, value: Byte) {
-        val left = registers.getSB(reg1)
-        val result = left * value
-        registers.setSB(reg1, result.toByte())
-    }
-
-    private fun plusMinusMultAnyByteInplace(operator: String, reg1: Int, address: Int) {
-        val memvalue = memory.getUB(address)
-        val operand = registers.getUB(reg1)
-        val result = when(operator) {
-            "+" -> memvalue + operand
-            "-" -> memvalue - operand
-            "*" -> memvalue * operand
-            else -> throw IllegalArgumentException("operator byte $operator")
-        }
-        memory.setUB(address, result.toUByte())
-    }
-
-    private fun multiplyAnyByteSignedInplace(reg1: Int, address: Int) {
-        val memvalue = memory.getSB(address)
-        val operand = registers.getSB(reg1)
-        val result = memvalue * operand
-        memory.setSB(address, result.toByte())
-    }
-
-    private fun divModByteSigned(operator: String, reg1: Int, reg2: Int) {
-        val left = registers.getSB(reg1)
-        val right = registers.getSB(reg2)
-        val result = when(operator) {
-            "/" -> {
-                if(right==0.toByte()) 127
-                else left / right
-            }
-            "%" -> {
-                if(right==0.toByte()) 127
-                else left % right
-            }
-            else -> throw IllegalArgumentException("operator byte $operator")
-        }
-        registers.setSB(reg1, result.toByte())
-    }
-
-    private fun divModConstByteSigned(operator: String, reg1: Int, value: Byte) {
-        val left = registers.getSB(reg1)
-        val result = when(operator) {
-            "/" -> {
-                if(value==0.toByte()) 127
-                else left / value
-            }
-            "%" -> {
-                if(value==0.toByte()) 127
-                else left % value
-            }
-            else -> throw IllegalArgumentException("operator byte $operator")
-        }
-        registers.setSB(reg1, result.toByte())
-    }
-
-    private fun divModByteSignedInplace(operator: String, reg1: Int, address: Int) {
-        val left = memory.getSB(address)
-        val right = registers.getSB(reg1)
-        val result = when(operator) {
-            "/" -> {
-                if(right==0.toByte()) 127
-                else left / right
-            }
-            "%" -> {
-                if(right==0.toByte()) 127
-                else left % right
-            }
-            else -> throw IllegalArgumentException("operator byte $operator")
-        }
-        memory.setSB(address, result.toByte())
-    }
-
-    private fun divOrModByteUnsigned(operator: String, reg1: Int, reg2: Int) {
-        val left = registers.getUB(reg1)
-        val right = registers.getUB(reg2)
-        val result = when(operator) {
-            "/" -> {
-                if(right==0.toUByte()) 0xffu
-                else left / right
-            }
-            "%" -> {
-                if(right==0.toUByte()) 0u
-                else left % right
-            }
-            else -> throw IllegalArgumentException("operator byte $operator")
-        }
-        registers.setUB(reg1, result.toUByte())
-    }
-
-    private fun divOrModConstByteUnsigned(operator: String, reg1: Int, value: UByte) {
-        val left = registers.getUB(reg1)
-        val result = when(operator) {
-            "/" -> {
-                if(value==0.toUByte()) 0xffu
-                else left / value
-            }
-            "%" -> {
-                if(value==0.toUByte()) 0u
-                else left % value
-            }
-            else -> throw IllegalArgumentException("operator byte $operator")
-        }
-        registers.setUB(reg1, result.toUByte())
-    }
-
-    private fun divAndModUByte(reg1: Int, reg2: Int) {
-        val left = registers.getUB(reg1)
-        val right = registers.getUB(reg2)
-        val division = if(right==0.toUByte()) 0xffu else left / right
-        val remainder = if(right==0.toUByte()) 0u else left % right
-        valueStack.add(division.toUByte())
-        valueStack.add(remainder.toUByte())
-    }
-
-    private fun divAndModConstUByte(reg1: Int, value: UByte) {
-        val left = registers.getUB(reg1)
-        val division = if(value==0.toUByte()) 0xffu else left / value
-        val remainder = if(value==0.toUByte()) 0u else left % value
-        valueStack.add(division.toUByte())
-        valueStack.add(remainder.toUByte())
-    }
-
-    private fun divAndModUWord(reg1: Int, reg2: Int) {
-        val left = registers.getUW(reg1)
-        val right = registers.getUW(reg2)
-        val division = if(right==0.toUShort()) 0xffffu else left / right
-        val remainder = if(right==0.toUShort()) 0u else left % right
-        valueStack.pushw(division.toUShort())
-        valueStack.pushw(remainder.toUShort())
-    }
-
-    private fun divAndModConstUWord(reg1: Int, value: UShort) {
-        val left = registers.getUW(reg1)
-        val division = if(value==0.toUShort()) 0xffffu else left / value
-        val remainder = if(value==0.toUShort()) 0u else left % value
-        valueStack.pushw(division.toUShort())
-        valueStack.pushw(remainder.toUShort())
-    }
-
-    private fun divModByteUnsignedInplace(operator: String, reg1: Int, address: Int) {
-        val left = memory.getUB(address)
-        val right = registers.getUB(reg1)
-        val result = when(operator) {
-            "/" -> {
-                if(right==0.toUByte()) 0xffu
-                else left / right
-            }
-            "%" -> {
-                if(right==0.toUByte()) 0u
-                else left % right
-            }
-            else -> throw IllegalArgumentException("operator byte $operator")
-        }
-        memory.setUB(address, result.toUByte())
-    }
-
-    private fun plusMinusMultAnyWord(operator: String, reg1: Int, reg2: Int) {
-        val left = registers.getUW(reg1)
-        val right = registers.getUW(reg2)
-        val result: UInt
-        when(operator) {
-            "+" -> result = left + right
-            "-" -> result = left - right
-            "*" -> {
-                result = left.toUInt() * right
-                mul16LastUpper = result shr 16
-            }
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        registers.setUW(reg1, result.toUShort())
-    }
-
-    private fun multiplyAnyWordSigned(reg1: Int, reg2: Int) {
-        val left = registers.getSW(reg1)
-        val right = registers.getSW(reg2)
-        val result = left.toInt() * right
-        mul16LastUpper = result.toUInt() shr 16
-        registers.setSW(reg1, result.toShort())
-    }
-
-    private fun plusMinusMultConstWord(operator: String, reg1: Int, value: UShort) {
-        val left = registers.getUW(reg1)
-        val result: UInt
-        when(operator) {
-            "+" -> result = left + value
-            "-" -> result = left - value
-            "*" -> {
-                result = left.toUInt() * value
-                mul16LastUpper = result shr 16
-            }
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        registers.setUW(reg1, result.toUShort())
-    }
-
-    private fun multiplyConstWordSigned(reg1: Int, value: Short) {
-        val left = registers.getSW(reg1)
-        val result = left.toInt() * value
-        mul16LastUpper = result.toUInt() shr 16
-        registers.setSW(reg1, result.toShort())
-    }
-
-    private fun plusMinusMultAnyWordInplace(operator: String, reg1: Int, address: Int) {
-        val memvalue = memory.getUW(address)
-        val operand = registers.getUW(reg1)
-        val result: UInt
-        when(operator) {
-            "+" -> result = memvalue + operand
-            "-" -> result = memvalue - operand
-            "*" -> {
-                result = memvalue.toUInt() * operand
-                mul16LastUpper = result shr 16
-            }
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        memory.setUW(address, result.toUShort())
-    }
-
-    private fun multiplyAnyWordSignedInplace(reg1: Int, address: Int) {
-        val memvalue = memory.getSW(address)
-        val operand = registers.getSW(reg1)
-        val result = memvalue.toInt() * operand
-        mul16LastUpper = result.toUInt() shr 16
-        memory.setSW(address, result.toShort())
-    }
-
-    private fun divOrModWordUnsigned(operator: String, reg1: Int, reg2: Int) {
-        val left = registers.getUW(reg1)
-        val right = registers.getUW(reg2)
-        val result = when(operator) {
-            "/" -> {
-                if(right==0.toUShort()) 0xffffu
-                else left / right
-            }
-            "%" -> {
-                if(right==0.toUShort()) 0u
-                else left % right
-            }
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        registers.setUW(reg1, result.toUShort())
-    }
-
-    private fun divOrModConstWordUnsigned(operator: String, reg1: Int, value: UShort) {
-        val left = registers.getUW(reg1)
-        val result = when(operator) {
-            "/" -> {
-                if(value==0.toUShort()) 0xffffu
-                else left / value
-            }
-            "%" -> {
-                if(value==0.toUShort()) 0u
-                else left % value
-            }
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        registers.setUW(reg1, result.toUShort())
-    }
-
-    private fun divModWordUnsignedInplace(operator: String, reg1: Int, address: Int) {
-        val left = memory.getUW(address)
-        val right = registers.getUW(reg1)
-        val result = when(operator) {
-            "/" -> {
-                if(right==0.toUShort()) 0xffffu
-                else left / right
-            }
-            "%" -> {
-                if(right==0.toUShort()) 0u
-                else left % right
-            }
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        memory.setUW(address, result.toUShort())
-    }
-
-    private fun divModWordSigned(operator: String, reg1: Int, reg2: Int) {
-        val left = registers.getSW(reg1)
-        val right = registers.getSW(reg2)
-        val result = when(operator) {
-            "/" -> {
-                if(right==0.toShort()) 32767
-                else left / right
-            }
-            "%" -> {
-                if(right==0.toShort()) 32767
-                else left % right
-            }
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        registers.setSW(reg1, result.toShort())
-    }
-
-    private fun divModConstWordSigned(operator: String, reg1: Int, value: Short) {
-        val left = registers.getSW(reg1)
-        val result = when(operator) {
-            "/" -> {
-                if(value==0.toShort()) 32767
-                else left / value
-            }
-            "%" -> {
-                if(value==0.toShort()) 32767
-                else left % value
-            }
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        registers.setSW(reg1, result.toShort())
-    }
-
-    private fun divModWordSignedInplace(operator: String, reg1: Int, address: Int) {
-        val left = memory.getSW(address)
-        val right = registers.getSW(reg1)
-        val result = when(operator) {
-            "/" -> {
-                if(right==0.toShort()) 32767
-                else left / right
-            }
-            "%" -> {
-                if(right==0.toShort()) 32767
-                else left % right
-            }
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        memory.setSW(address, result.toShort())
-    }
-
-    private fun arithFloat(left: Double, operator: String, right: Double): Double = when(operator) {
-        "+" -> left + right
-        "-" -> left - right
-        "*" -> left * right
-        "/" -> {
-            if(right==0.0) Double.MAX_VALUE
-            else left / right
-        }
-        "%" -> {
-            if(right==0.0) Double.MAX_VALUE
-            else left % right
-        }
-        else -> throw IllegalArgumentException("operator word $operator")
-    }
-
     private fun InsBIT(i: IRInstruction) {
         if (i.type!! == IRDataType.BYTE) {
-            val value = memory.getUB(i.address!!)
+            val value = memory.getUB(i.address!!.value)
             statusNegative = value.toInt() and 0x80 != 0
             statusOverflow = value.toInt() and 0x40 != 0
             // NOTE: the 'AND' part of the BIT instruction as it does on the 6502 CPU, is not utilized in prog8 so we don't implement it here
@@ -1978,7 +1583,7 @@ class VirtualMachine(irProgram: IRProgram) {
 
     private fun InsANDM(i: IRInstruction) {
         val value: Int
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> {
                 val left = memory.getUB(address)
@@ -2040,7 +1645,7 @@ class VirtualMachine(irProgram: IRProgram) {
 
     private fun InsORM(i: IRInstruction) {
         val value: Int
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> {
                 val left = memory.getUB(address)
@@ -2102,7 +1707,7 @@ class VirtualMachine(irProgram: IRProgram) {
 
     private fun InsXORM(i: IRInstruction) {
         val value: Int
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> {
                 val left = memory.getUB(address)
@@ -2139,7 +1744,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsINVM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> memory.setUB(address, memory.getUB(address).inv())
             IRDataType.WORD -> memory.setUW(address, memory.getUW(address).inv())
@@ -2161,7 +1766,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsASRNM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         val operand = registers.getUB(i.reg1!!).toInt()
         when(i.type!!) {
             IRDataType.BYTE -> {
@@ -2204,7 +1809,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsASRM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> {
                 val value = memory.getSB(address).toInt()
@@ -2238,7 +1843,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsLSRNM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         val operand = registers.getUB(i.reg1!!).toInt()
         when(i.type!!) {
             IRDataType.BYTE -> {
@@ -2251,7 +1856,7 @@ class VirtualMachine(irProgram: IRProgram) {
             }
             IRDataType.LONG -> {
                 val memvalue = memory.getSL(address)
-                memory.setSL(address, memvalue shr operand)
+                memory.setSL(address, memvalue ushr operand)
             }
             IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
         }
@@ -2273,7 +1878,7 @@ class VirtualMachine(irProgram: IRProgram) {
             IRDataType.LONG -> {
                 val value = registers.getSL(i.reg1!!)
                 statusCarry = (value and 1)!=0
-                registers.setSL(i.reg1!!, value shr 1)
+                registers.setSL(i.reg1!!, value ushr 1)
             }
             IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
         }
@@ -2281,7 +1886,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsLSRM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> {
                 val value = memory.getUB(address).toInt()
@@ -2296,7 +1901,7 @@ class VirtualMachine(irProgram: IRProgram) {
             IRDataType.LONG -> {
                 val value = memory.getSL(address)
                 statusCarry = (value and 1)!=0
-                memory.setSL(address, value shr 1)
+                memory.setSL(address, value ushr 1)
             }
             IRDataType.FLOAT -> throw IllegalArgumentException("invalid float type for this instruction $i")
         }
@@ -2321,7 +1926,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsLSLNM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         val operand = registers.getUB(i.reg1!!).toInt()
         when(i.type!!) {
             IRDataType.BYTE -> {
@@ -2364,7 +1969,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsLSLM(i: IRInstruction) {
-        val address = i.address!!
+        val address = i.address!!.value
         when(i.type!!) {
             IRDataType.BYTE -> {
                 val value = memory.getUB(address).toInt()
@@ -2429,7 +2034,7 @@ class VirtualMachine(irProgram: IRProgram) {
 
     private fun InsRORM(i: IRInstruction, useCarry: Boolean) {
         val newStatusCarry: Boolean
-        val address = i.address!!
+        val address = i.address!!.value
         when (i.type!!) {
             IRDataType.BYTE -> {
                 val orig = memory.getUB(address)
@@ -2511,7 +2116,7 @@ class VirtualMachine(irProgram: IRProgram) {
     }
 
     private fun InsROLM(i: IRInstruction, useCarry: Boolean) {
-        val address = i.address!!
+        val address = i.address!!.value
         val newStatusCarry: Boolean
         when (i.type!!) {
             IRDataType.BYTE -> {
@@ -2609,6 +2214,14 @@ class VirtualMachine(irProgram: IRProgram) {
         nextPc()
     }
 
+    private fun InsMIDB(i: IRInstruction) {
+        val value = registers.getSL(i.reg2!!)
+        val newValue = value ushr 8 and 255
+        statusbitsNZ(newValue, i.type!!)
+        registers.setUB(i.reg1!!, newValue.toUByte())
+        nextPc()
+    }
+
     private fun InsMSIGW(i: IRInstruction) {
         if (i.type!! == IRDataType.LONG) {
             val value = registers.getSL(i.reg2!!)
@@ -2620,36 +2233,6 @@ class VirtualMachine(irProgram: IRProgram) {
         nextPc()
     }
 
-    private fun InsSWAP(i: IRInstruction) {
-        when(i.type!!) {
-            IRDataType.BYTE -> {
-                val value1 = registers.getUB(i.reg1!!)
-                val value2 = registers.getUB(i.reg2!!)
-                registers.setUB(i.reg1!!, value2)
-                registers.setUB(i.reg2!!, value1)
-            }
-            IRDataType.WORD -> {
-                val value1 = registers.getUW(i.reg1!!)
-                val value2 = registers.getUW(i.reg2!!)
-                registers.setUW(i.reg1!!, value2)
-                registers.setUW(i.reg2!!, value1)
-            }
-            IRDataType.LONG -> {
-                val value1 = registers.getSL(i.reg1!!)
-                val value2 = registers.getSL(i.reg2!!)
-                registers.setSL(i.reg1!!, value2)
-                registers.setSL(i.reg2!!, value1)
-            }
-            IRDataType.FLOAT -> {
-                val value1 = registers.getFloat(i.fpReg1!!)
-                val value2 = registers.getFloat(i.fpReg2!!)
-                registers.setFloat(i.fpReg1!!, value2)
-                registers.setFloat(i.fpReg2!!, value1)
-            }
-        }
-        nextPc()
-    }
-
     private fun InsCONCAT(i: IRInstruction) {
         when(i.type!!) {
             IRDataType.BYTE -> {
@@ -2657,7 +2240,6 @@ class VirtualMachine(irProgram: IRProgram) {
                 val lsb = registers.getUB(i.reg3!!)
                 val value = ((msb.toInt() shl 8) or lsb.toInt())
                 registers.setUW(i.reg1!!, value.toUShort())
-                statusbitsNZ(value, i.type!!)
             }
             IRDataType.WORD -> {
                 val msw = registers.getUW(i.reg2!!)
@@ -2867,319 +2449,20 @@ class VirtualMachine(irProgram: IRProgram) {
         nextPc()
     }
 
-    private fun getBranchOperands(i: IRInstruction): Pair<Int, Int> {
-        return when(i.type) {
-            IRDataType.BYTE -> Pair(registers.getSB(i.reg1!!).toInt(), registers.getSB(i.reg2!!).toInt())
-            IRDataType.WORD -> Pair(registers.getSW(i.reg1!!).toInt(), registers.getSW(i.reg2!!).toInt())
-            IRDataType.LONG -> Pair(registers.getSL(i.reg1!!), registers.getSL(i.reg2!!))
-            IRDataType.FLOAT -> {
-                throw IllegalArgumentException("can't use float here")
-            }
-            null -> throw IllegalArgumentException("need type for branch instruction")
-        }
-    }
+    internal var window: GraphicsWindow? = null
 
-    private fun getBranchOperandsImm(i: IRInstruction): Pair<Int, Int> {
-        return when(i.type) {
-            IRDataType.BYTE -> Pair(registers.getSB(i.reg1!!).toInt(), i.immediate!!)
-            IRDataType.WORD -> Pair(registers.getSW(i.reg1!!).toInt(), i.immediate!!)
-            IRDataType.LONG -> Pair(registers.getSL(i.reg1!!), i.immediate!!)
-            IRDataType.FLOAT -> {
-                throw IllegalArgumentException("can't use float here")
-            }
-            null -> throw IllegalArgumentException("need type for branch instruction")
-        }
-    }
-
-    private fun getBranchOperandsU(i: IRInstruction): Pair<UInt, UInt> {
-        return when(i.type) {
-            IRDataType.BYTE -> Pair(registers.getUB(i.reg1!!).toUInt(), registers.getUB(i.reg2!!).toUInt())
-            IRDataType.WORD -> Pair(registers.getUW(i.reg1!!).toUInt(), registers.getUW(i.reg2!!).toUInt())
-            IRDataType.LONG -> Pair(registers.getSL(i.reg1!!).toUInt(), registers.getSL(i.reg2!!).toUInt())
-            IRDataType.FLOAT -> {
-                throw IllegalArgumentException("can't use float here")
-            }
-            null -> throw IllegalArgumentException("need type for branch instruction")
-        }
-    }
-
-    private fun getBranchOperandsImmU(i: IRInstruction): Pair<UInt, UInt> {
-        return when(i.type) {
-            IRDataType.BYTE -> Pair(registers.getUB(i.reg1!!).toUInt(), i.immediate!!.toUInt())
-            IRDataType.WORD -> Pair(registers.getUW(i.reg1!!).toUInt(), i.immediate!!.toUInt())
-            IRDataType.LONG -> Pair(registers.getSL(i.reg1!!).toUInt(), i.immediate!!.toUInt())
-            IRDataType.FLOAT -> {
-                throw IllegalArgumentException("can't use float here")
-            }
-            null -> throw IllegalArgumentException("need type for branch instruction")
-        }
-    }
-
-    private fun getLogicalOperandsU(i: IRInstruction): Pair<UInt, UInt> {
-        return when(i.type) {
-            IRDataType.BYTE -> Pair(registers.getUB(i.reg1!!).toUInt(), registers.getUB(i.reg2!!).toUInt())
-            IRDataType.WORD -> Pair(registers.getUW(i.reg1!!).toUInt(), registers.getUW(i.reg2!!).toUInt())
-            IRDataType.LONG -> Pair(registers.getSL(i.reg1!!).toUInt(), registers.getSL(i.reg2!!).toUInt())
-            IRDataType.FLOAT -> {
-                throw IllegalArgumentException("can't use float here")
-            }
-            null -> throw IllegalArgumentException("need type for logical instruction")
-        }
-    }
-
-    private fun getLogicalOperandsS(i: IRInstruction): Pair<Int, Int> {
-        return when(i.type) {
-            IRDataType.BYTE -> Pair(registers.getSB(i.reg1!!).toInt(), registers.getSB(i.reg2!!).toInt())
-            IRDataType.WORD -> Pair(registers.getSW(i.reg1!!).toInt(), registers.getSW(i.reg2!!).toInt())
-            IRDataType.LONG -> Pair(registers.getSL(i.reg1!!), registers.getSL(i.reg2!!))
-            IRDataType.FLOAT -> {
-                throw IllegalArgumentException("can't use float here")
-            }
-            null -> throw IllegalArgumentException("need type for logical instruction")
-        }
-    }
-
-    private fun plusMinusMultAnyLong(operator: String, reg1: Int, reg2: Int) {
-        val left = registers.getSL(reg1)
-        val right = registers.getSL(reg2)
-        val result: Int = when(operator) {
-            "+" -> left + right
-            "-" -> left - right
-            "*" -> left * right
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        registers.setSL(reg1, result)
-    }
-
-    private fun plusMinusMultConstLong(operator: String, reg1: Int, value: Int) {
-        val left = registers.getSL(reg1)
-        val result: Int = when(operator) {
-            "+" -> left + value
-            "-" -> left - value
-            "*" -> left * value
-            else -> throw IllegalArgumentException("operator long $operator")
-        }
-        registers.setSL(reg1, result)
-    }
-
-    private fun plusMinusMultAnyLongInplace(operator: String, reg1: Int, address: Int) {
-        val memvalue = memory.getSL(address)
-        val operand = registers.getSL(reg1)
-        val result: Int = when(operator) {
-            "+" -> memvalue + operand
-            "-" -> memvalue - operand
-            "*" -> memvalue * operand
-            else -> throw IllegalArgumentException("operator word $operator")
-        }
-        memory.setSL(address, result)
-    }
-
-    private fun multiplyAnyLongSigned(reg1: Int, reg2: Int) {
-        val result = registers.getSL(reg1) * registers.getSL(reg2)
-        registers.setSL(reg1, result)
-    }
-
-    private fun multiplyConstLongSigned(reg1: Int, value: Int) {
-        val result = registers.getSL(reg1) * value
-        registers.setSL(reg1, result)
-    }
-
-    private fun multiplyAnyLongSignedInplace(reg1: Int, address: Int) {
-        val result = memory.getSL(address) * registers.getSL(reg1)
-        memory.setSL(address, result)
-    }
-
-    private fun divModLongSigned(operator: String, reg1: Int, reg2: Int) {
-        TODO("divModLongSigned - multiplication and division of long numbers not yet supported, use floats or words")
-    }
-
-    private fun divModConstLongSigned(operator: String, reg1: Int, immediate: Int) {
-        TODO("divModConstLongSigned - multiplication and division of long numbers not yet supported, use floats or words")
-    }
-
-    private fun divModLongSignedInplace(operator: String, reg1: Int, address: Int) {
-        TODO("divModLongSignedInplace - multiplication and division of long numbers not yet supported, use floats or words")
-    }
-
-
-    private var window: GraphicsWindow? = null
-
-    fun gfx_enable(mode: UByte) {
-        window = when(mode.toInt()) {
-            0 -> GraphicsWindow(320, 240, 3)
-            1 -> GraphicsWindow(640, 480, 2)
-            else -> throw IllegalArgumentException("invalid screen mode")
-        }
-        window!!.start()
-    }
-
-    fun gfx_clear(color: UByte) {
-        window?.clear(color.toInt())
-    }
-
-    fun gfx_plot(x: UShort, y: UShort, color: UByte) {
-        window?.plot(x.toInt(), y.toInt(), color.toInt())
-    }
-
-    fun gfx_getpixel(x: UShort, y: UShort): UByte {
-        return if(window==null)
-            0u
-        else {
-            val color = Color(window!!.getpixel(x.toInt(), y.toInt()))
-            color.green.toUByte()
-        }
-    }
-
-    fun gfx_close() {
-        window?.close()
-    }
-
-    fun waitvsync() {
-        Toolkit.getDefaultToolkit().sync()      // not really the same as wait on vsync, but there's noting else
-    }
-
-    fun randomSeed(seed1: UShort, seed2: UShort) {
-        randomGenerator = Random(((seed1.toUInt() shl 16) or seed2.toUInt()).toInt())
-    }
-
-    fun randomSeedFloat(seed: Double) {
-        randomGeneratorFloats = Random(seed.toBits())
-    }
-
-    fun open_file_read(name: String): Int {
-        try {
-            fileInputStream = Path(name).inputStream()
-        } catch (_: IOException) {
-            return 0
-        }
-        return 1
-    }
-
-    fun open_file_write(name: String): Int {
-        try {
-            fileOutputStream = Path(name).outputStream()
-        } catch (_: IOException) {
-            return 0
-        }
-        return 1
-    }
-
-    fun close_file_read() {
-        fileInputStream?.close()
-        fileInputStream=null
-    }
-
-    fun close_file_write() {
-        fileOutputStream?.flush()
-        fileOutputStream?.close()
-        fileOutputStream=null
-    }
-
-    fun read_file_byte(): Pair<Boolean, UByte> {
-        return if(fileInputStream==null)
-            false to 0u
-        else {
-            try {
-                val byte = fileInputStream!!.read()
-                if(byte>=0)
-                    true to byte.toUByte()
-                else
-                    false to 0u
-            } catch(_: IOException) {
-                false to 0u
-            }
-        }
-    }
-
-    fun write_file_byte(byte: UByte): Boolean {
-        if(fileOutputStream==null)
-            return false
-        try {
-            fileOutputStream!!.write(byte.toInt())
-            return true
-        } catch(_: IOException) {
-            return false
-        }
-    }
-}
-
-internal fun ArrayDeque<UByte>.pushw(value: UShort) {
-    add((value and 255u).toUByte())
-    add((value.toInt() ushr 8).toUByte())
-}
-
-internal fun ArrayDeque<UByte>.pushl(value: Int) {
-    val uint = value.toUInt()
-    add((uint and 255u).toUByte())
-    add((uint shr 8 and 255u).toUByte())
-    add((uint shr 16 and 255u).toUByte())
-    add((uint shr 24 and 255u).toUByte())
-}
-
-internal fun ArrayDeque<UByte>.pushf(value: Double) {
-    // push float; lsb first, msb last
-    var bits = value.toBits()
-    add(bits.toUByte())
-    bits = bits ushr 8
-    add(bits.toUByte())
-    bits = bits ushr 8
-    add(bits.toUByte())
-    bits = bits ushr 8
-    add(bits.toUByte())
-    bits = bits ushr 8
-    add(bits.toUByte())
-    bits = bits ushr 8
-    add(bits.toUByte())
-    bits = bits ushr 8
-    add(bits.toUByte())
-    bits = bits ushr 8
-    add(bits.toUByte())
-}
-
-internal fun ArrayDeque<UByte>.popw(): UShort {
-    val msb = removeLast()
-    val lsb = removeLast()
-    return ((msb.toInt() shl 8) + lsb.toInt()).toUShort()
-}
-
-internal fun ArrayDeque<UByte>.popl(): Int {
-    val b0 = removeLast().toUInt()
-    val b1 = removeLast().toUInt()
-    val b2 = removeLast().toUInt()
-    val b3 = removeLast().toUInt()
-    return ((b0 shl 24) or (b1 shl 16) or (b2 shl 8) or b3).toInt()
-}
-
-internal fun ArrayDeque<UByte>.popf(): Double {
-    // pop float; lsb is on bottom, msb on top
-    val b0 = removeLast().toLong()
-    val b1 = removeLast().toLong()
-    val b2 = removeLast().toLong()
-    val b3 = removeLast().toLong()
-    val b4 = removeLast().toLong()
-    val b5 = removeLast().toLong()
-    val b6 = removeLast().toLong()
-    val b7 = removeLast().toLong()
-    val bits = b7 +
-            (1L shl 8)*b6 +
-            (1L shl 16)*b5 +
-            (1L shl 24)*b4 +
-            (1L shl 32)*b3 +
-            (1L shl 40)*b2 +
-            (1L shl 48)*b1 +
-            (1L shl 56)*b0
-    return Double.fromBits(bits)
 }
 
 // probably called via reflection
 class VmRunner: IVirtualMachineRunner {
-    override fun runProgram(irSource: String, quiet: Boolean) {
-        runAndTestProgram(irSource, quiet) { /* no tests */ }
+    override fun runProgram(irSource: String, quiet: Boolean, traceEnabled: Boolean) {
+        runAndTestProgram(irSource, quiet, traceEnabled) { /* no tests */ }
     }
 
-    fun runAndTestProgram(irSource: String, quiet: Boolean = false, test: (VirtualMachine) -> Unit) {
+    fun runAndTestProgram(irSource: String, quiet: Boolean = false, traceEnabled: Boolean = false, test: (VirtualMachine) -> Unit = {}) {
         val irProgram = IRFileReader().read(irSource)
         val vm = VirtualMachine(irProgram)
+        vm.traceEnabled = traceEnabled
 //        vm.breakpointHandler = { pcChunk, pcIndex ->
 //            println("UNHANDLED BREAKPOINT")
 //            println("  IN CHUNK: $pcChunk(${pcChunk.label})  INDEX: $pcIndex = INSTR ${pcChunk.instructions[pcIndex]}")

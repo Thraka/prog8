@@ -14,6 +14,7 @@ import prog8.code.core.DataType
 import prog8.code.source.SourceCode
 import prog8.code.target.C64Target
 import prog8.code.target.Cx16Target
+import prog8.code.target.VMTarget
 import prog8.parser.Prog8Parser.parseModule
 import prog8tests.helpers.ErrorReporterForTests
 import prog8tests.helpers.compileText
@@ -198,11 +199,11 @@ main {
         val result = compileText(Cx16Target(), false, src, outputDir, errors, true)!!
         errors.errors.size shouldBe 0
         val start = result.codegenAst!!.entrypoint()!!
-        start.children.size shouldBe 10
-        val a1_1 = start.children[5] as PtAssignment
-        val a1_2 = start.children[6] as PtAssignment
-        val a1_3 = start.children[7] as PtAssignment
-        val a1_4 = start.children[8] as PtAssignment
+        start.children.size shouldBe 9
+        val a1_1 = start.children[4] as PtAssignment
+        val a1_2 = start.children[5] as PtAssignment
+        val a1_3 = start.children[6] as PtAssignment
+        val a1_4 = start.children[7] as PtAssignment
         a1_1.multiTarget shouldBe true
         a1_2.multiTarget shouldBe true
         a1_3.multiTarget shouldBe true
@@ -278,5 +279,25 @@ main {
         compileText(Cx16Target(), false, src, outputDir, errors, false) shouldBe null
         errors.errors.size shouldBe 1
         errors.errors[0] shouldContain "doesn't end with a return"
+    }
+
+    test("asmsub body restriction") {
+        val src="""
+main {
+    asmsub foo() {
+        ubyte x = 1
+    }
+    asmsub ok1() {
+        %asm {{ nop }}
+    }
+    asmsub ok2() {
+        %asm {{ nop }}
+        %asm {{ nop }}
+    }
+}"""
+        val errors = ErrorReporterForTests()
+        compileText(VMTarget(), false, src, outputDir, errors, false)
+        errors.errors.size shouldBe 1
+        errors.errors[0] shouldContain "asmsub can only contain inline assembly (%asm)"
     }
 })

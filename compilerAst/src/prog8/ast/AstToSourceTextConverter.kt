@@ -127,6 +127,9 @@ class AstToSourceTextConverter(val output: (text: String) -> Unit, val program: 
         if(decl.origin==VarDeclOrigin.SUBROUTINEPARAM)
             return
 
+        if(decl.isPrivate)
+            output("private ")
+
         when(decl.type) {
             VarDeclType.VAR -> {}
             VarDeclType.CONST -> output("const ")
@@ -134,7 +137,19 @@ class AstToSourceTextConverter(val output: (text: String) -> Unit, val program: 
         }
 
         output(decl.datatype.sourceString())
-        if(decl.arraysize!=null) {
+        if(decl.is2DArray) {
+            // Output as [rows][cols]
+            val totalSize = decl.arraysize?.indexExpr
+            val numCols = decl.matrixNumCols
+            if(totalSize is NumericLiteral && numCols is NumericLiteral) {
+                val numRows = totalSize.number.toInt() / numCols.number.toInt()
+                output("[$numRows]")
+                output("[${numCols.number.toInt()}]")
+            } else {
+                // Fallback: just output what we have
+                decl.arraysize?.indexExpr?.accept(this)
+            }
+        } else if(decl.arraysize!=null) {
             decl.arraysize!!.indexExpr.accept(this)
         }
         if(decl.isArray)
@@ -166,7 +181,17 @@ class AstToSourceTextConverter(val output: (text: String) -> Unit, val program: 
         }
     }
 
+    override fun visit(reservation: MemorySlabReservation) {
+        output("memory-slab-reservation(\"${reservation.slabName}\", ${reservation.size}, ${reservation.align})")
+    }
+
+    override fun visit(ref: MemorySlabRef) {
+        output("memory-slab-ref(\"${ref.slabName}\")")
+    }
+
     override fun visit(struct: StructDecl) {
+        if(struct.isPrivate)
+            output("private ")
         outputln("struct ${struct.name} {")
         for(member in struct.fields) {
             outputlni(  "    ${member.first} ${member.second}")
@@ -174,9 +199,25 @@ class AstToSourceTextConverter(val output: (text: String) -> Unit, val program: 
         outputlni("}")
     }
 
+    override fun visit(enum: Enumeration) {
+        if(enum.isPrivate)
+            output("private ")
+        output("enum ${enum.name} { ")
+        for(member in enum.members) {
+            output(member.first)
+            if(member.second!=null)
+                output(" = ${member.second}")
+            if(member !== enum.members.last())
+                output(", ")
+        }
+        outputln(" }")
+    }
+
     override fun visit(subroutine: Subroutine) {
         output("\n")
         outputi("")
+        if(subroutine.isPrivate)
+            output("private ")
         if(subroutine.inline)
             output("inline ")
         if(subroutine.isAsmSubroutine) {
@@ -430,11 +471,19 @@ class AstToSourceTextConverter(val output: (text: String) -> Unit, val program: 
     }
 
     override fun visit(arrayIndexedExpression: ArrayIndexedExpression) {
-        arrayIndexedExpression.plainarrayvar?.accept(this)
-        arrayIndexedExpression.pointerderef?.accept(this)
-        output("[")
-        arrayIndexedExpression.indexer.indexExpr.accept(this)
-        output("]")
+        // Handle nested arrays (2D indexing)
+        if(arrayIndexedExpression.nestedArray != null) {
+            arrayIndexedExpression.nestedArray!!.accept(this)
+            output("[")
+            arrayIndexedExpression.indexer.indexExpr.accept(this)
+            output("]")
+        } else {
+            arrayIndexedExpression.plainarrayvar?.accept(this)
+            arrayIndexedExpression.pointerderef?.accept(this)
+            output("[")
+            arrayIndexedExpression.indexer.indexExpr.accept(this)
+            output("]")
+        }
     }
 
     override fun visit(assignTarget: AssignTarget) {
@@ -541,6 +590,8 @@ class AstToSourceTextConverter(val output: (text: String) -> Unit, val program: 
     }
 
     override fun visit(alias: Alias) {
+        if(alias.isPrivate)
+            output("private ")
         output("alias ${alias.alias} = ${alias.target.nameInSource.joinToString(".")}")
     }
 
@@ -590,5 +641,13 @@ class AstToSourceTextConverter(val output: (text: String) -> Unit, val program: 
         initializer.structname.accept(this)
         output(" : ")
         outputListMembers(initializer.args.toTypedArray())
+    }
+
+    override fun visit(swap: Swap) {
+        output("swap (")
+        swap.t1.accept(this)
+        output(", ")
+        swap.t2.accept(this)
+        output(")")
     }
 }

@@ -23,14 +23,14 @@ class TestInstructions: FunSpec({
     }
 
     test("with value") {
-        val ins = IRInstruction(Opcode.ADD, IRDataType.BYTE, reg1=42, immediate = 0, address = 99)
+        val ins = IRInstruction(Opcode.ADD, IRDataType.BYTE, reg1=42, immediate = 0, address = 99u.toAddress())
         ins.opcode shouldBe Opcode.ADD
         ins.type shouldBe IRDataType.BYTE
         ins.reg1direction shouldBe OperandDirection.READWRITE
         ins.fpReg1direction shouldBe OperandDirection.UNUSED
         ins.reg1 shouldBe 42
         ins.reg2 shouldBe null
-        ins.address shouldBe 99
+        ins.address shouldBe 99u.toAddress()
         ins.immediate shouldBe 0
         ins.immediateFp shouldBe null
         ins.labelSymbol shouldBe null
@@ -85,15 +85,15 @@ class TestInstructions: FunSpec({
     }
 
     test("with float regs") {
-        val ins = IRInstruction(Opcode.FSIN, IRDataType.FLOAT, fpReg1 = 1, fpReg2 = 2)
+        val ins = IRInstruction(Opcode.FSIN, IRDataType.FLOAT, fpReg1 = RegisterNum(1), fpReg2 = RegisterNum(2))
         ins.opcode shouldBe Opcode.FSIN
         ins.type shouldBe IRDataType.FLOAT
         ins.reg1direction shouldBe OperandDirection.UNUSED
         ins.reg2direction shouldBe OperandDirection.UNUSED
         ins.fpReg1direction shouldBe OperandDirection.WRITE
         ins.fpReg2direction shouldBe OperandDirection.READ
-        ins.fpReg1 shouldBe 1
-        ins.fpReg2 shouldBe 2
+        ins.fpReg1 shouldBe RegisterNum(1)
+        ins.fpReg2 shouldBe RegisterNum(2)
         ins.reg1 shouldBe null
         ins.reg2 shouldBe null
         ins.address shouldBe null
@@ -106,13 +106,13 @@ class TestInstructions: FunSpec({
 
     test("missing type should fail") {
         shouldThrow<IllegalArgumentException> {
-            IRInstruction(Opcode.ADD, reg1=42, address=99)
+            IRInstruction(Opcode.ADD, reg1=42, address=99u.toAddress())
         }
     }
 
     test("missing registers should fail") {
         shouldThrowWithMessage<IllegalArgumentException>("missing reg1") {
-            IRInstruction(Opcode.ADD, IRDataType.BYTE, immediate = 0, address=99)
+            IRInstruction(Opcode.ADD, IRDataType.BYTE, immediate = 0, address=99u.toAddress())
         }
     }
 

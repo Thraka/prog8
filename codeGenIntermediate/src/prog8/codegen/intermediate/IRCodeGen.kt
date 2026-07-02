@@ -26,7 +26,7 @@ class IRCodeGen(
         verifyNameScoping(program, symbolTable)
         changeGlobalVarInits(symbolTable)
 
-        val irSymbolTable = convertStToIRSt(symbolTable)
+        val irSymbolTable = convertStToIRSt(symbolTable, options.romable)
         val irProg = IRProgram(program.name, irSymbolTable, options, program.encoding)
 
         // collect global variables initializers
@@ -37,6 +37,12 @@ class IRCodeGen(
                 if (chunk is IRCodeChunk) irProg.addGlobalInits(chunk)
                 else throw AssemblyError("only expect code chunk for global inits")
             }
+        }
+
+        // in romable mode, generate global init code for declaration-initialized variables
+        // and clear their init value so they go into the BSS section
+        if(options.romable) {
+            generateRomableInits(irProg)
         }
 
         irProg.addAsmSymbols(options.symbolDefs)
@@ -60,9 +66,14 @@ class IRCodeGen(
         return irProg
     }
 
-    fun registerTypes(): Map<Int, IRDataType> = registers.getTypes()
+    fun registerTypes(): Map<RegisterNum, IRDataType> = registers.getTypes()
 
     private fun changeGlobalVarInits(symbolTable: SymbolTable) {
+        // In romable mode, don't pull initializers into the symbol table;
+        // they stay as assignments in the AST and become global init code naturally.
+        if(options.romable)
+            return
+
         // Normally, block level (global) variables that have a numeric initialization value
         // are initialized via an assignment statement.
         val initsToRemove = mutableListOf<Pair<PtBlock, PtAssignment>>()
@@ -91,15 +102,52 @@ class IRCodeGen(
         }
 
         for((block, assign) in initsToRemove) {
-            block.children.remove(assign)
+            block.removeChild(assign)
         }
+    }
+
+    private fun generateRomableInits(irProg: IRProgram) {
+        // For romable mode, declaration-initialized variables marked inBss need
+        // runtime init code in the globalInits chunk, and their initializationValue
+        // must be cleared so they appear in the NOINIT (BSS) section of the IR file.
+        val replacements = mutableListOf<IRStStaticVariable>()
+        for(variable in irProg.st.allVariables()) {
+            if(variable.inBss && variable.initializationValue != null) {
+                when(val initValue = variable.initializationValue) {
+                    is IRVariableInitializer.Numeric -> {
+                        val dt = irType(variable.dt)
+                        val tempReg = registers.next(dt)
+                        val chunk = IRCodeChunk(null, null)
+                        chunk += IRInstruction(Opcode.LOAD, dt, reg1 = tempReg, immediate = initValue.value.toInt())
+                        chunk += IRInstruction(Opcode.STOREM, dt, reg1 = tempReg, labelSymbol = variable.name)
+                        irProg.addGlobalInits(chunk)
+                        // replace with uninitialized version so it goes to NOINIT section
+                        replacements += IRStStaticVariable(
+                            variable.name, variable.dt, null, variable.length,
+                            variable.zpwish, variable.align, variable.dirty,
+                            variable.inBss, variable.readonly
+                        )
+                    }
+                    is IRVariableInitializer.Str, is IRVariableInitializer.Array -> {
+                        // Strings and arrays: keep inline data but now marked readonly.
+                        // They can serve as ROM-based read-only data.
+                    }
+                    null -> {}  // uninitialized, skip
+                }
+            }
+        }
+        replacements.forEach { irProg.st.add(it) }
     }
 
     private fun verifyNameScoping(program: PtProgram, symbolTable: SymbolTable) {
         fun verifyPtNode(node: PtNode) {
             when (node) {
-                is PtBuiltinFunctionCall -> require('.' !in node.name) { "builtin function call name should not be scoped: ${node.name}" }
-                is PtFunctionCall -> require('.' in node.name) { "node $node name is not scoped: ${node.name}" }
+                is PtFunctionCall -> {
+                    if(node.builtin)
+                        require('.' !in node.name) { "builtin function call name should not be scoped: ${node.name}" }
+                    else
+                        require('.' in node.name) { "node $node name is not scoped: ${node.name}" }
+                }
                 is PtAsmSub -> require('.' in node.name) { "node $node name is not scoped: ${node.name}" }
                 is PtBlock -> require('.' !in node.name) { "block name should not be scoped: ${node.name}" }
                 is PtConstant -> require('.' in node.name) { "node $node name is not scoped: ${node.name}" }
@@ -201,7 +249,7 @@ class IRCodeGen(
             val formats = instructionFormats.getValue(old.opcode)
             val format = formats.getOrElse(old.type) { throw IllegalArgumentException("type ${old.type} invalid for ${old.opcode}") }
             val immediateValue = if(format.immediate) it.third.toInt() else null
-            val addressValue = if(format.immediate) null else it.third.toInt()
+            val addressValue: UInt? = if(format.immediate) null else it.third
 
             it.first.instructions[it.second] = IRInstruction(
                 old.opcode,
@@ -212,7 +260,7 @@ class IRCodeGen(
                 old.fpReg1,
                 old.fpReg2,
                 immediate = immediateValue,
-                address = addressValue
+                address = addressValue?.toAddress()
             )
         }
     }
@@ -222,17 +270,11 @@ class IRCodeGen(
             is PtVariable -> emptyList() // var should be looked up via symbol table
             is PtMemMapped -> emptyList() // memmapped var should be looked up via symbol table
             is PtConstant -> emptyList() // constants have all been folded into the code
+            is PtMemorySlabReservation -> emptyList() // handled via symbol table
             is PtAssignment -> assignmentGen.translate(node)
             is PtAugmentedAssign -> assignmentGen.translate(node)
             is PtNodeGroup -> translateGroup(node.children)
-            is PtBuiltinFunctionCall -> {
-                val result = translateBuiltinFunc(node)
-                result.chunks       // it's not an expression so no result value.
-            }
-            is PtFunctionCall -> {
-                val result = expressionEval.translate(node)
-                result.chunks       // it's not an expression so no result value
-            }
+            is PtFunctionCall -> expressionEval.translate(node).chunks   // it's not an expression so no result value
             is PtNop -> emptyList()
             is PtReturn -> translate(node)
             is PtJump -> translate(node)
@@ -252,6 +294,7 @@ class IRCodeGen(
                 listOf(chunk)
             }
             is PtConditionalBranch -> translate(node)
+            is PtSwap -> translate(node)
             is PtInlineAssembly -> listOf(IRInlineAsmChunk(null, node.assembly, node.isIR, null))
             is PtIncludeBinary -> listOf(IRInlineBinaryChunk(null, readBinaryData(node), null))
             is PtAddressOf,
@@ -298,7 +341,7 @@ class IRCodeGen(
         val goto = branch.trueScope.children.firstOrNull() as? PtJump
         if (goto is PtJump) {
             // special case the form:   if_cc  goto <place>   (with optional else)
-            val address = goto.target.asConstInteger()
+            val address: UInt? = goto.target.asConstInteger()?.toUInt()
             val label = (goto.target as? PtIdentifier)?.name
             if(address!=null) {
                 val branchIns = IRBranchInstr(branch.condition, address=address)
@@ -341,7 +384,7 @@ class IRCodeGen(
         return result
     }
 
-    internal fun IRBranchInstr(condition: BranchCondition, label: String?=null, address: Int?=null): IRInstruction {
+    internal fun IRBranchInstr(condition: BranchCondition, label: String?=null, address: UInt?=null): IRInstruction {
         if(label!=null)
             return when(condition) {
                 BranchCondition.CS -> IRInstruction(Opcode.BSTCS, labelSymbol = label)
@@ -355,20 +398,20 @@ class IRCodeGen(
             }
         else if(address!=null) {
             return when(condition) {
-                BranchCondition.CS -> IRInstruction(Opcode.BSTCS, address = address)
-                BranchCondition.CC -> IRInstruction(Opcode.BSTCC, address = address)
-                BranchCondition.EQ, BranchCondition.Z -> IRInstruction(Opcode.BSTEQ, address = address)
-                BranchCondition.NE, BranchCondition.NZ -> IRInstruction(Opcode.BSTNE, address = address)
-                BranchCondition.MI, BranchCondition.NEG -> IRInstruction(Opcode.BSTNEG, address = address)
-                BranchCondition.PL, BranchCondition.POS -> IRInstruction(Opcode.BSTPOS, address = address)
-                BranchCondition.VC -> IRInstruction(Opcode.BSTVC, address = address)
-                BranchCondition.VS -> IRInstruction(Opcode.BSTVS, address = address)
+                BranchCondition.CS -> IRInstruction(Opcode.BSTCS, address = address.toAddress())
+                BranchCondition.CC -> IRInstruction(Opcode.BSTCC, address = address.toAddress())
+                BranchCondition.EQ, BranchCondition.Z -> IRInstruction(Opcode.BSTEQ, address = address.toAddress())
+                BranchCondition.NE, BranchCondition.NZ -> IRInstruction(Opcode.BSTNE, address = address.toAddress())
+                BranchCondition.MI, BranchCondition.NEG -> IRInstruction(Opcode.BSTNEG, address = address.toAddress())
+                BranchCondition.PL, BranchCondition.POS -> IRInstruction(Opcode.BSTPOS, address = address.toAddress())
+                BranchCondition.VC -> IRInstruction(Opcode.BSTVC, address = address.toAddress())
+                BranchCondition.VS -> IRInstruction(Opcode.BSTVS, address = address.toAddress())
             }
         }
         else throw AssemblyError("need label or address for branch")
     }
 
-    private fun IRInvertedBranchInstr(condition: BranchCondition, label: String?=null, address: Int?=null): IRInstruction {
+    private fun IRInvertedBranchInstr(condition: BranchCondition, label: String?=null, address: UInt?=null): IRInstruction {
         if(label!=null)
             return when(condition) {
                 BranchCondition.CS -> IRInstruction(Opcode.BSTCC, labelSymbol = label)
@@ -382,14 +425,14 @@ class IRCodeGen(
             }
         else if(address!=null) {
             return when(condition) {
-                BranchCondition.CS -> IRInstruction(Opcode.BSTCC, address = address)
-                BranchCondition.CC -> IRInstruction(Opcode.BSTCS, address = address)
-                BranchCondition.EQ, BranchCondition.Z -> IRInstruction(Opcode.BSTNE, address = address)
-                BranchCondition.NE, BranchCondition.NZ -> IRInstruction(Opcode.BSTEQ, address = address)
-                BranchCondition.MI, BranchCondition.NEG -> IRInstruction(Opcode.BSTPOS, address = address)
-                BranchCondition.PL, BranchCondition.POS -> IRInstruction(Opcode.BSTNEG, address = address)
-                BranchCondition.VC -> IRInstruction(Opcode.BSTVS, address = address)
-                BranchCondition.VS -> IRInstruction(Opcode.BSTVC, address = address)
+                BranchCondition.CS -> IRInstruction(Opcode.BSTCC, address = address.toAddress())
+                BranchCondition.CC -> IRInstruction(Opcode.BSTCS, address = address.toAddress())
+                BranchCondition.EQ, BranchCondition.Z -> IRInstruction(Opcode.BSTNE, address = address.toAddress())
+                BranchCondition.NE, BranchCondition.NZ -> IRInstruction(Opcode.BSTEQ, address = address.toAddress())
+                BranchCondition.MI, BranchCondition.NEG -> IRInstruction(Opcode.BSTPOS, address = address.toAddress())
+                BranchCondition.PL, BranchCondition.POS -> IRInstruction(Opcode.BSTNEG, address = address.toAddress())
+                BranchCondition.VC -> IRInstruction(Opcode.BSTVS, address = address.toAddress())
+                BranchCondition.VS -> IRInstruction(Opcode.BSTVC, address = address.toAddress())
             }
         }
         else throw AssemblyError("need label or address for branch")
@@ -554,7 +597,7 @@ class IRCodeGen(
                             it += IRInstruction(Opcode.STOREM, irType(DataType.forDt(elementDt)), reg1=tmpReg, labelSymbol = loopvarSymbol)
                         }
                         result += translateNode(forLoop.statements)
-                        result += addConstIntToReg(IRDataType.BYTE, indexReg, elementSize)
+                        result += addConstByteToReg(indexReg, elementSize)
                         result += IRCodeChunk(null, null).also {
                             if(lengthBytes!=256) {
                                 // for length 256, the compare is actually against 0, which doesn't require a separate CMP instruction
@@ -675,7 +718,12 @@ class IRCodeGen(
         if(iterable.step==0)
             throw AssemblyError("step 0")
         val rangeEndExclusiveUntyped = iterable.last + iterable.step
-        val rangeEndExclusiveWrapped = if(loopvarDtIr==IRDataType.BYTE) rangeEndExclusiveUntyped and 255 else rangeEndExclusiveUntyped and 65535
+        val rangeEndExclusiveWrapped =
+            when (loopvarDtIr) {
+                IRDataType.BYTE -> rangeEndExclusiveUntyped and 255
+                IRDataType.WORD -> rangeEndExclusiveUntyped and 65535
+                else -> rangeEndExclusiveUntyped
+            }
         val result = mutableListOf<IRCodeChunkBase>()
         val chunk = IRCodeChunk(null, null)
         val indexReg = registers.next(loopvarDtIr)
@@ -707,29 +755,29 @@ class IRCodeGen(
         return result
     }
 
-    private fun addConstIntToReg(dt: IRDataType, reg: Int, value: Int): IRCodeChunk {
+    private fun addConstByteToReg(reg: Int, value: Int): IRCodeChunk {
         val code = IRCodeChunk(null, null)
         when(value) {
             0 -> { /* do nothing */ }
             1 -> {
-                code += IRInstruction(Opcode.INC, dt, reg1=reg)
+                code += IRInstruction(Opcode.INC, IRDataType.BYTE, reg1=reg)
             }
             2 -> {
-                code += IRInstruction(Opcode.INC, dt, reg1=reg)
-                code += IRInstruction(Opcode.INC, dt, reg1=reg)
+                code += IRInstruction(Opcode.INC, IRDataType.BYTE, reg1=reg)
+                code += IRInstruction(Opcode.INC, IRDataType.BYTE, reg1=reg)
             }
             -1 -> {
-                code += IRInstruction(Opcode.DEC, dt, reg1=reg)
+                code += IRInstruction(Opcode.DEC, IRDataType.BYTE, reg1=reg)
             }
             -2 -> {
-                code += IRInstruction(Opcode.DEC, dt, reg1=reg)
-                code += IRInstruction(Opcode.DEC, dt, reg1=reg)
+                code += IRInstruction(Opcode.DEC, IRDataType.BYTE, reg1=reg)
+                code += IRInstruction(Opcode.DEC, IRDataType.BYTE, reg1=reg)
             }
             else -> {
                 code += if(value>0) {
-                    IRInstruction(Opcode.ADD, dt, reg1 = reg, immediate = value)
+                    IRInstruction(Opcode.ADD, IRDataType.BYTE, reg1 = reg, immediate = value)
                 } else {
-                    IRInstruction(Opcode.SUB, dt, reg1 = reg, immediate = -value)
+                    IRInstruction(Opcode.SUB, IRDataType.BYTE, reg1 = reg, immediate = -value)
                 }
             }
         }
@@ -742,14 +790,14 @@ class IRCodeGen(
             0 -> { /* do nothing */ }
             1 -> {
                 code += if(knownAddress!=null)
-                    IRInstruction(Opcode.INCM, dt, address = knownAddress.toInt())
+                    IRInstruction(Opcode.INCM, dt, address = knownAddress.toAddress())
                 else
                     IRInstruction(Opcode.INCM, dt, labelSymbol = symbol)
             }
             2 -> {
                 if(knownAddress!=null) {
-                    code += IRInstruction(Opcode.INCM, dt, address = knownAddress.toInt())
-                    code += IRInstruction(Opcode.INCM, dt, address = knownAddress.toInt())
+                    code += IRInstruction(Opcode.INCM, dt, address = knownAddress.toAddress())
+                    code += IRInstruction(Opcode.INCM, dt, address = knownAddress.toAddress())
                 } else {
                     code += IRInstruction(Opcode.INCM, dt, labelSymbol = symbol)
                     code += IRInstruction(Opcode.INCM, dt, labelSymbol = symbol)
@@ -757,14 +805,14 @@ class IRCodeGen(
             }
             -1 -> {
                 code += if(knownAddress!=null)
-                    IRInstruction(Opcode.DECM, dt, address = knownAddress.toInt())
+                    IRInstruction(Opcode.DECM, dt, address = knownAddress.toAddress())
                 else
                     IRInstruction(Opcode.DECM, dt, labelSymbol = symbol)
             }
             -2 -> {
                 if(knownAddress!=null) {
-                    code += IRInstruction(Opcode.DECM, dt, address = knownAddress.toInt())
-                    code += IRInstruction(Opcode.DECM, dt, address = knownAddress.toInt())
+                    code += IRInstruction(Opcode.DECM, dt, address = knownAddress.toAddress())
+                    code += IRInstruction(Opcode.DECM, dt, address = knownAddress.toAddress())
                 } else {
                     code += IRInstruction(Opcode.DECM, dt, labelSymbol = symbol)
                     code += IRInstruction(Opcode.DECM, dt, labelSymbol = symbol)
@@ -775,14 +823,14 @@ class IRCodeGen(
                 if(value>0) {
                     code += IRInstruction(Opcode.LOAD, dt, reg1=valueReg, immediate = value)
                     code += if(knownAddress!=null)
-                        IRInstruction(Opcode.ADDM, dt, reg1=valueReg, address = knownAddress.toInt())
+                        IRInstruction(Opcode.ADDM, dt, reg1=valueReg, address = knownAddress.toAddress())
                     else
                         IRInstruction(Opcode.ADDM, dt, reg1=valueReg, labelSymbol = symbol)
                 }
                 else {
                     code += IRInstruction(Opcode.LOAD, dt, reg1=valueReg, immediate = -value)
                     code += if(knownAddress!=null)
-                        IRInstruction(Opcode.SUBM, dt, reg1=valueReg, address = knownAddress.toInt())
+                        IRInstruction(Opcode.SUBM, dt, reg1=valueReg, address = knownAddress.toAddress())
                     else
                         IRInstruction(Opcode.SUBM, dt, reg1=valueReg, labelSymbol = symbol)
                 }
@@ -796,29 +844,29 @@ class IRCodeGen(
         if(factor==1.0)
             return code
         code += if(factor==0.0) {
-            IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1 = fpReg, immediateFp = 0.0)
+            IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1 = RegisterNum(fpReg), immediateFp = 0.0)
         } else {
-            IRInstruction(Opcode.MULS, IRDataType.FLOAT, fpReg1 = fpReg, immediateFp = factor)
+            IRInstruction(Opcode.MULS, IRDataType.FLOAT, fpReg1 = RegisterNum(fpReg), immediateFp = factor)
         }
         return code
     }
 
-    internal fun multiplyByConstFloatInplace(knownAddress: Int?, symbol: String?, factor: Double): IRCodeChunk {
+    internal fun multiplyByConstFloatInplace(knownAddress: UInt?, symbol: String?, factor: Double): IRCodeChunk {
         val code = IRCodeChunk(null, null)
         if(factor==1.0)
             return code
         if(factor==0.0) {
             code += if(knownAddress!=null)
-                IRInstruction(Opcode.STOREZM, IRDataType.FLOAT, address = knownAddress)
+                IRInstruction(Opcode.STOREZM, IRDataType.FLOAT, address = knownAddress.toAddress())
             else
                 IRInstruction(Opcode.STOREZM, IRDataType.FLOAT, labelSymbol = symbol)
         } else {
             val factorReg = registers.next(IRDataType.FLOAT)
-            code += IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1=factorReg, immediateFp = factor)
+            code += IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1=RegisterNum(factorReg), immediateFp = factor)
             code += if(knownAddress!=null)
-                IRInstruction(Opcode.MULSM, IRDataType.FLOAT, fpReg1 = factorReg, address = knownAddress)
+                IRInstruction(Opcode.MULSM, IRDataType.FLOAT, fpReg1 = RegisterNum(factorReg), address = knownAddress.toAddress())
             else
-                IRInstruction(Opcode.MULSM, IRDataType.FLOAT, fpReg1 = factorReg, labelSymbol = symbol)
+                IRInstruction(Opcode.MULSM, IRDataType.FLOAT, fpReg1 = RegisterNum(factorReg), labelSymbol = symbol)
         }
         return code
     }
@@ -849,7 +897,7 @@ class IRCodeGen(
         return code
     }
 
-    internal fun multiplyByConstInplace(dt: IRDataType, signed: Boolean, knownAddress: Int?, symbol: String?, factor: Int): IRCodeChunk {
+    internal fun multiplyByConstInplace(dt: IRDataType, signed: Boolean, knownAddress: UInt?, symbol: String?, factor: Int): IRCodeChunk {
         val code = IRCodeChunk(null, null)
         if(factor==1)
             return code
@@ -857,7 +905,7 @@ class IRCodeGen(
         if(pow2==1) {
             // just shift 1 bit
             code += if(knownAddress!=null)
-                IRInstruction(Opcode.LSLM, dt, address = knownAddress)
+                IRInstruction(Opcode.LSLM, dt, address = knownAddress.toAddress())
             else
                 IRInstruction(Opcode.LSLM, dt, labelSymbol = symbol)
         }
@@ -866,13 +914,13 @@ class IRCodeGen(
             val pow2reg = registers.next(dt)
             code += IRInstruction(Opcode.LOAD, dt, reg1=pow2reg, immediate = pow2)
             code += if(knownAddress!=null)
-                IRInstruction(Opcode.LSLNM, dt, reg1=pow2reg, address = knownAddress)
+                IRInstruction(Opcode.LSLNM, dt, reg1=pow2reg, address = knownAddress.toAddress())
             else
                 IRInstruction(Opcode.LSLNM, dt, reg1=pow2reg, labelSymbol = symbol)
         } else {
             if (factor == 0) {
                 code += if(knownAddress!=null)
-                    IRInstruction(Opcode.STOREZM, dt, address = knownAddress)
+                    IRInstruction(Opcode.STOREZM, dt, address = knownAddress.toAddress())
                 else
                     IRInstruction(Opcode.STOREZM, dt, labelSymbol = symbol)
             }
@@ -881,7 +929,7 @@ class IRCodeGen(
                 code += IRInstruction(Opcode.LOAD, dt, reg1=factorReg, immediate = factor)
                 val opcode = if(signed) Opcode.MULSM else Opcode.MULM
                 code += if(knownAddress!=null)
-                    IRInstruction(opcode, dt, reg1=factorReg, address = knownAddress)
+                    IRInstruction(opcode, dt, reg1=factorReg, address = knownAddress.toAddress())
                 else
                     IRInstruction(opcode, dt, reg1=factorReg, labelSymbol = symbol)
             }
@@ -894,31 +942,31 @@ class IRCodeGen(
         if(factor==1.0)
             return code
         code += if(factor==0.0) {
-            IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1 = fpReg, immediateFp = Double.MAX_VALUE)
+            IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1 = RegisterNum(fpReg), immediateFp = Double.MAX_VALUE)
         } else {
-            IRInstruction(Opcode.DIVS, IRDataType.FLOAT, fpReg1 = fpReg, immediateFp = factor)
+            IRInstruction(Opcode.DIVS, IRDataType.FLOAT, fpReg1 = RegisterNum(fpReg), immediateFp = factor)
         }
         return code
     }
 
-    internal fun divideByConstFloatInplace(knownAddress: Int?, symbol: String?, factor: Double): IRCodeChunk {
+    internal fun divideByConstFloatInplace(knownAddress: UInt?, symbol: String?, factor: Double): IRCodeChunk {
         val code = IRCodeChunk(null, null)
         if(factor==1.0)
             return code
         if(factor==0.0) {
             val maxvalueReg = registers.next(IRDataType.FLOAT)
-            code += IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1 = maxvalueReg, immediateFp = Double.MAX_VALUE)
+            code += IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1 = RegisterNum(maxvalueReg), immediateFp = Double.MAX_VALUE)
             code += if(knownAddress!=null)
-                IRInstruction(Opcode.STOREM, IRDataType.FLOAT, fpReg1 = maxvalueReg, address = knownAddress)
+                IRInstruction(Opcode.STOREM, IRDataType.FLOAT, fpReg1 = RegisterNum(maxvalueReg), address = knownAddress.toAddress())
             else
-                IRInstruction(Opcode.STOREM, IRDataType.FLOAT, fpReg1 = maxvalueReg, labelSymbol = symbol)
+                IRInstruction(Opcode.STOREM, IRDataType.FLOAT, fpReg1 = RegisterNum(maxvalueReg), labelSymbol = symbol)
         } else {
             val factorReg = registers.next(IRDataType.FLOAT)
-            code += IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1=factorReg, immediateFp = factor)
+            code += IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1=RegisterNum(factorReg), immediateFp = factor)
             code += if(knownAddress!=null)
-                IRInstruction(Opcode.DIVSM, IRDataType.FLOAT, fpReg1 = factorReg, address = knownAddress)
+                IRInstruction(Opcode.DIVSM, IRDataType.FLOAT, fpReg1 = RegisterNum(factorReg), address = knownAddress.toAddress())
             else
-                IRInstruction(Opcode.DIVSM, IRDataType.FLOAT, fpReg1 = factorReg, labelSymbol = symbol)
+                IRInstruction(Opcode.DIVSM, IRDataType.FLOAT, fpReg1 = RegisterNum(factorReg), labelSymbol = symbol)
         }
         return code
     }
@@ -965,7 +1013,7 @@ class IRCodeGen(
         }
     }
 
-    internal fun divideByConstInplace(dt: IRDataType, knownAddress: Int?, symbol: String?, factor: Int, signed: Boolean): IRCodeChunk {
+    internal fun divideByConstInplace(dt: IRDataType, knownAddress: UInt?, symbol: String?, factor: Int, signed: Boolean): IRCodeChunk {
         val code = IRCodeChunk(null, null)
         if(factor==1)
             return code
@@ -976,7 +1024,7 @@ class IRCodeGen(
                 if(pow2==1) {
                     // just simple bit shift (signed)
                     code += if (knownAddress != null)
-                        IRInstruction(Opcode.ASRM, dt, address = knownAddress)
+                        IRInstruction(Opcode.ASRM, dt, address = knownAddress.toAddress())
                     else
                         IRInstruction(Opcode.ASRM, dt, labelSymbol = symbol)
                 } else {
@@ -984,7 +1032,7 @@ class IRCodeGen(
                     val pow2reg = registers.next(dt)
                     code += IRInstruction(Opcode.LOAD, dt, reg1 = pow2reg, immediate = pow2)
                     code += if (knownAddress != null)
-                                IRInstruction(Opcode.ASRNM, dt, reg1 = pow2reg, address = knownAddress)
+                                IRInstruction(Opcode.ASRNM, dt, reg1 = pow2reg, address = knownAddress.toAddress())
                             else
                                 IRInstruction(Opcode.ASRNM, dt, reg1 = pow2reg, labelSymbol = symbol)
                 }
@@ -992,7 +1040,7 @@ class IRCodeGen(
                 if(pow2==1) {
                     // just simple bit shift (unsigned)
                     code += if(knownAddress!=null)
-                        IRInstruction(Opcode.LSRM, dt, address = knownAddress)
+                        IRInstruction(Opcode.LSRM, dt, address = knownAddress.toAddress())
                     else
                         IRInstruction(Opcode.LSRM, dt, labelSymbol = symbol)
                 }
@@ -1001,7 +1049,7 @@ class IRCodeGen(
                     val pow2reg = registers.next(dt)
                     code += IRInstruction(Opcode.LOAD, dt, reg1=pow2reg, immediate = pow2)
                     code += if(knownAddress!=null)
-                                IRInstruction(Opcode.LSRNM, dt, reg1 = pow2reg, address = knownAddress)
+                                IRInstruction(Opcode.LSRNM, dt, reg1 = pow2reg, address = knownAddress.toAddress())
                             else
                                 IRInstruction(Opcode.LSRNM, dt, reg1 = pow2reg, labelSymbol = symbol)
                 }
@@ -1015,7 +1063,7 @@ class IRCodeGen(
                 val reg = registers.next(dt)
                 code += IRInstruction(Opcode.LOAD, dt, reg1=reg, immediate = 0xffff)
                 code += if(knownAddress!=null)
-                    IRInstruction(Opcode.STOREM, dt, reg1=reg, address = knownAddress)
+                    IRInstruction(Opcode.STOREM, dt, reg1=reg, address = knownAddress.toAddress())
                 else
                     IRInstruction(Opcode.STOREM, dt, reg1=reg, labelSymbol = symbol)
             }
@@ -1024,13 +1072,13 @@ class IRCodeGen(
                 code += IRInstruction(Opcode.LOAD, dt, reg1=factorReg, immediate = factor)
                 code += if(signed) {
                     if(knownAddress!=null)
-                        IRInstruction(Opcode.DIVSM, dt, reg1 = factorReg, address = knownAddress)
+                        IRInstruction(Opcode.DIVSM, dt, reg1 = factorReg, address = knownAddress.toAddress())
                     else
                         IRInstruction(Opcode.DIVSM, dt, reg1 = factorReg, labelSymbol = symbol)
                 }
                 else {
                     if(knownAddress!=null)
-                        IRInstruction(Opcode.DIVM, dt, reg1 = factorReg, address = knownAddress)
+                        IRInstruction(Opcode.DIVM, dt, reg1 = factorReg, address = knownAddress.toAddress())
                     else
                         IRInstruction(Opcode.DIVM, dt, reg1 = factorReg, labelSymbol = symbol)
                 }
@@ -1049,663 +1097,265 @@ class IRCodeGen(
     }
 
     private fun translateIfFollowedByJustGoto(ifElse: PtIfElse, goto: PtJump): MutableList<IRCodeChunkBase> {
-        val condition = ifElse.condition as? PtBinaryExpression
-        if(condition==null || !condition.left.type.isFloat) {
-            return if(isIndirectJump(goto))
-                ifWithOnlyIndirectJump_IntegerCond(ifElse, goto)
-            else
-                ifWithOnlyNormalJump_IntegerCond(ifElse, goto)
-        }
-
-        // floating-point condition only from here!
-        // we assume only a binary expression can contain a floating point.
         val result = mutableListOf<IRCodeChunkBase>()
-        val leftTr = expressionEval.translateExpression(condition.left)
-        addToResult(result, leftTr, -1, leftTr.resultFpReg)
-        val rightTr = expressionEval.translateExpression(condition.right)
-        addToResult(result, rightTr, -1, rightTr.resultFpReg)
-        var afterIfLabel = ""
-        result += IRCodeChunk(null, null).also {
-            val compResultReg = registers.next(IRDataType.BYTE)
-            it += IRInstruction(
-                Opcode.FCOMP,
-                IRDataType.FLOAT,
-                reg1 = compResultReg,
-                fpReg1 = leftTr.resultFpReg,
-                fpReg2 = rightTr.resultFpReg
-            )
-
-            if(isIndirectJump(goto)) {
-                // indirect jump to target so the if has to jump past it instead
-                afterIfLabel = createLabelName()
-                when(condition.operator) {
-                    "==" -> {
-                        it += IRInstruction(Opcode.CMPI, IRDataType.BYTE, reg1 = compResultReg, immediate = 0)
-                        it += IRInstruction(Opcode.BSTNE, labelSymbol = afterIfLabel)
-                    }
-                    "!=" -> {
-                        it += IRInstruction(Opcode.CMPI, IRDataType.BYTE, reg1 = compResultReg, immediate = 0)
-                        it += IRInstruction(Opcode.BSTEQ, labelSymbol = afterIfLabel)
-                    }
-                    else -> {
-                        val gotoOpcode = when (condition.operator) {
-                            "<" -> Opcode.BGES
-                            ">" -> Opcode.BLES
-                            "<=" -> Opcode.BGTS
-                            ">=" -> Opcode.BLTS
-                            else -> throw AssemblyError("weird operator")
-                        }
-                        it += IRInstruction(gotoOpcode, IRDataType.BYTE, reg1 = compResultReg, immediate = 0, labelSymbol = afterIfLabel)
-                    }
-                }
-                // evaluate jump address expression into a register and jump indirectly to it
-                val tr = expressionEval.translateExpression(goto.target)
-                for(i in tr.chunks.flatMap { c -> c.instructions }) {
-                    it += i
-                }
-                it += IRInstruction(Opcode.JUMPI, reg1 = tr.resultReg)
-            } else {
-                // normal jump, directly to target with branch opcode
-                when(condition.operator) {
-                    "==" -> {
-                        it += IRInstruction(Opcode.CMPI, IRDataType.BYTE, reg1 = compResultReg, immediate = 0)
-                        it += branchInstr(goto, Opcode.BSTEQ)
-                    }
-                    "!=" -> {
-                        it += IRInstruction(Opcode.CMPI, IRDataType.BYTE, reg1 = compResultReg, immediate = 0)
-                        it += branchInstr(goto, Opcode.BSTNE)
-                    }
-                    else -> {
-                        val gotoOpcode = when (condition.operator) {
-                            "<" -> Opcode.BLTS
-                            ">" -> Opcode.BGTS
-                            "<=" -> Opcode.BLES
-                            ">=" -> Opcode.BGES
-                            else -> throw AssemblyError("weird operator")
-                        }
-                        it += if (goto.target.asConstInteger() != null)
-                            IRInstruction(gotoOpcode, IRDataType.BYTE, reg1 = compResultReg, immediate = 0, address = goto.target.asConstInteger())
-                        else if(goto.target is PtIdentifier && !isIndirectJump(goto))
-                            IRInstruction(gotoOpcode, IRDataType.BYTE, reg1 = compResultReg, immediate = 0, labelSymbol = (goto.target as PtIdentifier).name)
-                        else
-                            throw AssemblyError("non-indirect jump shouldn't have an expression as target")
-                    }
-                }
-            }
-        }
-        if(afterIfLabel.isNotEmpty())
+        if (isIndirectJump(goto)) {
+            val afterIfLabel = createLabelName()
+            translateCondition(ifElse.condition, null, afterIfLabel, result)
+            val tr = expressionEval.translateExpression(goto.target)
+            result += tr.chunks
+            addInstr(result, IRInstruction(Opcode.JUMPI, reg1 = tr.resultReg), null)
             result += IRCodeChunk(afterIfLabel, null)
+        } else {
+            val address = goto.target.asConstInteger()?.toUInt()?.toAddress()
+            val label = if (address == null) (goto.target as PtIdentifier).name else null
+            translateCondition(ifElse.condition, onTrueLabel = label, onTrueAddress = address, onFalseLabel = null, result = result)
+        }
         return result
     }
 
-    private fun branchInstr(goto: PtJump, branchOpcode: Opcode): IRInstruction {
-        return if (goto.target.asConstInteger() != null)
-            IRInstruction(branchOpcode, address = goto.target.asConstInteger())
-        else {
-            require(!isIndirectJump(goto)) { "indirect jumps cannot be expressed using a branch opcode"}
-            val identifier = goto.target as? PtIdentifier
-            if(identifier!=null && !isIndirectJump(goto))
-                IRInstruction(branchOpcode, labelSymbol = identifier.name)
-            else
-                TODO("JUMP to expression address ${goto.target}  ${goto.position}")
+    private fun translateCondition(
+        condition: PtExpression,
+        onTrueLabel: String?,
+        onFalseLabel: String?,
+        result: MutableList<IRCodeChunkBase>,
+        onTrueAddress: MemoryAddress? = null,
+        onFalseAddress: MemoryAddress? = null
+    ) {
+        if (onTrueLabel == null && onFalseLabel == null && onTrueAddress == null && onFalseAddress == null) {
+            val tr = expressionEval.translateExpression(condition)
+            result += tr.chunks
+            return
         }
-    }
 
-    private fun ifWithOnlyIndirectJump_IntegerCond(ifElse: PtIfElse, goto: PtJump): MutableList<IRCodeChunkBase> {
-        // indirect jump to target so the if has to jump past it instead
-        val result = mutableListOf<IRCodeChunkBase>()
-        val afterIfLabel = createLabelName()
-
-        fun ifNonZeroIntThenJump_BinExpr(condition: PtBinaryExpression) {
-            if(condition.operator in LogicalOperators) {
-                val trCond = expressionEval.translateExpression(condition)
-                result += trCond.chunks
-                addInstr(result, IRInstruction(Opcode.BSTEQ, labelSymbol = afterIfLabel), null)
+        if (condition is PtBinaryExpression) {
+            if (condition.operator == "or") {
+                val bodyLabel = onTrueLabel ?: createLabelName()
+                translateCondition(condition.left, bodyLabel, null, result)
+                translateCondition(condition.right, onTrueLabel, onFalseLabel, result, onTrueAddress, onFalseAddress)
+                if (onTrueLabel == null && onTrueAddress == null) result += IRCodeChunk(bodyLabel, null)
                 return
             }
-
-            val leftTr = expressionEval.translateExpression(condition.left)
-            val irDt = leftTr.dt
-            val signed = condition.left.type.isSigned
-            addToResult(result, leftTr, leftTr.resultReg, -1)
-            val number = (condition.right as? PtNumber)?.number?.toInt()
-            if(number!=null) {
-                val firstReg = leftTr.resultReg
-                when(condition.operator) {
-                    "==" -> {
-                        result += IRCodeChunk(null, null).also {
-                            it += IRInstruction(Opcode.CMPI, irDt, reg1 = firstReg, immediate = number)
-                            it += IRInstruction(Opcode.BSTNE, labelSymbol = afterIfLabel)
-                        }
-                    }
-                    "!=" -> {
-                        result += IRCodeChunk(null, null).also {
-                            it += IRInstruction(Opcode.CMPI, irDt, reg1 = firstReg, immediate = number)
-                            it += IRInstruction(Opcode.BSTEQ, labelSymbol = afterIfLabel)
-                        }
-                    }
-                    else -> {
-                        val opcode = when (condition.operator) {
-                            "<" -> if(signed) Opcode.BGES else Opcode.BGE
-                            ">" -> if(signed) Opcode.BLES else Opcode.BLE
-                            "<=" -> if(signed) Opcode.BGTS else Opcode.BGT
-                            ">=" -> if(signed) Opcode.BLTS else Opcode.BLT
-                            else -> throw AssemblyError("invalid comparison operator")
-                        }
-                        addInstr(result, IRInstruction(opcode, irDt, reg1 = firstReg, immediate = number, labelSymbol = afterIfLabel), null)
-                    }
-                }
-            } else {
-                val rightTr = expressionEval.translateExpression(condition.right)
-                addToResult(result, rightTr, rightTr.resultReg, -1)
-                val firstReg: Int
-                val secondReg: Int
-                val opcode: Opcode
-                var useCmp = false
-                when (condition.operator) {
-                    "==" -> {
-                        useCmp = true
-                        opcode = Opcode.BSTNE
-                        firstReg = leftTr.resultReg
-                        secondReg = rightTr.resultReg
-                    }
-                    "!=" -> {
-                        useCmp = true
-                        opcode = Opcode.BSTEQ
-                        firstReg = leftTr.resultReg
-                        secondReg = rightTr.resultReg
-                    }
-                    "<" -> {
-                        opcode = if (signed) Opcode.BGESR else Opcode.BGER
-                        firstReg = leftTr.resultReg
-                        secondReg = rightTr.resultReg
-                    }
-                    ">" -> {
-                        // swapped operands
-                        opcode = if (signed) Opcode.BGESR else Opcode.BGER
-                        firstReg = rightTr.resultReg
-                        secondReg = leftTr.resultReg
-                    }
-                    "<=" -> {
-                        opcode = if (signed) Opcode.BGTSR else Opcode.BGTR
-                        firstReg = leftTr.resultReg
-                        secondReg = rightTr.resultReg
-                    }
-                    ">=" -> {
-                        // swapped operands
-                        opcode = if (signed) Opcode.BGTSR else Opcode.BGTR
-                        firstReg = rightTr.resultReg
-                        secondReg = leftTr.resultReg
-                    }
-                    else -> throw AssemblyError("invalid comparison operator")
-                }
-
-                if(useCmp) {
-                    result += IRCodeChunk(null, null).also {
-                        it += IRInstruction(Opcode.CMP, irDt, reg1 = firstReg, reg2 = secondReg)
-                        it += IRInstruction(opcode, labelSymbol = afterIfLabel)
-                    }
+            if (condition.operator == "and") {
+                val skipLabel = onFalseLabel ?: createLabelName()
+                translateCondition(condition.left, null, skipLabel, result)
+                translateCondition(condition.right, onTrueLabel, onFalseLabel, result, onTrueAddress, onFalseAddress)
+                if (onFalseLabel == null && onFalseAddress == null) result += IRCodeChunk(skipLabel, null)
+                return
+            }
+            if (condition.operator in ComparisonOperators) {
+                if (condition.left.type.isFloat) {
+                    translateFloatComparison(condition, onTrueLabel, onTrueAddress, onFalseLabel, onFalseAddress, result)
                 } else {
-                    addInstr(result, IRInstruction(opcode, irDt, reg1 = firstReg, reg2 = secondReg, labelSymbol = afterIfLabel), null)
+                    translateIntegerComparison(condition, onTrueLabel, onTrueAddress, onFalseLabel, onFalseAddress, result)
                 }
+                return
             }
         }
-
-        when(val cond = ifElse.condition) {
-            is PtTypeCast -> {
-                require(cond.type.isBool && cond.value.type.isNumeric)
-                val tr = expressionEval.translateExpression(cond)
-                result += tr.chunks
-                addInstr(result, IRInstruction(Opcode.BSTEQ, labelSymbol = afterIfLabel), null)
-            }
-            is PtIdentifier, is PtArrayIndexer, is PtBuiltinFunctionCall, is PtFunctionCall, is PtContainmentCheck -> {
-                val tr = expressionEval.translateExpression(cond)
-                result += tr.chunks
-                addInstr(result, IRInstruction(Opcode.BSTEQ, labelSymbol = afterIfLabel), null)
-            }
-            is PtPrefix -> {
-                require(cond.operator=="not")
-                val tr = expressionEval.translateExpression(cond.value)
-                result += tr.chunks
-                addInstr(result, IRInstruction(Opcode.BSTNE, labelSymbol = afterIfLabel), null)
-            }
-            is PtBinaryExpression -> {
-                ifNonZeroIntThenJump_BinExpr(cond)
-            }
-            else -> throw AssemblyError("weird if condition ${ifElse.condition}")
+        if (condition is PtPrefix && condition.operator == "not") {
+            translateCondition(condition.value, onFalseLabel, onTrueLabel, result, onFalseAddress, onTrueAddress)
+            return
         }
 
-        // indirect jump to some computed address
-        val tr = expressionEval.translateExpression(goto.target)
+        // Fallback: materialize expression and branch on result
+        val tr = expressionEval.translateExpression(condition)
         result += tr.chunks
-        addInstr(result, IRInstruction(Opcode.JUMPI, reg1 = tr.resultReg), null)
-        result += IRCodeChunk(afterIfLabel, null)
-        return result
+        // Check if the last instruction already sets status flags - if so, skip the CMPI #0
+        val lastInstr = tr.chunks.lastOrNull()?.instructions?.lastOrNull()
+        val skipCmpi = lastInstr != null && lastInstr.opcode in OpcodesThatSetStatusbits
+        if (!skipCmpi) {
+            addInstr(result, IRInstruction(Opcode.CMPI, tr.dt, reg1 = tr.resultReg, immediate = 0), null)
+        }
+
+        if ((onTrueLabel != null || onTrueAddress != null) && (onFalseLabel != null || onFalseAddress != null)) {
+            addInstr(result, IRInstruction(Opcode.BSTNE, labelSymbol = onTrueLabel, address = onTrueAddress), null)
+            addInstr(result, IRInstruction(Opcode.JUMP, labelSymbol = onFalseLabel, address = onFalseAddress), null)
+        } else if (onTrueLabel != null || onTrueAddress != null) {
+            addInstr(result, IRInstruction(Opcode.BSTNE, labelSymbol = onTrueLabel, address = onTrueAddress), null)
+        } else if (onFalseLabel != null || onFalseAddress != null) {
+            addInstr(result, IRInstruction(Opcode.BSTEQ, labelSymbol = onFalseLabel, address = onFalseAddress), null)
+        }
     }
 
-    private fun ifWithOnlyNormalJump_IntegerCond(ifElse: PtIfElse, goto: PtJump): MutableList<IRCodeChunkBase> {
-        // normal goto after if, using branch instructions
-
-        val result = mutableListOf<IRCodeChunkBase>()
-
-        fun ifNonZeroIntThenJump_BinExpr(condition: PtBinaryExpression) {
-            if(condition.operator in LogicalOperators) {
-                val trCond = expressionEval.translateExpression(condition)
-                result += trCond.chunks
-                addInstr(result, branchInstr(goto, Opcode.BSTNE), null)
-                return
+    private fun translateIntegerComparison(condition: PtBinaryExpression, onTrueLabel: String?, onTrueAddress: MemoryAddress?, onFalseLabel: String?, onFalseAddress: MemoryAddress?, result: MutableList<IRCodeChunkBase>) {
+        val useBIT = expressionEval.checkIfConditionCanUseBIT(condition)
+        if (useBIT != null) {
+            val (testBitSet, variable, bitmask) = useBIT
+            addInstr(result, IRInstruction(Opcode.BIT, IRDataType.BYTE, labelSymbol = variable.name), null)
+            if ((onTrueLabel != null || onTrueAddress != null) && (onFalseLabel == null && onFalseAddress == null)) {
+                addInstr(result, IRInstruction(getBitBranchOpcode(bitmask, testBitSet), labelSymbol = onTrueLabel, address = onTrueAddress), null)
+            } else if ((onFalseLabel != null || onFalseAddress != null) && (onTrueLabel == null && onTrueAddress == null)) {
+                addInstr(result, IRInstruction(getBitBranchOpcode(bitmask, !testBitSet), labelSymbol = onFalseLabel, address = onFalseAddress), null)
+            } else if ((onTrueLabel != null || onTrueAddress != null) && (onFalseLabel != null || onFalseAddress != null)) {
+                addInstr(result, IRInstruction(getBitBranchOpcode(bitmask, testBitSet), labelSymbol = onTrueLabel, address = onTrueAddress), null)
+                addInstr(result, IRInstruction(Opcode.JUMP, labelSymbol = onFalseLabel, address = onFalseAddress), null)
             }
-
-            val leftTr = expressionEval.translateExpression(condition.left)
-            val irDt = leftTr.dt
-            val signed = condition.left.type.isSigned
-            addToResult(result, leftTr, leftTr.resultReg, -1)
-            val number = (condition.right as? PtNumber)?.number?.toInt()
-            if(number!=null) {
-                val firstReg = leftTr.resultReg
-                when(condition.operator) {
-                    "==" -> {
-                        addInstr(result, IRInstruction(Opcode.CMPI, irDt, reg1 = firstReg, immediate = number), null)
-                        addInstr(result, branchInstr(goto, Opcode.BSTEQ), null)
-                    }
-                    "!=" -> {
-                        addInstr(result, IRInstruction(Opcode.CMPI, irDt, reg1 = firstReg, immediate = number), null)
-                        addInstr(result, branchInstr(goto, Opcode.BSTNE), null)
-                    }
-                    else -> {
-                        val opcode = when (condition.operator) {
-                            "<" -> if(signed) Opcode.BLTS else Opcode.BLT
-                            ">" -> if(signed) Opcode.BGTS else Opcode.BGT
-                            "<=" -> if(signed) Opcode.BLES else Opcode.BLE
-                            ">=" -> if(signed) Opcode.BGES else Opcode.BGE
-                            else -> throw AssemblyError("invalid comparison operator")
-                        }
-                        if (goto.target.asConstInteger() != null)
-                            addInstr(result, IRInstruction(opcode, irDt, reg1 = firstReg, immediate = number, address = goto.target.asConstInteger()), null)
-                        else if(goto.target is PtIdentifier && !isIndirectJump(goto))
-                            addInstr(result, IRInstruction(opcode, irDt, reg1 = firstReg, immediate = number, labelSymbol = (goto.target as PtIdentifier).name), null)
-                        else
-                            throw AssemblyError("non-indirect jump shouldn't have an expression as target")
-                    }
-                }
-            } else {
-                val rightTr = expressionEval.translateExpression(condition.right)
-                addToResult(result, rightTr, rightTr.resultReg, -1)
-                val firstReg: Int
-                val secondReg: Int
-                val opcode: Opcode
-                var useCmp = false
-                when (condition.operator) {
-                    "==" -> {
-                        useCmp = true
-                        opcode = Opcode.BSTEQ
-                        firstReg = leftTr.resultReg
-                        secondReg = rightTr.resultReg
-                    }
-                    "!=" -> {
-                        useCmp = true
-                        opcode = Opcode.BSTNE
-                        firstReg = leftTr.resultReg
-                        secondReg = rightTr.resultReg
-                    }
-                    "<" -> {
-                        // swapped '>'
-                        opcode = if (signed) Opcode.BGTSR else Opcode.BGTR
-                        firstReg = rightTr.resultReg
-                        secondReg = leftTr.resultReg
-                    }
-                    ">" -> {
-                        opcode = if (signed) Opcode.BGTSR else Opcode.BGTR
-                        firstReg = leftTr.resultReg
-                        secondReg = rightTr.resultReg
-                    }
-                    "<=" -> {
-                        // swapped '>='
-                        opcode = if (signed) Opcode.BGESR else Opcode.BGER
-                        firstReg = rightTr.resultReg
-                        secondReg = leftTr.resultReg
-                    }
-                    ">=" -> {
-                        opcode = if (signed) Opcode.BGESR else Opcode.BGER
-                        firstReg = leftTr.resultReg
-                        secondReg = rightTr.resultReg
-                    }
-                    else -> throw AssemblyError("invalid comparison operator")
-                }
-
-                if(useCmp) {
-                    result += IRCodeChunk(null, null).also {
-                        it += IRInstruction(Opcode.CMP, irDt, reg1 = firstReg, reg2 = secondReg)
-                        it += branchInstr(goto, opcode)
-                    }
-                } else {
-                    if (goto.target.asConstInteger() != null)
-                        addInstr(result, IRInstruction(opcode, irDt, reg1 = firstReg, reg2 = secondReg, address = goto.target.asConstInteger()), null)
-                    else if(goto.target is PtIdentifier && !isIndirectJump(goto))
-                        addInstr(result, IRInstruction(opcode, irDt, reg1 = firstReg, reg2 = secondReg, labelSymbol = (goto.target as PtIdentifier).name), null)
-                    else
-                        throw AssemblyError("non-indirect jump shouldn't have an expression as target")
-                }
-            }
+            return
         }
 
-        when(val cond = ifElse.condition) {
-            is PtTypeCast -> {
-                require(cond.type.isBool && cond.value.type.isNumeric)
-                val tr = expressionEval.translateExpression(cond)
-                result += tr.chunks
-                addInstr(result, branchInstr(goto, Opcode.BSTNE), null)
+        val signed = condition.left.type.isSigned
+        val number = (condition.right as? PtNumber)?.number?.toInt()
+        val leftTr = expressionEval.translateExpression(condition.left)
+        val branchDt = leftTr.dt
+        addToResult(result, leftTr, leftTr.resultReg, -1)
+
+        if (number != null) {
+            val isComparingWithZero = number == 0
+            val lastInstr = leftTr.chunks.lastOrNull()?.instructions?.lastOrNull()
+            val canSkipCmpi = isComparingWithZero && lastInstr != null && lastInstr.opcode in OpcodesThatSetStatusbits
+
+            if ((onTrueLabel != null || onTrueAddress != null) && (onFalseLabel == null && onFalseAddress == null)) {
+                var (opcode, useCmpi) = getIntegerComparisonBranch(condition.operator, false, signed)
+                if (canSkipCmpi && (opcode == Opcode.BSTEQ || opcode == Opcode.BSTNE)) useCmpi = false
+                emitIntegerComparisonBranch(result, opcode, useCmpi, branchDt, leftTr.resultReg, number, onTrueLabel, onTrueAddress)
+            } else if ((onFalseLabel != null || onFalseAddress != null) && (onTrueLabel == null && onTrueAddress == null)) {
+                var (opcode, useCmpi) = getIntegerComparisonBranch(condition.operator, true, signed)
+                if (canSkipCmpi && (opcode == Opcode.BSTEQ || opcode == Opcode.BSTNE)) useCmpi = false
+                emitIntegerComparisonBranch(result, opcode, useCmpi, branchDt, leftTr.resultReg, number, onFalseLabel, onFalseAddress)
+            } else if ((onTrueLabel != null || onTrueAddress != null) && (onFalseLabel != null || onFalseAddress != null)) {
+                var (opcode, useCmpi) = getIntegerComparisonBranch(condition.operator, false, signed)
+                if (canSkipCmpi && (opcode == Opcode.BSTEQ || opcode == Opcode.BSTNE)) useCmpi = false
+                emitIntegerComparisonBranch(result, opcode, useCmpi, branchDt, leftTr.resultReg, number, onTrueLabel, onTrueAddress)
+                addInstr(result, IRInstruction(Opcode.JUMP, labelSymbol = onFalseLabel, address = onFalseAddress), null)
             }
-            is PtIdentifier, is PtArrayIndexer, is PtBuiltinFunctionCall, is PtFunctionCall, is PtContainmentCheck -> {
-                val tr = expressionEval.translateExpression(cond)
-                result += tr.chunks
-                addInstr(result, branchInstr(goto, Opcode.BSTNE), null)
+        } else {
+            val rightTr = expressionEval.translateExpression(condition.right)
+            addToResult(result, rightTr, rightTr.resultReg, -1)
+            if ((onTrueLabel != null || onTrueAddress != null) && (onFalseLabel == null && onFalseAddress == null)) {
+                val res = getIntegerComparisonRegBranch(condition.operator, false, signed, leftTr.resultReg, rightTr.resultReg)
+                emitIntegerComparisonRegBranch(result, res.opcode, res.useCmp, branchDt, res.leftReg, res.rightReg, onTrueLabel, onTrueAddress)
+            } else if ((onFalseLabel != null || onFalseAddress != null) && (onTrueLabel == null && onTrueAddress == null)) {
+                val res = getIntegerComparisonRegBranch(condition.operator, true, signed, leftTr.resultReg, rightTr.resultReg)
+                emitIntegerComparisonRegBranch(result, res.opcode, res.useCmp, branchDt, res.leftReg, res.rightReg, onFalseLabel, onFalseAddress)
+            } else if ((onTrueLabel != null || onTrueAddress != null) && (onFalseLabel != null || onFalseAddress != null)) {
+                val res = getIntegerComparisonRegBranch(condition.operator, false, signed, leftTr.resultReg, rightTr.resultReg)
+                emitIntegerComparisonRegBranch(result, res.opcode, res.useCmp, branchDt, res.leftReg, res.rightReg, onTrueLabel, onTrueAddress)
+                addInstr(result, IRInstruction(Opcode.JUMP, labelSymbol = onFalseLabel, address = onFalseAddress), null)
             }
-            is PtPrefix -> {
-                require(cond.operator=="not")
-                val tr = expressionEval.translateExpression(cond.value)
-                result += tr.chunks
-                addInstr(result, branchInstr(goto, Opcode.BSTEQ), null)
-            }
-            is PtBinaryExpression -> ifNonZeroIntThenJump_BinExpr(cond)
-            else -> throw AssemblyError("weird if condition ${ifElse.condition}")
         }
-        return result
     }
 
-    private fun translateIfElse(ifElse: PtIfElse): IRCodeChunks {
-        if((ifElse.condition as? PtPrefix)?.operator=="not" && ifElse.hasElse())
-            throw AssemblyError("not prefix in ifelse should have been replaced by swapped if-else blocks")
-
-        val condition = ifElse.condition as? PtBinaryExpression
-        if(condition==null || !condition.left.type.isFloat) {
-            return ifElse_IntegerCond(ifElse)
-        }
-
-        // we assume only a binary expression can contain a floating point.
-        val result = mutableListOf<IRCodeChunkBase>()
+    private fun translateFloatComparison(condition: PtBinaryExpression, onTrueLabel: String?, onTrueAddress: MemoryAddress?, onFalseLabel: String?, onFalseAddress: MemoryAddress?, result: MutableList<IRCodeChunkBase>) {
         val leftTr = expressionEval.translateExpression(condition.left)
         addToResult(result, leftTr, -1, leftTr.resultFpReg)
         val rightTr = expressionEval.translateExpression(condition.right)
         addToResult(result, rightTr, -1, rightTr.resultFpReg)
         val compResultReg = registers.next(IRDataType.BYTE)
-        addInstr(result, IRInstruction(Opcode.FCOMP, IRDataType.FLOAT, reg1 = compResultReg, fpReg1 = leftTr.resultFpReg, fpReg2 = rightTr.resultFpReg), null)
-        val elseBranch: Opcode
-        var useCmpi = false     // for the branch opcodes that have been converted to CMPI + BSTxx form already
-        when (condition.operator) {
-            "==" -> {
-                elseBranch = Opcode.BSTNE
-                useCmpi = true
-            }
-            "!=" -> {
-                elseBranch = Opcode.BSTEQ
-                useCmpi = true
-            }
-            "<" -> elseBranch = Opcode.BGES
-            ">" -> elseBranch = Opcode.BLES
-            "<=" -> elseBranch = Opcode.BGTS
-            ">=" -> elseBranch = Opcode.BLTS
+        addInstr(result, IRInstruction(Opcode.FCOMP, IRDataType.FLOAT, reg1 = compResultReg, fpReg1 = RegisterNum(leftTr.resultFpReg), fpReg2 = RegisterNum(rightTr.resultFpReg)), null)
+
+        if ((onTrueLabel != null || onTrueAddress != null) && (onFalseLabel == null && onFalseAddress == null)) {
+            val (opcode, useCmpi) = getFloatComparisonBranch(condition.operator, false)
+            emitIntegerComparisonBranch(result, opcode, useCmpi, IRDataType.BYTE, compResultReg, 0, onTrueLabel, onTrueAddress)
+        } else if ((onFalseLabel != null || onFalseAddress != null) && (onTrueLabel == null && onTrueAddress == null)) {
+            val (opcode, useCmpi) = getFloatComparisonBranch(condition.operator, true)
+            emitIntegerComparisonBranch(result, opcode, useCmpi, IRDataType.BYTE, compResultReg, 0, onFalseLabel, onFalseAddress)
+        } else if ((onTrueLabel != null || onTrueAddress != null) && (onFalseLabel != null || onFalseAddress != null)) {
+            val (opcode, useCmpi) = getFloatComparisonBranch(condition.operator, false)
+            emitIntegerComparisonBranch(result, opcode, useCmpi, IRDataType.BYTE, compResultReg, 0, onTrueLabel, onTrueAddress)
+            addInstr(result, IRInstruction(Opcode.JUMP, labelSymbol = onFalseLabel, address = onFalseAddress), null)
+        }
+    }
+
+    private fun getBitBranchOpcode(bitmask: Int, wantSet: Boolean): Opcode {
+        return if (wantSet) {
+            if (bitmask == 64) Opcode.BSTVS else Opcode.BSTNEG
+        } else {
+            if (bitmask == 64) Opcode.BSTVC else Opcode.BSTPOS
+        }
+    }
+
+    private fun invertOperator(operator: String) = when (operator) {
+        "==" -> "!="
+        "!=" -> "=="
+        "<" -> ">="
+        ">" -> "<="
+        "<=" -> ">"
+        ">=" -> "<"
+        else -> throw AssemblyError("invalid operator to invert")
+    }
+
+    private fun getIntegerComparisonBranch(operator: String, invert: Boolean, signed: Boolean): Pair<Opcode, Boolean> {
+        val op = if (invert) invertOperator(operator) else operator
+        return when (op) {
+            "==" -> Opcode.BSTEQ to true
+            "!=" -> Opcode.BSTNE to true
+            "<" -> (if (signed) Opcode.BLTS else Opcode.BLT) to false
+            ">" -> (if (signed) Opcode.BGTS else Opcode.BGT) to false
+            "<=" -> (if (signed) Opcode.BLES else Opcode.BLE) to false
+            ">=" -> (if (signed) Opcode.BGES else Opcode.BGE) to false
+            else -> throw AssemblyError("invalid comparison operator")
+        }
+    }
+
+    private data class RegBranchResult(val opcode: Opcode, val useCmp: Boolean, val leftReg: Int, val rightReg: Int)
+
+    private fun getIntegerComparisonRegBranch(operator: String, invert: Boolean, signed: Boolean, leftReg: Int, rightReg: Int): RegBranchResult {
+        val op = if (invert) invertOperator(operator) else operator
+        return when (op) {
+            "==" -> RegBranchResult(Opcode.BSTEQ, true, leftReg, rightReg)
+            "!=" -> RegBranchResult(Opcode.BSTNE, true, leftReg, rightReg)
+            "<" -> if (signed) RegBranchResult(Opcode.BGTSR, false, rightReg, leftReg) else RegBranchResult(Opcode.BGTR, false, rightReg, leftReg)
+            ">" -> if (signed) RegBranchResult(Opcode.BGTSR, false, leftReg, rightReg) else RegBranchResult(Opcode.BGTR, false, leftReg, rightReg)
+            "<=" -> if (signed) RegBranchResult(Opcode.BGESR, false, rightReg, leftReg) else RegBranchResult(Opcode.BGER, false, rightReg, leftReg)
+            ">=" -> if (signed) RegBranchResult(Opcode.BGESR, false, leftReg, rightReg) else RegBranchResult(Opcode.BGER, false, leftReg, rightReg)
+            else -> throw AssemblyError("invalid comparison operator")
+        }
+    }
+
+    private fun getFloatComparisonBranch(operator: String, invert: Boolean): Pair<Opcode, Boolean> {
+        val op = if (invert) invertOperator(operator) else operator
+        return when (op) {
+            "==" -> Opcode.BSTEQ to true
+            "!=" -> Opcode.BSTNE to true
+            "<" -> Opcode.BLTS to false
+            ">" -> Opcode.BGTS to false
+            "<=" -> Opcode.BLES to false
+            ">=" -> Opcode.BGES to false
             else -> throw AssemblyError("weird operator")
         }
+    }
 
+    private fun emitIntegerComparisonBranch(result: MutableList<IRCodeChunkBase>, opcode: Opcode, useCmpi: Boolean, dt: IRDataType, reg: Int, immediate: Int, label: String?, address: MemoryAddress?) {
+        if (useCmpi) {
+            result += IRCodeChunk(null, null).also {
+                it += IRInstruction(Opcode.CMPI, dt, reg1 = reg, immediate = immediate)
+                it += IRInstruction(opcode, labelSymbol = label, address = address)
+            }
+        } else if (opcode in setOf(Opcode.BSTEQ, Opcode.BSTNE, Opcode.BSTPOS, Opcode.BSTNEG, Opcode.BSTCS, Opcode.BSTCC, Opcode.BSTVS, Opcode.BSTVC)) {
+            addInstr(result, IRInstruction(opcode, labelSymbol = label, address = address), null)
+        } else {
+            addInstr(result, IRInstruction(opcode, dt, reg1 = reg, immediate = immediate, labelSymbol = label, address = address), null)
+        }
+    }
+
+    private fun emitIntegerComparisonRegBranch(result: MutableList<IRCodeChunkBase>, opcode: Opcode, useCmp: Boolean, dt: IRDataType, leftReg: Int, rightReg: Int, label: String?, address: MemoryAddress?) {
+        if (useCmp) {
+            result += IRCodeChunk(null, null).also {
+                it += IRInstruction(Opcode.CMP, dt, reg1 = leftReg, reg2 = rightReg)
+                it += IRInstruction(opcode, labelSymbol = label, address = address)
+            }
+        } else {
+            addInstr(result, IRInstruction(opcode, dt, reg1 = leftReg, reg2 = rightReg, labelSymbol = label, address = address), null)
+        }
+    }
+
+
+    private fun translateIfElse(ifElse: PtIfElse): IRCodeChunks {
+        val result = mutableListOf<IRCodeChunkBase>()
+        val afterIfLabel = createLabelName()
         if (ifElse.hasElse()) {
-            // if and else parts
             val elseLabel = createLabelName()
-            val afterIfLabel = createLabelName()
-            if(useCmpi) {
-                result += IRCodeChunk(null, null).also {
-                    it += IRInstruction(Opcode.CMPI, IRDataType.BYTE, reg1 = compResultReg, immediate = 0)
-                    it += IRInstruction(elseBranch, labelSymbol = elseLabel)
-                }
-            } else
-                addInstr(result, IRInstruction(elseBranch, IRDataType.BYTE, reg1 = compResultReg, immediate = 0, labelSymbol = elseLabel), null)
+            translateCondition(ifElse.condition, null, elseLabel, result)
             result += translateNode(ifElse.ifScope)
             addInstr(result, IRInstruction(Opcode.JUMP, labelSymbol = afterIfLabel), null)
             result += labelFirstChunk(translateNode(ifElse.elseScope), elseLabel)
-            result += IRCodeChunk(afterIfLabel, null)
         } else {
-            // only if part
-            val afterIfLabel = createLabelName()
-            if(useCmpi) {
-                result += IRCodeChunk(null, null).also {
-                    it += IRInstruction(Opcode.CMPI, IRDataType.BYTE, reg1 = compResultReg, immediate = 0)
-                    it += IRInstruction(elseBranch, labelSymbol = afterIfLabel)
-                }
-            } else
-                addInstr(result, IRInstruction(elseBranch, IRDataType.BYTE, reg1 = compResultReg, immediate = 0, labelSymbol = afterIfLabel), null)
+            translateCondition(ifElse.condition, null, afterIfLabel, result)
             result += translateNode(ifElse.ifScope)
-            result += IRCodeChunk(afterIfLabel, null)
         }
+        result += IRCodeChunk(afterIfLabel, null)
         return result
     }
 
-    private fun ifElse_IntegerCond(ifElse: PtIfElse): List<IRCodeChunkBase> {
-        val result = mutableListOf<IRCodeChunkBase>()
-
-        fun translateSimple(condition: PtExpression, jumpFalseOpcode: Opcode, addCmpiZero: Boolean) {
-            val tr = expressionEval.translateExpression(condition)
-            if(addCmpiZero)
-                tr.chunks.last().instructions.add(IRInstruction(Opcode.CMPI, tr.dt, reg1 = tr.resultReg, immediate = 0))
-            result += tr.chunks
-            if(ifElse.hasElse()) {
-                val elseLabel = createLabelName()
-                val afterIfLabel = createLabelName()
-                addInstr(result, IRInstruction(jumpFalseOpcode, labelSymbol = elseLabel), null)
-                result += translateNode(ifElse.ifScope)
-                addInstr(result, IRInstruction(Opcode.JUMP, labelSymbol = afterIfLabel), null)
-                result += labelFirstChunk(translateNode(ifElse.elseScope), elseLabel)
-                result += IRCodeChunk(afterIfLabel, null)
-            } else {
-                val afterIfLabel = createLabelName()
-                addInstr(result, IRInstruction(jumpFalseOpcode, labelSymbol = afterIfLabel), null)
-                result += translateNode(ifElse.ifScope)
-                result += IRCodeChunk(afterIfLabel, null)
-            }
-        }
-
-        fun translateBinExpr(condition: PtBinaryExpression) {
-            if(condition.operator in LogicalOperators)
-                return translateSimple(condition, Opcode.BSTEQ, false)
-
-            val useBIT = expressionEval.checkIfConditionCanUseBIT(condition)
-            if(useBIT!=null) {
-                // use a BIT instruction to test for bit 7 or 6 set/clear
-                val (testBitSet, variable, bitmask) = useBIT
-                addInstr(result, IRInstruction(Opcode.BIT, IRDataType.BYTE, labelSymbol = variable.name), null)
-                val bitBranchOpcode = when(testBitSet) {
-                    true -> when(bitmask) {
-                        64 -> Opcode.BSTVC
-                        128 -> Opcode.BSTPOS
-                        else -> throw AssemblyError("need bit 6 or 7")
-                    }
-                    false -> when(bitmask) {
-                        64 -> Opcode.BSTVS
-                        128 -> Opcode.BSTNEG
-                        else -> throw AssemblyError("need bit 6 or 7")
-                    }
-                }
-
-                if(ifElse.hasElse()) {
-                    val elseLabel = createLabelName()
-                    val afterIfLabel = createLabelName()
-                    addInstr(result, IRInstruction(bitBranchOpcode, labelSymbol = elseLabel), null)
-                    result += translateNode(ifElse.ifScope)
-                    addInstr(result, IRInstruction(Opcode.JUMP, labelSymbol = afterIfLabel), null)
-                    result += labelFirstChunk(translateNode(ifElse.elseScope), elseLabel)
-                    result += IRCodeChunk(afterIfLabel, null)
-                } else {
-                    val afterIfLabel = createLabelName()
-                    addInstr(result, IRInstruction(bitBranchOpcode, labelSymbol = afterIfLabel), null)
-                    result += translateNode(ifElse.ifScope)
-                    result += IRCodeChunk(afterIfLabel, null)
-                }
-                return
-            }
-
-            val signed = condition.left.type.isSigned
-            val elseBranchFirstReg: Int
-            val elseBranchSecondReg: Int
-            val number = (condition.right as? PtNumber)?.number?.toInt()
-
-            val leftTr = expressionEval.translateExpression(condition.left)
-            val branchDt = leftTr.dt
-            addToResult(result, leftTr, leftTr.resultReg, -1)
-            if (number!=null) {
-                val elseBranch: Opcode
-                var useCmpi = false     // for the branch opcodes that have been converted to CMPI + BSTxx form already
-                when (condition.operator) {
-                    "==" -> {
-                        elseBranch = Opcode.BSTNE
-                        useCmpi = true
-                    }
-                    "!=" -> {
-                        elseBranch = Opcode.BSTEQ
-                        useCmpi = true
-                    }
-                    "<" -> elseBranch = if(signed) Opcode.BGES else Opcode.BGE
-                    ">" -> elseBranch = if(signed) Opcode.BLES else Opcode.BLE
-                    "<=" -> elseBranch = if(signed) Opcode.BGTS else Opcode.BGT
-                    ">=" -> elseBranch = if(signed) Opcode.BLTS else Opcode.BLT
-                    else -> throw AssemblyError("invalid comparison operator")
-                }
-
-                if (ifElse.hasElse()) {
-                    // if and else parts
-                    val elseLabel = createLabelName()
-                    val afterIfLabel = createLabelName()
-                    if(useCmpi) {
-                        result += IRCodeChunk(null, null).also {
-                            it += IRInstruction(Opcode.CMPI, branchDt, reg1 = leftTr.resultReg, immediate = number)
-                            it += IRInstruction(elseBranch, labelSymbol = elseLabel)
-                        }
-                    } else {
-                        addInstr(result, IRInstruction(elseBranch, branchDt, reg1 = leftTr.resultReg, immediate = number, labelSymbol = elseLabel), null)
-                    }
-                    result += translateNode(ifElse.ifScope)
-                    addInstr(result, IRInstruction(Opcode.JUMP, labelSymbol = afterIfLabel), null)
-                    result += labelFirstChunk(translateNode(ifElse.elseScope), elseLabel)
-                    result += IRCodeChunk(afterIfLabel, null)
-                } else {
-                    // only if part
-                    val afterIfLabel = createLabelName()
-                    if(useCmpi) {
-                        result += IRCodeChunk(null, null).also {
-                            it += IRInstruction(Opcode.CMPI, branchDt, reg1 = leftTr.resultReg, immediate = number)
-                            it += IRInstruction(elseBranch, labelSymbol = afterIfLabel)
-                        }
-                    } else
-                        addInstr(result, IRInstruction(elseBranch, branchDt, reg1 = leftTr.resultReg, immediate = number, labelSymbol = afterIfLabel), null)
-                    result += translateNode(ifElse.ifScope)
-                    result += IRCodeChunk(afterIfLabel, null)
-                }
-            } else {
-                val rightTr = expressionEval.translateExpression(condition.right)
-                val elseBranch: Opcode
-                var useCmp = false
-                addToResult(result, rightTr, rightTr.resultReg, -1)
-                when (condition.operator) {
-                    "==" -> {
-                        useCmp = true
-                        elseBranch = Opcode.BSTNE
-                        elseBranchFirstReg = leftTr.resultReg
-                        elseBranchSecondReg = rightTr.resultReg
-                    }
-                    "!=" -> {
-                        useCmp = true
-                        elseBranch = Opcode.BSTEQ
-                        elseBranchFirstReg = leftTr.resultReg
-                        elseBranchSecondReg = rightTr.resultReg
-                    }
-                    "<" -> {
-                        // else part when left >= right
-                        elseBranch = if (signed) Opcode.BGESR else Opcode.BGER
-                        elseBranchFirstReg = leftTr.resultReg
-                        elseBranchSecondReg = rightTr.resultReg
-                    }
-                    ">" -> {
-                        // else part when left <= right --> right >= left
-                        elseBranch = if (signed) Opcode.BGESR else Opcode.BGER
-                        elseBranchFirstReg = rightTr.resultReg
-                        elseBranchSecondReg = leftTr.resultReg
-                    }
-                    "<=" -> {
-                        // else part when left > right
-                        elseBranch = if (signed) Opcode.BGTSR else Opcode.BGTR
-                        elseBranchFirstReg = leftTr.resultReg
-                        elseBranchSecondReg = rightTr.resultReg
-                    }
-                    ">=" -> {
-                        // else part when left < right --> right > left
-                        elseBranch = if (signed) Opcode.BGTSR else Opcode.BGTR
-                        elseBranchFirstReg = rightTr.resultReg
-                        elseBranchSecondReg = leftTr.resultReg
-                    }
-                    else -> throw AssemblyError("invalid comparison operator")
-                }
-
-                if (ifElse.hasElse()) {
-                    // if and else parts
-                    val elseLabel = createLabelName()
-                    val afterIfLabel = createLabelName()
-                    if(useCmp) {
-                        result += IRCodeChunk(null,null).also {
-                            it += IRInstruction(Opcode.CMP, branchDt, reg1 = elseBranchFirstReg, reg2 = elseBranchSecondReg)
-                            it += IRInstruction(elseBranch, labelSymbol = elseLabel)
-                        }
-                    } else {
-                        addInstr(result, IRInstruction(elseBranch, branchDt, reg1 = elseBranchFirstReg, reg2 = elseBranchSecondReg, labelSymbol = elseLabel), null)
-                    }
-                    result += translateNode(ifElse.ifScope)
-                    addInstr(result, IRInstruction(Opcode.JUMP, labelSymbol = afterIfLabel), null)
-                    result += labelFirstChunk(translateNode(ifElse.elseScope), elseLabel)
-                    result += IRCodeChunk(afterIfLabel, null)
-                } else {
-                    // only if part
-                    val afterIfLabel = createLabelName()
-                    if(useCmp) {
-                        result += IRCodeChunk(null,null).also {
-                            it += IRInstruction(Opcode.CMP, branchDt, reg1 = elseBranchFirstReg, reg2 = elseBranchSecondReg)
-                            it += IRInstruction(elseBranch, labelSymbol = afterIfLabel)
-                        }
-                    } else {
-                        addInstr(result, IRInstruction(elseBranch, branchDt, reg1 = elseBranchFirstReg, reg2 = elseBranchSecondReg, labelSymbol = afterIfLabel), null)
-                    }
-                    result += translateNode(ifElse.ifScope)
-                    result += IRCodeChunk(afterIfLabel, null)
-                }
-            }
-        }
-
-        when(val cond=ifElse.condition) {
-            // TODO investigate; maybe do all conditions require a CMPI at the end? Some here still have false, but do they work correctly in all cases?
-            is PtBool -> {
-                // normally this will be optimized away, but not with -noopt
-                translateSimple(cond, Opcode.BSTEQ, false)
-            }
-            is PtTypeCast -> {
-                require(cond.type.isBool && (cond.value.type.isNumeric || cond.value.type.isPointer))
-                translateSimple(cond, Opcode.BSTEQ, false)
-            }
-            is PtIdentifier, is PtArrayIndexer, is PtContainmentCheck -> {
-                translateSimple(cond, Opcode.BSTEQ, false)
-            }
-            is PtBuiltinFunctionCall, is PtFunctionCall -> {
-                translateSimple(cond, Opcode.BSTEQ, true)
-            }
-            is PtPrefix -> {
-                require(cond.operator=="not")
-                translateSimple(cond.value, Opcode.BSTNE, true)
-            }
-            is PtBinaryExpression -> {
-                translateBinExpr(cond)
-            }
-            is PtPointerDeref -> {
-                translateSimple(cond, Opcode.BSTEQ, false)
-            }
-            else -> throw AssemblyError("weird if condition ${ifElse.condition}")
-        }
-        return result
-    }
 
     private fun translate(repeat: PtRepeatLoop): IRCodeChunks {
         when (repeat.count.asConstInteger()) {
@@ -1713,7 +1363,7 @@ class IRCodeGen(
             1 -> return translateGroup(repeat.children)
             256 -> {
                 // 256 iterations can still be done with just a byte counter if you set it to zero as starting value.
-                repeat.children[0] = PtNumber(BaseDataType.UBYTE, 0.0, repeat.count.position)
+                repeat.setChild(0, PtNumber(BaseDataType.UBYTE, 0.0, repeat.count.position))
             }
         }
 
@@ -1752,7 +1402,7 @@ class IRCodeGen(
         val result = mutableListOf<IRCodeChunkBase>()
         val chunk = IRCodeChunk(null, null)
         if(jump.target.asConstInteger()!=null) {
-            chunk += IRInstruction(Opcode.JUMP, address = jump.target.asConstInteger())
+            chunk += IRInstruction(Opcode.JUMP, address = jump.target.asConstInteger()?.toUInt()?.toAddress())
             result += chunk
             return result
         } else {
@@ -1789,12 +1439,61 @@ class IRCodeGen(
 
     private fun translate(ret: PtReturn): IRCodeChunks {
         val result = mutableListOf<IRCodeChunkBase>()
-        if(ret.children.size>1) {
+        if(ret.numReturnValues()>1) {
             // note: multi-value returns are passed throug A or AY (for the first value) then cx16.R15 down to R0
             // (this allows unencumbered use of many Rx registers if you don't return that many values)
             // a floating point value is passed via FAC   (just one fp value is possible)
 
             val returnRegs = ret.definingISub()!!.returnsWhatWhere()
+
+            if(ret.children.size < ret.numReturnValues()) {
+                // Return values come from a multi-value function call (e.g., "return multi2(99)")
+                // We need to call the function and then move its return values to our return registers
+                val fcall = ret.children.single() as? PtFunctionCall
+                    ?: throw AssemblyError("expected function call for multi-value return ${ret.position}")
+                
+                // Translate the function call (this generates the CALL instruction)
+                val callResult = expressionEval.translate(fcall)
+                result += callResult.chunks
+                
+                // Get the return register specs for the called function
+                val calledSub = symbolTable.lookup(fcall.name)
+                val calledReturnRegs = when(calledSub) {
+                    is StSub -> (calledSub.astNode!! as IPtSubroutine).returnsWhatWhere()
+                    is StExtSub -> calledSub.returns.map { it.register to it.type }
+                    else -> throw AssemblyError("unexpected subroutine type for multi-value return ${ret.position}")
+                }
+                
+                // Move each return value from the called function's return registers to our return registers
+                calledReturnRegs.zip(returnRegs).forEachIndexed { index, (fromRegTo, toRegTo) ->
+                    val (fromReg, fromType) = fromRegTo
+                    val (toReg, toType) = toRegTo
+                    require(fromType == toType) { "return type mismatch at position $index" }
+
+                    if(fromType.isFloat) {
+                        // For float returns, use FAC1/FAC2
+                        val tempFpReg = registers.next(IRDataType.FLOAT)
+                        when(fromReg.registerOrPair) {
+                            RegisterOrPair.FAC1 -> addInstr(result, IRInstruction(Opcode.LOADHFACZERO, IRDataType.FLOAT, fpReg1 = RegisterNum(tempFpReg)), null)
+                            RegisterOrPair.FAC2 -> addInstr(result, IRInstruction(Opcode.LOADHFACONE, IRDataType.FLOAT, fpReg1 = RegisterNum(tempFpReg)), null)
+                            else -> throw AssemblyError("unexpected FP return register ${fromReg}")
+                        }
+                        when(toReg.registerOrPair) {
+                            RegisterOrPair.FAC1 -> addInstr(result, IRInstruction(Opcode.STOREHFACZERO, IRDataType.FLOAT, fpReg1 = RegisterNum(tempFpReg)), null)
+                            RegisterOrPair.FAC2 -> addInstr(result, IRInstruction(Opcode.STOREHFACONE, IRDataType.FLOAT, fpReg1 = RegisterNum(tempFpReg)), null)
+                            else -> throw AssemblyError("unexpected FP return register ${toReg}")
+                        }
+                    } else {
+                        // For non-float returns, load from source to temp IR register, then store to destination
+                        val tempReg = registers.next(irType(fromType))
+                        result += loadFromCpuRegister(fromReg, fromType, tempReg)
+                        result += setCpuRegister(toReg, irType(toType), tempReg, -1)
+                    }
+                }
+                addInstr(result, IRInstruction(Opcode.RETURN), null)
+                return result
+            }
+
             val values = ret.children.zip(returnRegs)
             // first all but the first return values
             for ((value, register) in values.drop(1)) {
@@ -1835,7 +1534,7 @@ class IRCodeGen(
                 } else {
                     val tr = expressionEval.translateExpression(value)
                     addToResult(result, tr, -1, tr.resultFpReg)
-                    addInstr(result, IRInstruction(Opcode.RETURNR, IRDataType.FLOAT, fpReg1 = tr.resultFpReg), null)
+                    addInstr(result, IRInstruction(Opcode.RETURNR, IRDataType.FLOAT, fpReg1 = RegisterNum(tr.resultFpReg)), null)
                 }
             }
             else {
@@ -1864,7 +1563,7 @@ class IRCodeGen(
             when(child) {
                 is PtNop -> { /* nothing */ }
                 is PtAssignment, is PtAugmentedAssign -> { /* global variable initialization is done elsewhere */ }
-                is PtVariable, is PtConstant, is PtMemMapped -> { /* vars should be looked up via symbol table */ }
+                is PtVariable, is PtConstant, is PtMemMapped, is PtMemorySlabReservation -> { /* vars should be looked up via symbol table */ }
                 is PtAlign -> TODO("ir support for inline %align  ${child.position}")
                 is PtSub -> {
                     val sub = IRSubroutine(child.name, translateParameters(child.signature.children), child.signature.returns, child.position)
@@ -1881,7 +1580,7 @@ class IRCodeGen(
                         }
                     } else {
                         // regular asmsub
-                        if(child.children.map { (it as PtInlineAssembly).isIR }.toSet().size>1)
+                        if(child.children.mapTo(mutableSetOf()) { (it as PtInlineAssembly).isIR }.size>1)
                             errors.err("asmsub mixes IR and non-IR assembly code (could be compiler-generated)", child.position)
                         val asmblocks = child.children.map { (it as PtInlineAssembly).assembly.trimEnd() }
                         val assembly = asmblocks.joinToString("\n")
@@ -1917,10 +1616,55 @@ class IRCodeGen(
                     }
                 }
                 is PtStructDecl -> { /* do nothing, should be found in the symbol table */ }
+                is PtMemorySlabReservation -> { /* do nothing, should be found in the symbol table */ }
                 else -> TODO("weird block child node $child  ${child.position}")
             }
         }
         return irBlock
+    }
+
+    private fun translate(swap: PtSwap): IRCodeChunks {
+        require(swap.target1.type == swap.target2.type)
+        val result = mutableListOf<IRCodeChunkBase>()
+        val target1: PtExpression = swap.target1.children.single() as PtExpression
+        val target2: PtExpression = swap.target2.children.single() as PtExpression
+        val t1 = expressionEval.translateExpression(target1)
+        val t2 = expressionEval.translateExpression(target2)
+        if(swap.target1.type.isFloat) {
+            addToResult(result, t1, -1, t1.resultFpReg)
+            addToResult(result, t2, -1, t2.resultFpReg)
+            result += assignFpRegisterTo(target1, t2.resultFpReg)
+            result += assignFpRegisterTo(target2, t1.resultFpReg)
+        } else {
+            addToResult(result, t1, t1.resultReg, -1)
+            addToResult(result, t2, t2.resultReg, -1)
+            result += assignRegisterTo(target1, t2.resultReg)
+            result += assignRegisterTo(target2, t1.resultReg)
+        }
+        return result
+    }
+
+    private fun assignFpRegisterTo(target: PtExpression, fpRegister: Int): IRCodeChunks {
+        require(target.type.isFloat)
+        val assignment = PtAssignment(target.position)
+        val assignTarget = PtAssignTarget(false, target.position)
+        assignTarget.add(target)
+        assignment.add(assignTarget)
+        assignment.add(PtIrRegister(fpRegister, DataType.FLOAT, target.position))
+        val result = mutableListOf<IRCodeChunkBase>()
+        result += translateNode(assignment)
+        return result
+    }
+
+    internal fun assignRegisterTo(target: PtExpression, register: Int): IRCodeChunks {
+        val assignment = PtAssignment(target.position)
+        val assignTarget = PtAssignTarget(false, target.position)
+        assignTarget.add(target)
+        assignment.add(assignTarget)
+        assignment.add(PtIrRegister(register, target.type, target.position))
+        val result = mutableListOf<IRCodeChunkBase>()
+        result += translateNode(assignment)
+        return result
     }
 
     private fun translateParameters(parameters: List<PtNode>): List<IRSubroutine.IRParam> {
@@ -1934,7 +1678,7 @@ class IRCodeGen(
                 result += IRSubroutine.IRParam(it.name, orig.dt)
             } else {
                 val reg = it.register
-                require(reg in Cx16VirtualRegisters) { "can only use R0-R15 'registers' here" }
+                require(reg in Cx16VirtualRegisters || reg in CombinedLongRegisters) { "can only use R0-R15 'registers' here" }
                 val regname = it.register!!.asScopedNameVirtualReg(it.type).joinToString(".")
                 val targetVar = symbolTable.lookup(regname) as StMemVar
                 result += IRSubroutine.IRParam(regname, targetVar.dt)
@@ -1949,8 +1693,9 @@ class IRCodeGen(
         return "${GENERATED_LABEL_PREFIX}$labelSequenceNumber"
     }
 
-    internal fun translateBuiltinFunc(call: PtBuiltinFunctionCall): ExpressionCodeResult
-        = builtinFuncGen.translate(call)
+    internal fun translateBuiltinFunc(call: PtFunctionCall): ExpressionCodeResult {
+        return builtinFuncGen.translate(call)
+    }
 
     internal fun isZero(expression: PtExpression): Boolean = (expression as? PtNumber)?.number==0.0 || (expression as? PtBool)?.value==false
 
@@ -1959,10 +1704,10 @@ class IRCodeGen(
     internal fun makeSyscall(syscall: IMSyscall, params: List<Pair<IRDataType, Int>>, returns: Pair<IRDataType, Int>?, label: String?=null): IRCodeChunk {
         return IRCodeChunk(label, null).also {
             val args = params.map { (dt, reg)->
-                FunctionCallArgs.ArgumentSpec("", null, FunctionCallArgs.RegSpec(dt, reg, null))
+                FunctionCallArgs.ArgumentSpec("", null, FunctionCallArgs.RegSpec(dt, RegisterNum(reg), null))
             }
             // for now, syscalls have 0 or 1 return value
-            val returnSpec = if(returns==null) emptyList() else listOf(FunctionCallArgs.RegSpec(returns.first, returns.second, null))
+            val returnSpec = if(returns==null) emptyList() else listOf(FunctionCallArgs.RegSpec(returns.first, RegisterNum(returns.second), null))
             it += IRInstruction(Opcode.SYSCALL, immediate = syscall.number, fcallArgs = FunctionCallArgs(args, returnSpec))
         }
     }
@@ -1976,8 +1721,8 @@ class IRCodeGen(
             RegisterOrPair.AX -> chunk += IRInstruction(Opcode.STOREHAX, IRDataType.WORD, reg1=resultReg)
             RegisterOrPair.AY -> chunk += IRInstruction(Opcode.STOREHAY, IRDataType.WORD, reg1=resultReg)
             RegisterOrPair.XY -> chunk += IRInstruction(Opcode.STOREHXY, IRDataType.WORD, reg1=resultReg)
-            RegisterOrPair.FAC1 -> chunk += IRInstruction(Opcode.STOREHFACZERO, IRDataType.FLOAT, fpReg1 = resultFpReg)
-            RegisterOrPair.FAC2 -> chunk += IRInstruction(Opcode.STOREHFACONE, IRDataType.FLOAT, fpReg1 = resultFpReg)
+            RegisterOrPair.FAC1 -> chunk += IRInstruction(Opcode.STOREHFACZERO, IRDataType.FLOAT, fpReg1 = RegisterNum(resultFpReg))
+            RegisterOrPair.FAC2 -> chunk += IRInstruction(Opcode.STOREHFACONE, IRDataType.FLOAT, fpReg1 = RegisterNum(resultFpReg))
             in Cx16VirtualRegisters -> {
                 chunk += IRInstruction(Opcode.STOREM, paramDt, reg1=resultReg, labelSymbol = "cx16.${registerOrFlag.registerOrPair.toString().lowercase()}")
             }
@@ -1996,8 +1741,40 @@ class IRCodeGen(
         return chunk
     }
 
+    internal fun loadFromCpuRegister(registerOrFlag: RegisterOrStatusflag, fromType: DataType, tempReg: Int): IRCodeChunk {
+        val chunk = IRCodeChunk(null, null)
+        val irType = irType(fromType)
+        when(registerOrFlag.registerOrPair) {
+            RegisterOrPair.A -> chunk += IRInstruction(Opcode.LOADHA, IRDataType.BYTE, reg1=tempReg)
+            RegisterOrPair.X -> chunk += IRInstruction(Opcode.LOADHX, IRDataType.BYTE, reg1=tempReg)
+            RegisterOrPair.Y -> chunk += IRInstruction(Opcode.LOADHY, IRDataType.BYTE, reg1=tempReg)
+            RegisterOrPair.AX -> chunk += IRInstruction(Opcode.LOADHAX, IRDataType.WORD, reg1=tempReg)
+            RegisterOrPair.AY -> chunk += IRInstruction(Opcode.LOADHAY, IRDataType.WORD, reg1=tempReg)
+            RegisterOrPair.XY -> chunk += IRInstruction(Opcode.LOADHXY, IRDataType.WORD, reg1=tempReg)
+            RegisterOrPair.FAC1 -> chunk += IRInstruction(Opcode.LOADHFACZERO, IRDataType.FLOAT, fpReg1 = RegisterNum(tempReg))
+            RegisterOrPair.FAC2 -> chunk += IRInstruction(Opcode.LOADHFACONE, IRDataType.FLOAT, fpReg1 = RegisterNum(tempReg))
+            in Cx16VirtualRegisters -> {
+                chunk += IRInstruction(Opcode.LOADM, irType, reg1=tempReg, labelSymbol = "cx16.${registerOrFlag.registerOrPair.toString().lowercase()}")
+            }
+            in CombinedLongRegisters -> {
+                require(fromType.isLong)
+                val startreg = registerOrFlag.registerOrPair!!.startregname()
+                chunk += IRInstruction(Opcode.LOADM, IRDataType.LONG, reg1=tempReg, labelSymbol = "cx16.${startreg}")
+            }
+            null -> when(registerOrFlag.statusflag) {
+                Statusflag.Pc -> {
+                    chunk += IRInstruction(Opcode.LOAD, IRDataType.BYTE, reg1=tempReg, immediate = 0)
+                    chunk += IRInstruction(Opcode.ROXL, IRDataType.BYTE, reg1=tempReg)
+                }
+                else -> throw AssemblyError("unsupported statusflag ${registerOrFlag.statusflag}")
+            }
+            else -> throw AssemblyError("weird CPU register ${registerOrFlag}")
+        }
+        return chunk
+    }
+
     internal fun evaluatePointerAddressIntoReg(result: MutableList<IRCodeChunkBase>, deref: PtPointerDeref): Pair<Int, UByte> {
-        // calculates the pointer address and returns the register it's in + remaining offset into the struct  (so that LOADFIELD/STOREFIELD instructions can be used)
+        // calculates the pointer address and returns the register it's in + remaining offset into the struct  (so that LOADI/STOREFIELD instructions can be used)
         val pointerTr = expressionEval.translateExpression(deref.startpointer)
         result += pointerTr.chunks
         val (instructions, offset) = expressionEval.traverseRestOfDerefChainToCalculateFinalAddress(deref, pointerTr.resultReg)
@@ -2009,33 +1786,28 @@ class IRCodeGen(
         if(offset<=0u) {
             val irdt = irType(type)
             val instr = if(type.isFloat) {
-                if (valueIsZero) IRInstruction(Opcode.STOREZI, IRDataType.FLOAT, reg1 = addressReg)
-                else IRInstruction(Opcode.STOREI, IRDataType.FLOAT, fpReg1 = existingValueRegister, reg1 = addressReg)
+                if (valueIsZero) IRInstruction(Opcode.STOREZI, IRDataType.FLOAT, reg1 = addressReg, immediate = 0)
+                else IRInstruction(Opcode.STOREI, IRDataType.FLOAT, fpReg1 = RegisterNum(existingValueRegister), reg1 = addressReg, immediate = 0)
             } else {
-                if (valueIsZero) IRInstruction(Opcode.STOREZI, irdt, reg1 = addressReg)
-                else IRInstruction(Opcode.STOREI, irdt, reg1 = existingValueRegister, reg2 = addressReg)
+                if (valueIsZero) IRInstruction(Opcode.STOREZI, irdt, reg1 = addressReg, immediate = 0)
+                else IRInstruction(Opcode.STOREI, irdt, reg1 = existingValueRegister, reg2 = addressReg, immediate = 0)
             }
             addInstr(result, instr, null)
             return
         }
 
         // store with field offset
-        var valueRegister = existingValueRegister
+        val valueRegister = existingValueRegister
         val irdt = irType(type)
         if(valueIsZero && valueRegister<0) {
-            if(type.isFloat) {
-                valueRegister = registers.next(IRDataType.FLOAT)
-                addInstr(result, IRInstruction(Opcode.LOAD, IRDataType.FLOAT, fpReg1 = valueRegister, immediateFp = 0.0), null)
-            } else {
-                valueRegister = registers.next(irdt)
-                addInstr(result, IRInstruction(Opcode.LOAD, irdt, reg1 = valueRegister, immediate = 0), null)
-            }
+            addInstr(result, IRInstruction(Opcode.STOREZI, irdt, reg1 = addressReg, immediate = offset.toInt()), null)
+        } else {
+            val instr = if (type.isFloat)
+                IRInstruction(Opcode.STOREI, IRDataType.FLOAT, fpReg1 = RegisterNum(valueRegister), reg1 = addressReg, immediate = offset.toInt())
+            else
+                IRInstruction(Opcode.STOREI, irdt, reg1 = valueRegister, reg2 = addressReg, immediate = offset.toInt())
+            addInstr(result, instr, null)
         }
-        val instr = if (type.isFloat)
-            IRInstruction(Opcode.STOREFIELD, IRDataType.FLOAT, fpReg1 = valueRegister, reg1 = addressReg, immediate = offset.toInt())
-        else
-            IRInstruction(Opcode.STOREFIELD, irdt, reg1 = valueRegister, reg2 = addressReg, immediate = offset.toInt())
-        addInstr(result, instr, null)
     }
 
     internal fun loadIndexReg(index: PtExpression, itemsize: Int, wordIndex: Boolean, arrayIsSplitWords: Boolean): Pair<IRCodeChunks, Int> {

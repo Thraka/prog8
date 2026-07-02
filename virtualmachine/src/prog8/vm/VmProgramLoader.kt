@@ -6,12 +6,14 @@ import prog8.intermediate.*
 import prog8.left
 import prog8.right
 
+private const val StMemorySlabBlockName = "prog8_slabs"
+
 class VmProgramLoader {
     private val placeholders = mutableMapOf<Pair<IRCodeChunk, Int>, String>()      // program chunk+index to symbolname
     private val subroutines = mutableMapOf<String, IRSubroutine>()                 // label to subroutine node
-    private val artificialLabelAddresses = mutableMapOf<String, Int>()
+    private val artificialLabelAddresses = mutableMapOf<String, UInt>()
 
-    fun load(irProgram: IRProgram, memory: Memory): Pair<List<IRCodeChunk>, Map<String, Int>> {
+    fun load(irProgram: IRProgram, memory: Memory): Pair<List<IRCodeChunk>, Map<String, UInt>> {
         irProgram.validate()
         placeholders.clear()
         subroutines.clear()
@@ -20,6 +22,19 @@ class VmProgramLoader {
         val programChunks = mutableListOf<IRCodeChunk>()
 
         varsToMemory(irProgram, allocations, variableAddresses, memory)
+
+        // Resolve constants with memory() slab references to their actual addresses
+        irProgram.st.allConstants().forEach { constant ->
+            if(constant.memorySlabName != null) {
+                // The slab is stored with the full name "prog8_slabs.memory_xxx"
+                val fullSlabName = "$StMemorySlabBlockName.${constant.memorySlabName}"
+                val slabAddress = allocations.allocations[fullSlabName]
+                    ?: throw IRParseException("memory slab '$fullSlabName' not found for constant ${constant.name}")
+                variableAddresses[constant.name] = slabAddress
+            } else if(constant.value != null) {
+                variableAddresses[constant.name] = constant.value!!.toUInt()
+            }
+        }
 
         if(irProgram.globalInits.isNotEmpty())
             programChunks += irProgram.globalInits
@@ -133,19 +148,19 @@ class VmProgramLoader {
 
     private fun pass2replaceLabelsByProgIndex(
         chunks: List<IRCodeChunk>,
-        variableAddresses: MutableMap<String, Int>,
+        variableAddresses: MutableMap<String, UInt>,
         subroutines: MutableMap<String, IRSubroutine>
     ) {
         for((ref, label) in placeholders) {
             val (chunk, line) = ref
             val replacement = variableAddresses[label]
             val instr = chunk.instructions[line]
-            val offset = instr.labelSymbolOffset ?: 0
+            val offset = (instr.labelSymbolOffset ?: 0).toUInt()
             if(replacement==null) {
                 // it could be an address + index:   symbol+42
-                if(offset>0) {
+                if(offset>0u) {
                     val address = variableAddresses.getValue(label) + offset
-                    chunk.instructions[line] = instr.copy(address = address)
+                    chunk.instructions[line] = instr.copy(address = address.toAddress())
                 } else {
                     // placeholder is not a variable, so it must be a label of a code chunk instead
                     val target: IRCodeChunk? = chunks.firstOrNull { it.label==label }
@@ -154,17 +169,17 @@ class VmProgramLoader {
                     else if(instr.opcode in OpcodesThatBranch)
                         chunk.instructions[line] = instr.copy(branchTarget = target, address = null)
                     else {
-                        var address = artificialLabelAddresses[label]
+                        var address: UInt? = artificialLabelAddresses[label]
                         if(address==null) {
                             // generate an artificial address
-                            address = 0xa000 + artificialLabelAddresses.size
+                            address = 0xa000u + artificialLabelAddresses.size.toUInt()
                             artificialLabelAddresses[label] = address
                         }
-                        chunk.instructions[line] = instr.copy(address=address, branchTarget = target)
+                        chunk.instructions[line] = instr.copy(address=address.toAddress(), branchTarget = target)
                     }
                 }
             } else {
-                chunk.instructions[line] = instr.copy(address = replacement + offset)
+                chunk.instructions[line] = instr.copy(address = (replacement + offset).toAddress())
             }
         }
 
@@ -177,7 +192,7 @@ class VmProgramLoader {
                             if(arg.address!=null)
                                 arg
                             else {
-                                val address = ins.address ?: variableAddresses.getValue(ins.labelSymbol + "." + arg.name)
+                                val address = ins.address?.value ?: variableAddresses.getValue(ins.labelSymbol + "." + arg.name)
                                 FunctionCallArgs.ArgumentSpec(arg.name, address, arg.reg)
                             }
                         }
@@ -191,11 +206,11 @@ class VmProgramLoader {
     private fun varsToMemory(
         program: IRProgram,
         allocations: VmVariableAllocator,
-        symbolAddresses: MutableMap<String, Int>,
+        symbolAddresses: MutableMap<String, UInt>,
         memory: Memory
     ) {
         program.st.allVariables().forEach { variable ->
-            var addr = allocations.allocations.getValue(variable.name)
+            var addr: UInt = allocations.allocations.getValue(variable.name)
 
             // Zero out uninitialized both clean AND dirty variables.
             // Dirty vars actually are ALSO are zero'd out here at program startup,
@@ -208,7 +223,7 @@ class VmProgramLoader {
                         when {
                             dt.isPointerArray -> {
                                 memory.setUW(addr, 0u)      // array of pointers is just array of word addresses
-                                addr += 2
+                                addr += 2u
                             }
                             dt.isString || dt.isBoolArray || dt.isByteArray -> {
                                 memory.setUB(addr, 0u)
@@ -217,12 +232,12 @@ class VmProgramLoader {
                             dt.isSplitWordArray -> {
                                 // lo bytes come after the hi bytes
                                 memory.setUB(addr, 0u)
-                                memory.setUB(addr+variable.length!!.toInt(), 0u)
+                                memory.setUB(addr + variable.length!!, 0u)
                                 addr++
                             }
                             dt.isWordArray -> {
                                 memory.setUW(addr, 0u)
-                                addr += 2
+                                addr += 2u
                             }
                             dt.isFloatArray -> {
                                 memory.setFloat(addr, 0.0)
@@ -230,7 +245,7 @@ class VmProgramLoader {
                             }
                             dt.isLongArray -> {
                                 memory.setSL(addr, 0)
-                                addr += 4
+                                addr += 4u
                             }
                             else -> throw IRParseException("invalid dt")
                         }
@@ -248,46 +263,50 @@ class VmProgramLoader {
                 }
             }
 
-            variable.onetimeInitializationNumericValue?.let {
-                when {
-                    variable.dt.isUnsignedByte || variable.dt.isBool -> memory.setUB(addr, it.toInt().toUByte())
-                    variable.dt.isSignedByte -> memory.setSB(addr, it.toInt().toByte())
-                    variable.dt.isUnsignedWord -> memory.setUW(addr, it.toInt().toUShort())
-                    variable.dt.isSignedWord -> memory.setSW(addr, it.toInt().toShort())
-                    variable.dt.isLong -> memory.setSL(addr, it.toInt())
-                    variable.dt.isFloat -> memory.setFloat(addr, it)
-                    else -> throw IRParseException("invalid dt")
+            variable.initializationValue?.let { initVal ->
+                when(initVal) {
+                    is IRVariableInitializer.Numeric -> {
+                        when {
+                            variable.dt.isUnsignedByte || variable.dt.isBool -> memory.setUB(addr, initVal.value.toInt().toUByte())
+                            variable.dt.isSignedByte -> memory.setSB(addr, initVal.value.toInt().toByte())
+                            variable.dt.isUnsignedWord -> memory.setUW(addr, initVal.value.toInt().toUShort())
+                            variable.dt.isSignedWord -> memory.setSW(addr, initVal.value.toInt().toShort())
+                            variable.dt.isLong -> memory.setSL(addr, initVal.value.toInt())
+                            variable.dt.isFloat -> memory.setFloat(addr, initVal.value)
+                            else -> throw IRParseException("invalid dt")
+                        }
+                    }
+                    is IRVariableInitializer.Array -> {
+                        require(variable.length==initVal.elements.size.toUInt())
+                        initializeWithValues(variable, initVal.elements, addr, symbolAddresses, memory, program)
+                    }
+                    is IRVariableInitializer.Str -> {
+                        throw IRParseException("in vm/ir, strings should have been converted into bytearrays.")
+                    }
                 }
             }
-            variable.onetimeInitializationArrayValue?.let { iElts ->
-                require(variable.length==iElts.size.toUInt())
-                initializeWithValues(variable, iElts, addr, symbolAddresses, memory, program)
-            }
-            require(variable.onetimeInitializationStringValue==null) { "in vm/ir, strings should have been converted into bytearrays." }
         }
 
         program.st.allStructInstances().forEach { instance ->
             val address = allocations.allocations.getValue(instance.name)
-            var a = address
+            var a: UInt = address
             if(instance.values.isEmpty()) {
                 // Zero out BSS for this uninitialized instance
-                // TODO doesn't work yet????
                 repeat(instance.size.toInt()) {
                     memory.setUB(a, 0u)
                     a++
                 }
             } else {
                 instance.values.forEach {
-                    val value: Double = if(it.value.bool==true) 1.0
-                        else if(it.value.bool==false) 0.0
-                        else if(it.value.number!=null) it.value.number!!
-                        else if(it.value.addressOfSymbol!=null) {
-                            val name = it.value.addressOfSymbol!!
-                            val symbolAddress = symbolAddresses[name]
-                                ?: throw IRParseException("vm cannot yet load a label address as a value: $name")
+                    val value: Double = when(val ref = it.value) {
+                        is IRStSymbolicReference.BoolValue -> if(ref.value) 1.0 else 0.0
+                        is IRStSymbolicReference.Numeric -> ref.value
+                        is IRStSymbolicReference.Symbol -> {
+                            val symbolAddress = symbolAddresses[ref.name]
+                                ?: throw IRParseException("vm cannot yet load a label address as a value: ${ref.name}")
                             symbolAddress.toDouble()
                         }
-                        else throw IRParseException("invalid initializer value")
+                    }
 
                     when {
                         it.dt.isByteOrBool -> {
@@ -296,11 +315,11 @@ class VmProgramLoader {
                         }
                         it.dt.isWord || it.dt.isPointer -> {
                             memory.setUW(a, value.toInt().toUShort())
-                            a += 2
+                            a += 2u
                         }
                         it.dt == BaseDataType.LONG -> {
                             memory.setSL(a, value.toInt())
-                            a += 4
+                            a += 4u
                         }
                         it.dt == BaseDataType.FLOAT -> {
                             memory.setFloat(a, value)
@@ -310,7 +329,7 @@ class VmProgramLoader {
                     }
                 }
             }
-            require(a-address == instance.size.toInt())  {
+            require(a-address == instance.size)  {
                 "invalid struct init size, expected ${instance.size}, got ${a-address}"
             }
         }
@@ -319,12 +338,12 @@ class VmProgramLoader {
     private fun initializeWithValues(
         variable: IRStStaticVariable,
         iElts: IRStArray,
-        startAddress: Int,
-        symbolAddresses: MutableMap<String, Int>,
+        startAddress: UInt,
+        symbolAddresses: MutableMap<String, UInt>,
         memory: Memory,
         program: IRProgram
     ) {
-        var address = startAddress
+        var address: UInt = startAddress
         when {
             variable.dt.isBoolArray -> {
                 for (elt in iElts) {
@@ -365,7 +384,7 @@ class VmProgramLoader {
                         {
                             val integer = it.toUInt()
                             memory.setUB(address, (integer and 255u).toUByte())
-                            memory.setUB(address + variable.length!!.toInt(), (integer shr 8).toUByte())
+                            memory.setUB(address + variable.length!!, (integer shr 8).toUByte())
                         },
                         { throw IRParseException("didn't expect bool") }
                     )
@@ -380,7 +399,7 @@ class VmProgramLoader {
                         { memory.setUW(address, it.toInt().toUShort()) },
                         { throw IRParseException("didn't expect bool") }
                     )
-                    address += 2
+                    address += 2u
                 }
             }
 
@@ -391,7 +410,7 @@ class VmProgramLoader {
                         { memory.setSW(address, it.toInt().toShort()) },
                         { throw IRParseException("didn't expect bool") }
                     )
-                    address += 2
+                    address += 2u
                 }
             }
 
@@ -402,7 +421,7 @@ class VmProgramLoader {
                         { memory.setSL(address, it.toInt()) },
                         { throw IRParseException("didn't expect bool") }
                     )
-                    address += 4
+                    address += 4u
                 }
             }
 
@@ -421,31 +440,32 @@ class VmProgramLoader {
         }
     }
 
-    private fun getInitializerValue(arrayDt: DataType, elt: IRStArrayElement, symbolAddresses: MutableMap<String, Int>): Either<Double, Boolean> {
-        if(elt.addressOfSymbol!=null) {
-            when {
-                arrayDt.isString || arrayDt.isByteArray || arrayDt.isBoolArray -> {
-                    val name = elt.addressOfSymbol!!
-                    val symbolAddress = if(name.startsWith('<')) {
-                        symbolAddresses[name.drop(1)]?.and(255)
+    private fun getInitializerValue(arrayDt: DataType, elt: IRStSymbolicReference, symbolAddresses: MutableMap<String, UInt>): Either<Double, Boolean> {
+        return when(elt) {
+            is IRStSymbolicReference.Symbol -> {
+                when {
+                    arrayDt.isString || arrayDt.isByteArray || arrayDt.isBoolArray -> {
+                        val name = elt.name
+                        val sym = symbolAddresses[name.drop(1)]
                             ?: throw IRParseException("vm cannot yet load a label address as a value: $name")
-                    } else if(name.startsWith('>')) {
-                        symbolAddresses[name.drop(1)]?.shr(8)
+                        val symbolAddress: UInt = if(name.startsWith('<')) {
+                            sym.and(255u)
+                        } else if(name.startsWith('>')) {
+                            sym.shr(8)
+                        } else
+                            throw IRParseException("for byte-array address-of, expected < or > (lsb/msb)")
+                        left(symbolAddress.toDouble())
+                    }
+                    else -> {
+                        val name = elt.name
+                        val symbolAddress = symbolAddresses[name]
                             ?: throw IRParseException("vm cannot yet load a label address as a value: $name")
-                    } else
-                        throw IRParseException("for byte-array address-of, expected < or > (lsb/msb)")
-                    return left(symbolAddress.toDouble())
-                }
-                else -> {
-                    val name = elt.addressOfSymbol!!
-                    val symbolAddress = symbolAddresses[name]
-                        ?: throw IRParseException("vm cannot yet load a label address as a value: $name")
-                    return left(symbolAddress.toDouble())
+                        left(symbolAddress.toInt().toDouble())
+                    }
                 }
             }
-        } else if (elt.number!=null) {
-            return left(elt.number!!)
-        } else
-            return right(elt.bool!!)
+            is IRStSymbolicReference.Numeric -> left(elt.value)
+            is IRStSymbolicReference.BoolValue -> right(elt.value)
+        }
     }
 }

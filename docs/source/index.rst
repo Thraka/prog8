@@ -8,7 +8,7 @@ Prog8 documentation - |version|
 |
 |
 
-Prog8 is is a compiled programming language targeting the 8-bit 6502 CPU family.
+Prog8 is a compiled programming language targeting the 8-bit 6502 CPU family.
 It aims to provide many conveniences over raw assembly code (even when using a macro assembler),
 while still being low level enough to create high performance programs.
 
@@ -42,7 +42,9 @@ Open source Software :index:`License`
     libraries.rst
     targetsystem.rst
     technical.rst
+    profiling.rst
     portingguide.rst
     software.rst
     todo.rst
+    history.rst
     genindex

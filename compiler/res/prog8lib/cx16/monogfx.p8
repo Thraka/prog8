@@ -1,7 +1,7 @@
 ; Monochrome Bitmap pixel graphics routines for the CommanderX16
 ; Using the full-screen 640x480 and 320x240 screen modes, in 1 bpp mode (black/white).
 ;
-; No text layer is currently shown, but text can be drawn as part of the bitmap itself.
+; Layer 0 is bitmap layer, layer 1 is text layer, compatible still with regular cx16 text modes
 ; For color bitmap graphics, see the gfx_lores or gfx_hires libraries.
 ;
 ; NOTE: For sake of speed, NO BOUNDS CHECKING is performed in most routines!
@@ -29,35 +29,47 @@ monogfx {
         ; enable 320*240 bitmap mode
         buffer_visible = buffer_back = $0000
         cx16.VERA_CTRL=0
-        cx16.VERA_DC_VIDEO = (cx16.VERA_DC_VIDEO & %11001111) | %00100000      ; enable only layer 1
+        cx16.VERA_DC_VIDEO = (cx16.VERA_DC_VIDEO & %11001111) | %00110000      ; enable both layers
         cx16.VERA_DC_HSCALE = 64
         cx16.VERA_DC_VSCALE = 64
-        cx16.VERA_L1_CONFIG = %00000100
-        cx16.VERA_L1_MAPBASE = 0
-        cx16.VERA_L1_TILEBASE = 0           ; lores
+        cx16.VERA_L0_CONFIG = %00000100
+        cx16.VERA_L0_MAPBASE = 0
+        cx16.VERA_L0_TILEBASE = 0           ; lores
         width = 320
         height = 240
         lores_mode = true
         buffer_visible = buffer_back = $0000
         mode = MODE_NORMAL
         clear_screen(false)
+        ; configure text mode
+        cx16.scnsiz(40, 30)
+        cbm.CHROUT($90) ; black/transparent bg
+        cbm.CHROUT(1)
+        cbm.CHROUT($9e) ; yellow text
+        cbm.CHROUT(147)
     }
 
     sub hires() {
         ; enable 640*480 bitmap mode
         cx16.VERA_CTRL=0
-        cx16.VERA_DC_VIDEO = (cx16.VERA_DC_VIDEO & %11001111) | %00100000      ; enable only layer 1
+        cx16.VERA_DC_VIDEO = (cx16.VERA_DC_VIDEO & %11001111) | %00110000      ; enable both layers
         cx16.VERA_DC_HSCALE = 128
         cx16.VERA_DC_VSCALE = 128
-        cx16.VERA_L1_CONFIG = %00000100
-        cx16.VERA_L1_MAPBASE = 0
-        cx16.VERA_L1_TILEBASE = %00000001       ; hires
+        cx16.VERA_L0_CONFIG = %00000100
+        cx16.VERA_L0_MAPBASE = 0
+        cx16.VERA_L0_TILEBASE = %00000001       ; hires
         width = 640
         height = 480
         lores_mode = false
         buffer_visible = buffer_back = $0000
         mode = MODE_NORMAL
         clear_screen(false)
+        ; configure text mode
+        cx16.scnsiz(80, 60)
+        cbm.CHROUT($90) ; black/transparent bg
+        cbm.CHROUT(1)
+        cbm.CHROUT($9e) ; yellow text
+        cbm.CHROUT(147)
     }
 
     sub enable_doublebuffer() {
@@ -81,7 +93,7 @@ monogfx {
         buffer_visible = cx16.r0
         cx16.VERA_CTRL = 0
         cx16.r0 &= %1111110000000000
-        cx16.VERA_L1_TILEBASE = cx16.VERA_L1_TILEBASE & 1 | (cx16.r0H >>1 )
+        cx16.VERA_L0_TILEBASE = cx16.VERA_L0_TILEBASE & 1 | (cx16.r0H >>1 )
     }
 
 
@@ -424,7 +436,6 @@ drawmode:               ora  cx16.r15L
             return
         }
 
-        word @zp d = 0
         cx16.r1L = 1 ;; true      ; 'positive_ix'
         if dx < 0 {
             dx = -dx
@@ -432,8 +443,10 @@ drawmode:               ora  cx16.r15L
         }
         word @zp dx2 = dx*2
         word @zp dy2 = dy*2
+        word @zp d        ; error term (initialized below based on shallow/steep)
 
         if dx >= dy {
+            d = dx >> 1   ; Initialize error to DX/2 for shallow lines
             if cx16.r1L!=0 {
                 repeat {
                     plot(x1, y1, draw)
@@ -461,6 +474,7 @@ drawmode:               ora  cx16.r15L
             }
         }
         else {
+            d = dy >> 1   ; Initialize error to DY/2 for steep lines
             if cx16.r1L!=0 {
                 repeat {
                     plot(x1, y1, draw)
@@ -807,17 +821,17 @@ invert:
         sub push_stack(word sxl, word sxr, word sy, byte sdy) {
             cx16.r0s = sy+sdy
             if cx16.r0s>=0 and cx16.r0s<=height-1 {
-                stack.pushw(sxl as uword)
-                stack.pushw(sxr as uword)
-                stack.pushw(sy as uword)
-                stack.push(sdy as ubyte)
+                stack.push_w(sxl as uword)
+                stack.push_w(sxr as uword)
+                stack.push_w(sy as uword)
+                stack.push_b(sdy as ubyte)
             }
         }
         sub pop_stack() {
-            dy = stack.pop() as byte
-            yy = stack.popw() as word
-            x2 = stack.popw() as word
-            x1 = stack.popw() as word
+            dy = stack.pop_b() as byte
+            yy = stack.pop_w() as word
+            x2 = stack.pop_w() as word
+            x1 = stack.pop_w() as word
             yy+=dy
         }
         cx16.r11L = pget(xx as uword, yy as uword) as ubyte        ; old_color
@@ -854,7 +868,7 @@ skip:
         }
 
         sub fill_scanline_left() -> bool {
-            ; TODO maybe this could use vera auto decrement, but that requires some clever masking calculations
+            ; TODO maybe this could use vera auto decrement, but that requires some clever masking calculations on the edges of the span to set only the correct bits in those vram bytes
             cx16.r9s = xx
             while xx >= 0 {
                 if pgetset()
@@ -865,7 +879,7 @@ skip:
         }
 
         sub fill_scanline_right() {
-            ; TODO maybe this could use vera auto increment, but that requires some clever masking calculations
+            ; TODO maybe this could use vera auto decrement, but that requires some clever masking calculations on the edges of the span to set only the correct bits in those vram bytes
             cx16.r9s = xx
             while xx <= width-1 {
                 if pgetset()

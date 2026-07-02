@@ -8,6 +8,7 @@
 %import cx16logo
 %import diskio
 %import floats
+%import lineclip
 %import math
 %import petsnd
 %import petgfx
@@ -17,3 +18,4 @@
 %import syslib
 %import test_stack
 %import textio
+%import wavfile

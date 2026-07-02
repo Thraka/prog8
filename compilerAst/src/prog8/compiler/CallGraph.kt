@@ -3,10 +3,7 @@ package prog8.compiler
 import prog8.ast.Module
 import prog8.ast.Node
 import prog8.ast.Program
-import prog8.ast.expressions.AddressOf
-import prog8.ast.expressions.FunctionCallExpression
-import prog8.ast.expressions.IdentifierReference
-import prog8.ast.expressions.PtrDereference
+import prog8.ast.expressions.*
 import prog8.ast.statements.*
 import prog8.ast.walk.IAstVisitor
 import prog8.code.core.IErrorReporter
@@ -19,14 +16,14 @@ class CallGraph(private val program: Program) : IAstVisitor {
     val calls = mutableMapOf<Subroutine, Set<Subroutine>>().withDefault { setOf() }
     val calledBy = mutableMapOf<Subroutine, Set<Node>>().withDefault { setOf() }
     val notCalledButReferenced = mutableSetOf<Subroutine>()
-    private val allIdentifiersAndTargets = mutableListOf<Pair<IdentifierReference, Statement>>()
+    private val allIdentifiersAndTargets = mutableListOf<Pair<Node, Statement>>()
     private val allAssemblyNodes = mutableListOf<InlineAssembly>()
 
     init {
         visit(program)
     }
 
-    val allIdentifiers: List<Pair<IdentifierReference, Statement>> = allIdentifiersAndTargets
+    val allIdentifiers: List<Pair<Node, Statement>> = allIdentifiersAndTargets
 
     private val usedSubroutines: Set<Subroutine> by lazy {
         calledBy.keys + program.entrypoint + notCalledButReferenced
@@ -51,7 +48,7 @@ class CallGraph(private val program: Program) : IAstVisitor {
     }
 
     private val usedModules: Set<Module> by lazy {
-        usedBlocks.map { it.definingModule }.toSet()
+        usedBlocks.mapTo(mutableSetOf()) { it.definingModule }
     }
 
     override fun visit(directive: Directive) {
@@ -119,9 +116,10 @@ class CallGraph(private val program: Program) : IAstVisitor {
 
     override fun visit(identifier: IdentifierReference) {
         val target = identifier.targetStatement(program.builtinFunctions)
+        val definingSub = identifier.definingSubroutine
         if(target!=null) {
             allIdentifiersAndTargets.add(identifier to target)
-            if(target is Subroutine)
+            if(target is Subroutine && target !== definingSub)
                 notCalledButReferenced += target
         }
 
@@ -131,13 +129,14 @@ class CallGraph(private val program: Program) : IAstVisitor {
         while(name.size>1) {
             name.removeLast()
             val scopeTarget = scope.lookup(name)
-            if(scopeTarget is Subroutine)
-                notCalledButReferenced += scopeTarget
-            else if(scopeTarget is VarDecl) {
+            if(scopeTarget is Subroutine) {
+                if (scopeTarget !== definingSub)
+                    notCalledButReferenced += scopeTarget
+            } else if(scopeTarget is VarDecl) {
                 allIdentifiersAndTargets.add(identifier to scopeTarget)
                 break
             } else if(scopeTarget is StructFieldRef) {
-                val vd = scope.lookup(name.take(1))
+                val vd = scope.lookup(name[0])
                 if(vd is VarDecl)
                     allIdentifiersAndTargets.add(identifier to vd)
                 allIdentifiersAndTargets.add(identifier to scopeTarget)
@@ -152,7 +151,7 @@ class CallGraph(private val program: Program) : IAstVisitor {
             if(decl.datatype.subType!=null) {
                 val struct = decl.definingScope.lookup(decl.datatype.subType!!.scopedNameString.split(".")) as? StructDecl
                 if (struct != null) {
-                    allIdentifiersAndTargets.add(IdentifierReference(listOf(struct.name), struct.position) to struct)
+                    allIdentifiersAndTargets.add(decl to struct)
                     val declSub = decl.definingSubroutine
                     val structSub = struct.definingSubroutine
                     if (declSub != null && structSub != null && declSub!=structSub) {
@@ -167,13 +166,32 @@ class CallGraph(private val program: Program) : IAstVisitor {
 
     override fun visit(deref: PtrDereference) {
         val chain = deref.chain.toMutableList()
+        val definingSub = deref.definingSubroutine
         while(chain.isNotEmpty()) {
             val variable = deref.definingScope.lookup(chain)
             if(variable is VarDecl) {
-                allIdentifiersAndTargets.add(IdentifierReference(listOf(variable.name), variable.position) to variable)
+                allIdentifiersAndTargets.add(deref to variable)
             }
             else if(variable is Subroutine) {
-                notCalledButReferenced += variable
+                if (variable !== definingSub)
+                    notCalledButReferenced += variable
+            }
+            chain.removeLastOrNull()
+        }
+        super.visit(deref)
+    }
+
+    override fun visit(deref: ArrayIndexedPtrDereference) {
+        val chain = deref.chain.map { it.first }.toMutableList()
+        val definingSub = deref.definingSubroutine
+        while(chain.isNotEmpty()) {
+            val variable = deref.definingScope.lookup(chain)
+            if(variable is VarDecl) {
+                allIdentifiersAndTargets.add(deref to variable)
+            }
+            else if(variable is Subroutine) {
+                if (variable !== definingSub)
+                    notCalledButReferenced += variable
             }
             chain.removeLastOrNull()
         }

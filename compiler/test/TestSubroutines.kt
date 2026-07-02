@@ -377,4 +377,76 @@ main {
         compileText(C64Target(), false, src, outputDir, writeAssembly = true).shouldNotBeNull()
         compileText(VMTarget(), false, src, outputDir, writeAssembly = true).shouldNotBeNull()
     }
+
+    test("multi-value returns from builtin function") {
+        val src= """
+main {
+    sub start() {
+        uword @shared w1 = 5555
+        uword @shared w2 = 44
+
+        uword division, remainder = mydivmod(w1, w2)
+        division += remainder
+        division, remainder = mydivmod(w1, w2)
+
+        uword division2, remainder2 = divmod(w1, w2)
+        division2 += remainder2
+        division2, remainder2 = divmod(w1, w2)
+    }
+
+    sub mydivmod(uword a, uword b) -> uword, uword {
+        a, b = divmod(a, b)
+        return a,b
+    }
+}"""
+        compileText(C64Target(), false, src, outputDir).shouldNotBeNull()
+    }
+
+    test("str return value can be assigned to uword") {
+        val src = """
+main {
+    sub start() {
+        uword err1, err2
+        uword val
+        err1, val, err2 = eval("42")
+        if err1 == 0 {
+            val += 1
+        }
+    }
+
+    sub eval(str expr) -> str, uword, str {
+        if expr == 0 {
+            return "empty", 0, "empty2"
+        }
+        return 0, 42, 0
+    }
+}"""
+        compileText(VMTarget(), false, src, outputDir, writeAssembly = true).shouldNotBeNull()
+        compileText(C64Target(), false, src, outputDir, writeAssembly = true).shouldNotBeNull()
+    }
+
+    test("multi-value return with identical numeric literals") {
+        // Regression test: return 0, 0, 0 was incorrectly flagged as type mismatch
+        // because NumericLiteral.equals() only compares the number value, causing
+        // replaceChildNode to always find the first occurrence when using indexOf().
+        val src = """
+main {
+    sub start() {
+        word w1, w2, w3
+        w1, w2, w3 = multizero()
+        w1, w2, w3 = multi_nonzero()
+    }
+
+    sub multizero() -> word, word, word {
+        cx16.r0++
+        return 0, 0, 0
+    }
+
+    sub multi_nonzero() -> word, word, word {
+        cx16.r0++
+        return 42, 43, 44
+    }
+}"""
+        compileText(VMTarget(), false, src, outputDir, writeAssembly = false).shouldNotBeNull()
+    }
 })

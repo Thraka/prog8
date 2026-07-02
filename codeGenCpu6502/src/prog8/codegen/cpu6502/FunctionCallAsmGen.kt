@@ -203,7 +203,7 @@ internal class FunctionCallAsmGen(private val program: PtProgram, private val as
 
     private fun usesOtherRegistersWhileEvaluating(arg: PtExpression): Boolean {
         return when(arg) {
-            is PtBuiltinFunctionCall -> {
+            is PtFunctionCall if arg.builtin -> {
                 if (arg.name in setOf("lsb", "msb", "lsw", "msw"))
                     usesOtherRegistersWhileEvaluating(arg.args[0])
                 else if (arg.name == "mkword" || arg.name == "mklong2")
@@ -268,8 +268,8 @@ internal class FunctionCallAsmGen(private val program: PtProgram, private val as
 
         val reg = parameter.register
         if(reg!=null) {
-            require(reg in Cx16VirtualRegisters) { "can only use R0-R15 'registers' here" }
-            val varName = "cx16.${reg.name.lowercase()}"
+            require(reg in Cx16VirtualRegisters || reg in CombinedLongRegisters) { "can only use R0-R15 'registers' here" }
+            val varName = reg.asScopedNameVirtualReg(value.type).joinToString(".")
             asmgen.assignExpressionToVariable(value, varName, parameter.type)
         } else {
             val varName = asmgen.asmVariableName(sub.scopedName + "." + parameter.name)
@@ -333,7 +333,7 @@ internal class FunctionCallAsmGen(private val program: PtProgram, private val as
                 // we need to sign extend the source, do this via temporary word variable
                 asmgen.assignExpressionToVariable(value, "P8ZP_SCRATCH_W1", DataType.UBYTE)
                 asmgen.signExtendVariableLsb("P8ZP_SCRATCH_W1", value.type.base)
-                asmgen.assignVariableToRegister("P8ZP_SCRATCH_W1", register, null, Position.DUMMY)
+                asmgen.assignVariableToRegister("P8ZP_SCRATCH_W1", register, null, value.position)
             } else {
                 val scope = value.definingISub()
                 val target: AsmAssignTarget =
@@ -344,7 +344,7 @@ internal class FunctionCallAsmGen(private val program: PtProgram, private val as
                     }
                 val src = if(value.type.isPassByRef) {
                     if(value is PtIdentifier) {
-                        val addr = PtAddressOf(value.type.typeForAddressOf(false), false, Position.DUMMY)
+                        val addr = PtAddressOf(value.type.typeForAddressOf(false), false, value.position)
                         addr.add(value)
                         addr.parent = scope as PtNode
                         AsmAssignSource.fromAstSource(addr, program, asmgen).adjustSignedUnsigned(target)

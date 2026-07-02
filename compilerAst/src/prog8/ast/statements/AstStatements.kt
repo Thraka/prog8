@@ -56,7 +56,12 @@ sealed class Statement : Node {
 
 // this class is only created as temporary result from looking up the target for a builtin function call.
 // this node is never actually part of the Ast.
-class BuiltinFunctionPlaceholder(override val name: String, override val position: Position, override var parent: Node) : Statement(), INamedStatement {
+class BuiltinFunctionPlaceholder(
+    override val name: String,
+    val returntypes: List<DataType>,
+    override val position: Position,
+    override var parent: Node
+) : Statement(), INamedStatement {
     override fun linkParents(parent: Node) {}
     override fun accept(visitor: IAstVisitor) = throw FatalAstException("should not iterate over this node")
     override fun accept(visitor: AstWalker, parent: Node) = throw FatalAstException("should not iterate over this node")
@@ -98,7 +103,7 @@ class Block(override val name: String,
     override fun toString() = "Block(name=$name, address=$address, ${statements.size} statements)"
     override fun referencesIdentifier(nameInSource: List<String>): Boolean = statements.any { it.referencesIdentifier(nameInSource) }
 
-    fun options() = statements.filter { it is Directive && it.directive == "%option" }.flatMap { (it as Directive).args }.map {it.string!!}.toSet()
+    fun options() = statements.filter { it is Directive && it.directive == "%option" }.flatMap { (it as Directive).args }.mapTo(mutableSetOf()) { it.string!! }
 }
 
 // note: a Directive is not strictly always Statement (in module scope, it's a Module Element rather)
@@ -148,7 +153,7 @@ data class DirectiveArg(val string: String?, val int: UInt?, override val positi
     override fun referencesIdentifier(nameInSource: List<String>): Boolean = false
 }
 
-data class Alias(val alias: String, val target: IdentifierReference, override val position: Position) : Statement() {
+data class Alias(val alias: String, val target: IdentifierReference, val isPrivate: Boolean = false, override val position: Position) : Statement() {
     override lateinit var parent: Node
 
     override fun linkParents(parent: Node) {
@@ -156,7 +161,7 @@ data class Alias(val alias: String, val target: IdentifierReference, override va
         target.parent = this
     }
 
-    override fun copy(): Statement = Alias(alias, target.copy(), position)
+    override fun copy(): Statement = Alias(alias, target.copy(), isPrivate, position)
     override fun accept(visitor: IAstVisitor) = visitor.visit(this)
     override fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)
     override fun replaceChildNode(node: Node, replacement: Node) = throw FatalAstException("can't replace here")
@@ -188,7 +193,7 @@ class Return(val values: Array<Expression>, override val position: Position) : S
     }
 
     override fun replaceChildNode(node: Node, replacement: Node) {
-        val index = values.indexOf(node)
+        val index = values.indexOfFirst { it === node }
         if(replacement is Expression && index>=0) {
             values[index] = replacement
         } else throw FatalAstException("invalid replace in $this at ${node.position}: $node -> $replacement")
@@ -198,7 +203,7 @@ class Return(val values: Array<Expression>, override val position: Position) : S
     override fun referencesIdentifier(nameInSource: List<String>): Boolean = values.any{ it.referencesIdentifier(nameInSource) }
     override fun accept(visitor: IAstVisitor) = visitor.visit(this)
     override fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)
-    override fun toString() = "Return($values, pos=$position)"
+    override fun toString() = "Return(${values.contentToString()}, pos=$position)"
 }
 
 class Break(override val position: Position) : Statement() {
@@ -230,6 +235,22 @@ class Continue(override val position: Position) : Statement() {
 }
 
 
+data class MemorySlabReservation(
+    val slabName: String,
+    val size: UInt,
+    val align: UInt,
+    override val position: Position
+) : Statement() {
+    override lateinit var parent: Node
+    override fun copy() = MemorySlabReservation(slabName, size, align, position)
+    override fun linkParents(parent: Node) { this.parent = parent }
+    override fun replaceChildNode(node: Node, replacement: Node) {}
+    override fun accept(visitor: IAstVisitor) = visitor.visit(this)
+    override fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)
+    override fun referencesIdentifier(nameInSource: List<String>) = false
+}
+
+
 enum class VarDeclOrigin {
     USERCODE,
     SUBROUTINEPARAM,
@@ -250,18 +271,96 @@ class VarDecl(
     var zeropage: ZeropageWish,
     val splitwordarray: SplitWish,
     var arraysize: ArrayIndex?,
+    var matrixNumCols: Expression?,  // column count for 2D arrays (null for 1D)
     override val name: String,
     val names: List<String>,
     var value: Expression?,
     val sharedWithAsm: Boolean,
     val alignment: UInt,
     val dirty: Boolean,
+    val isPrivate: Boolean,
     override val position: Position) : Statement(), INamedStatement {
     override lateinit var parent: Node
     var allowInitializeWithZero = true
+    var hasExplicitInitializer = false
+
+    val is2DArray: Boolean
+        get() = matrixNumCols != null
 
     companion object {
         private var autoHeapValueSequenceNumber = 0
+
+        fun builder(datatype: DataType, position: Position) = Builder(datatype, position)
+
+        class Builder(
+            private val datatype: DataType,
+            private val position: Position
+        ) {
+            private var name: String? = null
+            private var type = VarDeclType.VAR
+            private var origin = VarDeclOrigin.USERCODE
+            private var zeropage = ZeropageWish.DONTCARE
+            private var splitwordarray = SplitWish.DONTCARE
+            private var arraysize: ArrayIndex? = null
+            private var matrixNumCols: Expression? = null
+            private var additionalNames: List<String> = emptyList()
+            private var value: Expression? = null
+            private var sharedWithAsm = false
+            private var alignment = 0u
+            private var dirty = false
+            private var isPrivate = false
+            private var hasExplicitInitializer = false
+
+            fun names(vararg names: String): Builder = apply {
+                require(names.isNotEmpty()) { "at least one name is required" }
+                this.name = if(names.size > 1) "<multiple>" else names[0]
+                this.additionalNames = if(names.size > 1) names.toList() else emptyList()
+            }
+            fun names(names: List<String>): Builder = apply {
+                require(names.isNotEmpty()) { "at least one name is required" }
+                this.name = if(names.size > 1) "<multiple>" else names[0]
+                this.additionalNames = if(names.size > 1) names else emptyList()
+            }
+            fun type(t: VarDeclType) = apply { this.type = t }
+            fun origin(o: VarDeclOrigin) = apply { this.origin = o }
+            fun zeropage(z: ZeropageWish) = apply { this.zeropage = z }
+            fun splitwordarray(s: SplitWish) = apply { this.splitwordarray = s }
+            fun arraysize(a: ArrayIndex?) = apply { this.arraysize = a }
+            fun matrixNumCols(m: Expression?) = apply { this.matrixNumCols = m }
+            fun value(v: Expression?) = apply { this.value = v }
+            fun sharedWithAsm(s: Boolean) = apply { this.sharedWithAsm = s }
+            fun alignment(a: UInt) = apply { this.alignment = a }
+            fun dirty(d: Boolean) = apply { this.dirty = d }
+            fun isPrivate(p: Boolean) = apply { this.isPrivate = p }
+            fun hasExplicitInitializer(h: Boolean) = apply { this.hasExplicitInitializer = h }
+
+            fun copyFrom(v: VarDecl) = apply {
+                this.type = v.type
+                this.origin = v.origin
+                this.zeropage = v.zeropage
+                this.splitwordarray = v.splitwordarray
+                this.arraysize = v.arraysize
+                this.matrixNumCols = v.matrixNumCols
+                this.name = v.name
+                this.additionalNames = v.names
+                this.value = v.value
+                this.sharedWithAsm = v.sharedWithAsm
+                this.alignment = v.alignment
+                this.dirty = v.dirty
+                this.isPrivate = v.isPrivate
+                this.hasExplicitInitializer = v.hasExplicitInitializer
+            }
+
+            fun build(): VarDecl {
+                val finalName = name ?: throw IllegalStateException("name is required")
+                val v = VarDecl(
+                    type, origin, datatype, zeropage, splitwordarray, arraysize, matrixNumCols,
+                    finalName, additionalNames, value, sharedWithAsm, alignment, dirty, isPrivate, position
+                )
+                v.hasExplicitInitializer = hasExplicitInitializer
+                return v
+            }
+        }
 
         fun fromParameter(param: SubroutineParameter): VarDecl {
             val decltype: VarDeclType
@@ -281,12 +380,13 @@ class VarDecl(
                 param.type.isString -> DataType.pointer(BaseDataType.UBYTE)
                 else -> param.type
             }
-            return VarDecl(decltype, VarDeclOrigin.SUBROUTINEPARAM, dt, param.zp, SplitWish.DONTCARE, null, param.name, emptyList(), value,
-                sharedWithAsm = false,
-                alignment = 0u,
-                dirty = false,
-                position = param.position
-            )
+            return builder(dt, param.position)
+                .names(param.name)
+                .origin(VarDeclOrigin.SUBROUTINEPARAM)
+                .type(decltype)
+                .value(value)
+                .zeropage(param.zp)
+                .build()
         }
 
         fun createAuto(array: ArrayLiteral): VarDecl {
@@ -301,9 +401,14 @@ class VarDecl(
                 }
             }
             val arraysize = ArrayIndex.forArray(array)
-            return VarDecl(VarDeclType.VAR, VarDeclOrigin.ARRAYLITERAL, arrayDt, ZeropageWish.NOT_IN_ZEROPAGE,
-                SplitWish.NOSPLIT, arraysize, autoVarName, emptyList(), array,
-                    sharedWithAsm = false, alignment = 0u, dirty = false, position = array.position)
+            return builder(arrayDt, array.position)
+                .names(autoVarName)
+                .arraysize(arraysize)
+                .origin(VarDeclOrigin.ARRAYLITERAL)
+                .splitwordarray(SplitWish.NOSPLIT)
+                .value(array)
+                .zeropage(ZeropageWish.NOT_IN_ZEROPAGE)
+                .build()
         }
 
         fun createAutoOptionalSplit(array: ArrayLiteral): VarDecl {
@@ -311,17 +416,21 @@ class VarDecl(
             val arrayDt = array.type.getOrElse { throw FatalAstException("unknown dt") }
             val split = if(arrayDt.isSplitWordArray) SplitWish.DONTCARE else if(arrayDt.isWordArray) SplitWish.NOSPLIT else SplitWish.DONTCARE
             val arraysize = ArrayIndex.forArray(array)
-            return VarDecl(VarDeclType.VAR, VarDeclOrigin.USERCODE, arrayDt, ZeropageWish.NOT_IN_ZEROPAGE,
-                split, arraysize, autoVarName, emptyList(), array,
-                sharedWithAsm = false, alignment = 0u, dirty = false, position = array.position)
+            return builder(arrayDt, array.position)
+                .names(autoVarName)
+                .arraysize(arraysize)
+                .splitwordarray(split)
+                .value(array)
+                .zeropage(ZeropageWish.NOT_IN_ZEROPAGE)
+                .build()
         }
 
-        fun createAuto(dt: DataType): VarDecl {
+        fun createAuto(dt: DataType, position: Position): VarDecl {
             val autoVarName = "auto_heap_value_${++autoHeapValueSequenceNumber}"
-            val vardecl = VarDecl(VarDeclType.VAR, VarDeclOrigin.USERCODE, dt, ZeropageWish.NOT_IN_ZEROPAGE,
-                SplitWish.DONTCARE, null, autoVarName, emptyList(), null,
-                sharedWithAsm = false, alignment = 0u, dirty = false, position = Position.DUMMY)
-            return vardecl
+            return builder(dt, position)
+                .names(autoVarName)
+                .zeropage(ZeropageWish.NOT_IN_ZEROPAGE)
+                .build()
         }
     }
 
@@ -331,6 +440,7 @@ class VarDecl(
     override fun linkParents(parent: Node) {
         this.parent = parent
         arraysize?.linkParents(this)
+        matrixNumCols?.linkParents(this)
         value?.linkParents(this)
     }
 
@@ -359,36 +469,37 @@ class VarDecl(
     fun copy(newDatatype: DataType): VarDecl {
         if(names.size>1)
             throw FatalAstException("should not copy a vardecl that still has multiple names")
-        val copy = VarDecl(type, origin, newDatatype, zeropage, splitwordarray, arraysize?.copy(), name, names, value?.copy(),
-            sharedWithAsm, alignment, dirty, position)
+        val copy = builder(newDatatype, position).copyFrom(this).build()
         copy.allowInitializeWithZero = this.allowInitializeWithZero
+        copy.hasExplicitInitializer = this.hasExplicitInitializer
         return copy
     }
 
     override fun referencesIdentifier(nameInSource: List<String>): Boolean =
         value?.referencesIdentifier(nameInSource)==true ||
-                this.arraysize?.referencesIdentifier(nameInSource)==true
+                this.arraysize?.referencesIdentifier(nameInSource)==true ||
+                this.matrixNumCols?.referencesIdentifier(nameInSource)==true
 
     fun desugarMultiDecl(): List<VarDecl> {
         require(alignment==0u)
         if(value==null || value?.isSimple==true) {
             // just copy the initialization value to a separate vardecl for each component
             return names.map {
-                val copy = VarDecl(type, origin, datatype, zeropage, splitwordarray, arraysize?.copy(), it, emptyList(), value?.copy(),
-                    sharedWithAsm, alignment, dirty, position)
+                val copy = builder(datatype, position).copyFrom(this).names(it).value(value?.copy()).build()
                 copy.allowInitializeWithZero = this.allowInitializeWithZero
+                copy.hasExplicitInitializer = this.hasExplicitInitializer
                 copy
             }
         } else {
             // evaluate the value once in the vardecl for the first component, and set the other components to the first
-            val first = VarDecl(type, origin, datatype, zeropage, splitwordarray, arraysize?.copy(), names[0], emptyList(), value?.copy(),
-                sharedWithAsm, alignment, dirty, position)
+            val first = builder(datatype, position).copyFrom(this).names(names[0]).value(value?.copy()).build()
             first.allowInitializeWithZero = this.allowInitializeWithZero
+            first.hasExplicitInitializer = this.hasExplicitInitializer
             val firstVar = firstVarAsValue(first)
             return listOf(first) + names.drop(1 ).map {
-                val copy = VarDecl(type, origin, datatype, zeropage, splitwordarray, arraysize?.copy(), it, emptyList(), firstVar.copy(),
-                    sharedWithAsm, alignment, dirty, position)
+                val copy = builder(datatype, position).copyFrom(this).names(it).value(firstVar.copy()).build()
                 copy.allowInitializeWithZero = this.allowInitializeWithZero
+                copy.hasExplicitInitializer = this.hasExplicitInitializer
                 copy
             }
         }
@@ -401,7 +512,7 @@ class VarDecl(
     }
 }
 
-class StructDecl(override val name: String, val fields: Array<Pair<DataType, String>>, override val position: Position) : Statement(), INamedStatement, ISubType {
+class StructDecl(override val name: String, val fields: Array<Pair<DataType, String>>, val isPrivate: Boolean, override val position: Position) : Statement(), INamedStatement, ISubType {
     override lateinit var parent: Node
 
     override fun linkParents(parent: Node) {
@@ -410,7 +521,7 @@ class StructDecl(override val name: String, val fields: Array<Pair<DataType, Str
 
     override fun replaceChildNode(node: Node, replacement: Node) = throw FatalAstException("can't replace here")
     override fun referencesIdentifier(nameInSource: List<String>) = false
-    override fun copy() = StructDecl(name, fields.clone(), position)
+    override fun copy() = StructDecl(name, fields.clone(), isPrivate, position)
     override fun accept(visitor: IAstVisitor) = visitor.visit(this)
     override fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)
     override fun memsize(sizer: IMemSizer): Int = fields.sumOf { sizer.memorySize(it.first, 1) }
@@ -451,6 +562,40 @@ class StructFieldRef(val pointer: IdentifierReference, val struct: StructDecl, v
 
 }
 
+class Enumeration(override val name: String, val type: BaseDataType, val members: Array<Pair<String, Int?>>, val isPrivate: Boolean, override val position: Position) : Statement(), INamedStatement {
+    override lateinit var parent: Node
+
+    override fun linkParents(parent: Node) {
+        this.parent = parent
+    }
+
+    override fun replaceChildNode(node: Node, replacement: Node) = throw FatalAstException("can't replace here")
+    override fun referencesIdentifier(nameInSource: List<String>) = false
+    override fun copy(): Enumeration = Enumeration(name, type, members.toList().toTypedArray(), isPrivate, position)
+    override fun accept(visitor: IAstVisitor) = visitor.visit(this)
+    override fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)
+}
+
+class Swap(var t1: AssignTarget, var t2: AssignTarget, override val position: Position) : Statement() {
+    override lateinit var parent: Node
+    override fun linkParents(parent: Node) {
+        this.parent = parent
+        t1.linkParents(this)
+        t2.linkParents(this)
+    }
+
+    override fun copy(): Swap = Swap(t1.copy(), t2.copy(), position)
+    override fun accept(visitor: IAstVisitor) = visitor.visit(this)
+    override fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)
+    override fun referencesIdentifier(nameInSource: List<String>): Boolean  = t1.referencesIdentifier(nameInSource) || t2.referencesIdentifier(nameInSource)
+
+    override fun replaceChildNode(node: Node, replacement: Node) {
+        if(node===t1) t1 = replacement as AssignTarget
+        else if(node===t2) t2 = replacement as AssignTarget
+        else throw FatalAstException("invalid replace in $this at ${node.position}: $node -> $replacement")
+    }
+
+}
 
 class ArrayIndex(var indexExpr: Expression, override val position: Position) : Node {
     override lateinit var parent: Node
@@ -526,6 +671,8 @@ class Assignment(var target: AssignTarget, var value: Expression, var origin: As
         value.linkParents(this)
     }
 
+    var isAugmentedMemoryAssign = false
+
     override fun replaceChildNode(node: Node, replacement: Node) {
         when {
             node===target -> target = replacement as AssignTarget
@@ -568,24 +715,24 @@ class Assignment(var target: AssignTarget, var value: Expression, var origin: As
                     }
                 }
 
-                if(binExpr.operator in AssociativeOperators) {
+                if(binExpr.operator in CommutativeOperators) {
                     if (binExpr.left !is BinaryExpression && binExpr.right isSameAs target)
-                        return true  // A = v <associative-operator> A
+                        return true  // A = v <commutative-operator> A
 
                     val leftBinExpr = binExpr.left as? BinaryExpression
                     val rightBinExpr = binExpr.right as? BinaryExpression
                     if(leftBinExpr?.operator == binExpr.operator && rightBinExpr==null) {
                         // one of these?
-                        // A = (A <associative-operator> x) <same-operator> y
-                        // A = (x <associative-operator> A) <same-operator> y
-                        // A = (x <associative-operator> y) <same-operator> A
+                        // A = (A <commutative-operator> x) <same-operator> y
+                        // A = (x <commutative-operator> A) <same-operator> y
+                        // A = (x <commutative-operator> y) <same-operator> A
                         return leftBinExpr.left isSameAs target || leftBinExpr.right isSameAs target || binExpr.right isSameAs target
                     }
                     if(rightBinExpr?.operator == binExpr.operator && leftBinExpr==null) {
                         // one of these?
-                        // A = y <associative-operator> (A <same-operator> x)
-                        // A = y <associative-operator> (x <same-operator> y)
-                        // A = A <associative-operator> (x <same-operator> y)
+                        // A = y <commutative-operator> (A <same-operator> x)
+                        // A = y <commutative-operator> (x <same-operator> y)
+                        // A = A <commutative-operator> (x <same-operator> y)
                         return rightBinExpr.left isSameAs target || rightBinExpr.right isSameAs target || binExpr.left isSameAs target
                     }
                 }
@@ -693,6 +840,19 @@ data class AssignTarget(
 
     fun accept(visitor: IAstVisitor) = visitor.visit(this)
     fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)
+
+    fun hasSideEffects(target: ICompilationTarget): Boolean {
+        if (void) return false
+        if (identifier != null) {
+            val symbol = definingScope.lookup(identifier!!.nameInSource)
+            if (symbol is VarDecl && symbol.type == VarDeclType.MEMORY && symbol.value is NumericLiteral) {
+                return target.isIOAddress((symbol.value as NumericLiteral).number.toUInt())
+            }
+            return false
+        }
+        return true // memoryAddress, arrayindexed, pointerDereference, arrayIndexedDereference
+    }
+
     override fun copy() = AssignTarget(
         identifier?.copy(),
         arrayindexed?.copy(),
@@ -926,14 +1086,13 @@ class InlineAssembly(val assembly: String, val isIR: Boolean, override val posit
     override fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)
     override fun referencesIdentifier(nameInSource: List<String>): Boolean = false
 
-    fun hasReturnOrRts(): Boolean {
-        return if(isIR) {
-            " return" in assembly || "\treturn" in assembly || " jump" in assembly || "\tjump" in assembly || " jumpa" in assembly || "\tjumpa" in assembly
-        } else {
-            " rti" in assembly || "\trti" in assembly || " rts" in assembly || "\trts" in assembly ||
-            " jmp" in assembly || "\tjmp" in assembly || " bra" in assembly || "\tbra" in assembly
-        }
+    companion object {
+        private val returnJumpRegex = Regex("""[ \t](return|returnr|returni|jump|jumpi)\b""")
+        private val rtsRegex = Regex("""[ \t](rti|rts|jmp|bra)\b""")
     }
+
+    fun hasReturnOrRts(): Boolean =
+        if(isIR) returnJumpRegex.containsMatchIn(assembly) else rtsRegex.containsMatchIn(assembly)
 
 
     val names: Set<String> by lazy {
@@ -1007,10 +1166,11 @@ class Subroutine(override val name: String,
                  val isAsmSubroutine: Boolean,
                  var inline: Boolean,
                  var hasBeenInlined: Boolean=false,
+                 val isPrivate: Boolean,
                  override val statements: MutableList<Statement>,
                  override val position: Position) : Statement(), INameScope {
-
     override lateinit var parent: Node
+
     override fun copy() = throw NotImplementedError("no support for duplicating a Subroutine")
 
     override fun linkParents(parent: Node) {
@@ -1024,7 +1184,7 @@ class Subroutine(override val name: String,
     override fun replaceChildNode(node: Node, replacement: Node) {
         when(replacement) {
             is SubroutineParameter -> {
-                val idx = parameters.indexOf(node)
+                val idx = parameters.indexOfFirst { it === node }
                 parameters[idx] = replacement
                 replacement.parent = this
             }
@@ -1388,8 +1548,8 @@ class WhenChoice(var values: MutableList<Expression>?,           // if null,  th
         if(replacement is AnonymousScope && node===statements) {
             statements = replacement
             replacement.parent = this
-        } else if(choiceValues!=null && node in choiceValues) {
-            val idx = choiceValues.indexOf(node)
+        } else if(choiceValues!=null && choiceValues.any { it === node }) {
+            val idx = choiceValues.indexOfFirst { it === node }
             choiceValues[idx] = replacement as Expression
             replacement.parent = this
         } else {
@@ -1434,7 +1594,6 @@ class OnGoto(
     val elsepart: AnonymousScope?,
     override val position: Position
 ) : Statement() {
-
     override lateinit var parent: Node
 
     override fun linkParents(parent: Node) {

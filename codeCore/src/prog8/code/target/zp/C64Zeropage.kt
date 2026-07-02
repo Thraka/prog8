@@ -9,7 +9,7 @@ class C64Zeropage(options: CompilationOptions) : Zeropage(options) {
     override val SCRATCH_REG = 0x03u     // temp storage for a register byte, must be B1+1
     override val SCRATCH_W1 = 0xfbu      // temp storage 1 for a word  $fb+$fc
     override val SCRATCH_W2 = 0xfdu      // temp storage 2 for a word  $fd+$fe
-    override val SCRATCH_PTR = 0x9bu     // temp storage for a pointer $9b+$9c
+    override val SCRATCH_PTR = 0x04u     // temp storage for a pointer $04+$05
 
 
     init {
@@ -57,7 +57,7 @@ class C64Zeropage(options: CompilationOptions) : Zeropage(options) {
                 // add the free Zp addresses
                 // these are valid for the C-64 but allow BASIC to keep running fully *as long as you don't use tape I/O*
                 free.addAll(arrayOf(0x02, 0x03, 0x04, 0x05, 0x06, 0x0a, 0x0e,
-                        0x92, 0x96, 0x9b, 0x9c, 0x9e, 0x9f, 0xa6,
+                        0x92, 0x96, 0x9c, 0x9e, 0x9f, 0xa6,
                         0xb0, 0xb1, 0xbe, 0xbf, 0xf9).map{it.toUInt()})
             } else {
                 // don't use the zeropage at all
@@ -72,7 +72,10 @@ class C64Zeropage(options: CompilationOptions) : Zeropage(options) {
         removeReservedFromFreePool()
 
         if(options.zeropage==ZeropageType.FULL || options.zeropage==ZeropageType.KERNALSAFE) {
-            // in these cases there is enough space on the zero page to stick the cx16 virtual registers in there as well.
+            // C64 DESIGN: Virtual registers are ONLY allocated when sufficient zeropage space exists.
+            // C64 has limited zeropage space compared to CX16. In BASICSAFE and FLOATSAFE modes,
+            // there isn't enough contiguous space for all 32 bytes of virtual register variants.
+            // Virtual registers are only allocated in FULL and KERNALSAFE modes where space permits.
             allocateCx16VirtualRegisters()
         }
 

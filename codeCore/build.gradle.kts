@@ -1,22 +1,12 @@
 plugins {
     kotlin("jvm")
+    `java-test-fixtures`
 }
 
 dependencies {
     // should have no dependencies to other modules
-    // implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
-    implementation("com.michael-bull.kotlin-result:kotlin-result-jvm:2.1.0")
-}
+    implementation("com.michael-bull.kotlin-result:kotlin-result-jvm:2.3.1")
 
-sourceSets {
-    main {
-        java {
-            srcDir("${project.projectDir}/src")
-        }
-        resources {
-            srcDir("${project.projectDir}/res")
-        }
-    }
+    testImplementation("io.kotest:kotest-runner-junit5")
+    testImplementation("io.kotest:kotest-framework-datatest")
 }
-
-// note: there are no unit tests in this module!

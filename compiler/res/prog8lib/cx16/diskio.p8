@@ -29,6 +29,12 @@ diskio {
 
     ubyte @shared drivenumber = 8           ; user programs can set this to the drive number they want to load/save to!
 
+
+    sub reuse_last_drive() {
+        ; set the drivenumber to the last used disk drive
+        void, drivenumber, void = cx16.getlfs()
+    }
+
     sub reset_read_channel() {
         void cbm.CHKIN(READ_IO_CHANNEL)
     }
@@ -163,20 +169,21 @@ io_error:
         return 0
     }
 
-    ; internal variables for the iterative file lister / loader
-    bool list_skip_disk_name
+    ; variables for the iterative file lister / loader
     ^^ubyte list_pattern
     uword list_blocks
-    bool iteration_in_progress = false
-    bool write_iteration_in_progress = false
     str list_filetype = "???"       ; prg, seq, dir
     str list_filename = "?" * 50
+    private bool iteration_in_progress = false
+    private bool write_iteration_in_progress = false
+    private bool list_skip_disk_name
 
     ; ----- get a list of files (uses iteration functions internally) -----
 
     sub list_filenames(str pattern_ptr, uword filenames_buffer, uword filenames_buf_size) -> ubyte {
         ; -- fill the provided buffer with the names of the files on the disk (until buffer is full).
         ;    Files in the buffer are separated by a 0 byte. You can provide an optional pattern to match against (case-sensitive).
+        ;    filenames_buf_size should be > 20!
         ;    After the last filename one additional 0 byte is placed to indicate the end of the list.
         ;    Returns number of files (it skips 'dir' entries i.e. subdirectories).
         ;    Note: NO case-folding is done in this routine! (unlike DOS"$ which does case folding on the basic prompt)
@@ -184,6 +191,10 @@ io_error:
         ;    Note that no list of pointers of some form is returned, the names are just squashed together.
         ;    If you really need a list of pointers to the names, that is pretty straightforward to construct by iterating over the names
         ;    and registering when the next one starts after the 0-byte separator.
+
+        if filenames_buf_size<=20
+            return 0
+
         uword buffer_start = filenames_buffer
         ubyte files_found = 0
         filenames_buffer[0]=0
@@ -359,7 +370,16 @@ io_error:
         return false
     }
 
-    sub internal_next_entry() -> bool {
+    sub lf_end_list() {
+        ; -- end an iterative file listing session (close channels).
+        if iteration_in_progress {
+            cbm.CLRCHN()
+            cbm.CLOSE(READ_IO_CHANNEL)
+            iteration_in_progress = false
+        }
+    }
+
+    private sub internal_next_entry() -> bool {
         reset_read_channel()        ; use the input io channel again
 
         ^^ubyte nameptr = &list_filename
@@ -405,25 +425,12 @@ io_error:
         return true
     }
 
-
-    sub lf_end_list() {
-        ; -- end an iterative file listing session (close channels).
-        if iteration_in_progress {
-            cbm.CLRCHN()
-            cbm.CLOSE(READ_IO_CHANNEL)
-            iteration_in_progress = false
-        }
-    }
-
-
     ; ----- iterative file loader functions (uses the read io channel) -----
 
     sub f_open(str filenameptr) -> bool {
         ; -- open a file for iterative reading with f_read
         ;    note: only a single iteration loop can be active at a time!
         ;    Returns true if the file is successfully opened and readable.
-        ;    No need to check status(), unlike f_open_w() !
-        ;    NOTE: may not work correctly for empty files. Try to avoid empty files on CBM DOS systems.
         ;    NOTE: the default input isn't yet set to this logical file, you must use reset_read_channel() to do this,
         ;          if you're going to read from it yourself instead of using f_read()!
         f_close()
@@ -432,16 +439,10 @@ io_error:
         cbm.SETLFS(READ_IO_CHANNEL, drivenumber, READ_IO_CHANNEL)     ; note: has to be Channel,x,Channel because otherwise f_seek doesn't work
         void cbm.OPEN()          ; open 12,8,12,"filename"
         if_cc {
-            reset_read_channel()
-            if cbm.READST()==0 {
+            ; check command channel for success status
+            if status_code()==0 {
                 iteration_in_progress = true
-                void cbm.CHRIN()        ; read first byte to test for file not found
-                if cbm.READST() & ~STATUS_EOF == 0 {
-                    cbm.CLOSE(READ_IO_CHANNEL)    ; close file because we already consumed first byte
-                    void cbm.OPEN()         ; re-open the file
-                    cbm.CLRCHN()            ; reset default i/o channels
-                    return true
-                }
+                return true
             }
         }
         f_close()
@@ -595,8 +596,6 @@ _end        jsr  cbm.READST
         ;    WARNING: returns true if the open command was received by the device,
         ;    but this can still mean the file wasn't successfully opened for writing!
         ;    (for example, if it already exists). This is different than f_open()!
-        ;    To be 100% sure if this call was successful, you have to use status()
-        ;    and check the drive's status message!
         ;    NOTE: the default output isn't yet set to this file, you must use reset_write_channel() to do this,
         ;          if you're going to write to it yourself instead of using f_write()!
         return internal_f_open_w(filename, false)
@@ -649,7 +648,7 @@ return_status:
         }
     }
 
-    sub internal_f_open_w(str filename, bool open_for_seeks) -> bool {
+    private sub internal_f_open_w(str filename, bool open_for_seeks) -> bool {
         f_close_w()
         void strings.copy(filename, list_filename)
         str modifier = ",s,?"
@@ -661,9 +660,9 @@ return_status:
         cbm.SETLFS(WRITE_IO_CHANNEL, drivenumber, WRITE_IO_CHANNEL)
         void cbm.OPEN()             ; open 13,8,13,"filename"
         if_cc {
-            if cbm.READST()==0 {
+            ; check command channel for success status
+            if status_code()==0 {
                 write_iteration_in_progress = true
-                cbm.CLRCHN()            ; reset default i/o channels
                 return true
             }
         }
@@ -678,7 +677,7 @@ return_status:
     sub status() -> str {
         ; -- retrieve the disk drive's current status message
 
-; TODO this doesn't seem to work reliably, sometimes READST returns 128 when the drive is just fine
+; TODO this code below doesn't seem to work reliably, sometimes READST returns 128 when the drive is just fine
 ;        str device_not_present_error = "device not present #xx"
 ;        if cbm.READST()==128 {
 ;            device_not_present_error[len(device_not_present_error)-2] = 0
@@ -716,35 +715,27 @@ io_error:
     ; similar to above, but instead of fetching the entire string, it only fetches the status code and returns it as ubyte
     ; in case of IO error, returns 255 (CMDR-DOS itself is physically unable to return such a value)
     sub status_code() -> ubyte {
-        if cbm.READST()==128 {
+        if cbm.READST()==128
             return 255
-        }
 
         cbm.SETNAM(0, list_filename)
         cbm.SETLFS(15, drivenumber, 15)
-        void cbm.OPEN()          ; open 15,8,15
-        if_cs
-            goto io_error
-        void cbm.CHKIN(15)        ; use #15 as input channel
-
-        list_filename[0] = cbm.CHRIN()
-        list_filename[1] = cbm.CHRIN()
-        list_filename[2] = 0
-
-        while cbm.READST()==0 {
-            void cbm.CHRIN()
+        void cbm.OPEN()      ; open 15,8,15
+        if_cs {
+            push(255)        ; error code 255
+            goto exit
         }
+        void cbm.CHKIN(15)
 
-        cbm.CLRCHN()        ; restore default i/o devices
-        cbm.CLOSE(15)
-        return conv.str2ubyte(list_filename)
+        push( (cbm.CHRIN()-'0') *10 + (cbm.CHRIN()-'0') )   ; 2-digit status code is return value
+        while cbm.READST()==0
+            void cbm.CHRIN()    ; clear rest of status message
 
-io_error:
+exit:
         cbm.CLRCHN()
         cbm.CLOSE(15)
-        return 255
+        return pop()
     }
-
 
 
     ; saves a block of memory to disk, including the default 2 byte prg header.
@@ -757,7 +748,7 @@ io_error:
         return internal_save_routine(filenameptr, startaddress, savesize, true)
     }
 
-    sub internal_save_routine(str filenameptr, uword startaddress, uword savesize, bool headerless) -> bool {
+    private sub internal_save_routine(str filenameptr, uword startaddress, uword savesize, bool headerless) -> bool {
         cbm.SETNAM(strings.length(filenameptr), filenameptr)
         cbm.SETLFS(1, drivenumber, 0)
         uword @shared end_address = startaddress + savesize
@@ -822,7 +813,7 @@ io_error:
     }
 
 
-    sub internal_load_routine(str filenameptr, uword address_override, bool headerless) -> uword {
+    private sub internal_load_routine(str filenameptr, uword address_override, bool headerless) -> uword {
         cbm.SETNAM(strings.length(filenameptr), filenameptr)
         ubyte secondary = 1
         cx16.r1 = 0
@@ -881,7 +872,7 @@ io_error:
     }
 
     sub get_loadaddress(str filename) -> uword {
-        ; get the load adress from a PRG file (usually $0801 but it can be different)
+        ; get the load address from a PRG file (usually $0801 but it can be different)
 
         cbm.SETNAM(strings.length(filename), filename)
         cbm.SETLFS(READ_IO_CHANNEL, drivenumber, READ_IO_CHANNEL)
@@ -1077,8 +1068,6 @@ io_error:
     sub exists(str filename) -> bool {
         ; -- returns true if the given file exists on the disk, otherwise false
         ;    DON'T use this if you already have a file open with f_open!
-        ;    NOTE: may not work correctly for empty files. Try to avoid empty files on CBM DOS systems.
-        ;    NOTE: doesn't clear the dos error status and message, you'll have to read/clear that yourself (with status() for example)
         if f_open(filename) {
             f_close()
             return true
@@ -1086,8 +1075,9 @@ io_error:
         return false
     }
 
-    sub f_seek(long position) {
+    sub f_seek(long position) -> bool {
         ; -- seek in the reading file opened with f_open, to the given 32-bits position
+        ;    Returns true if successful, false if the position is invalid or file not open.
         ;    Note: this will not work if you have already read the last byte of the file! Then you must close and reopen the file first.
         ubyte[6] command = ['p',0,0,0,0,0]
         command[1] = READ_IO_CHANNEL       ; f_open uses this secondary address
@@ -1097,10 +1087,11 @@ io_error:
         void cbm.OPEN()
         cbm.CLOSE(15)
         reset_read_channel()       ; back to the read io channel
+        return status_code()==0
     }
 
 
-    sub f_seek_w(long position) {
+    sub f_seek_w(long position) -> bool {
         ; -- seek in the output file opened with f_open_w_seek, to the given 32-bits position
         diskio.f_seek.command[1] = WRITE_IO_CHANNEL       ; f_open_w uses this secondary address
         pokel(&diskio.f_seek.command+2, position)
@@ -1109,6 +1100,7 @@ io_error:
         void cbm.OPEN()
         cbm.CLOSE(15)
         reset_write_channel()    ; back to the write io channel
+        return status_code()==0
     }
 
     sub f_tell() -> long, long {
@@ -1162,8 +1154,7 @@ io_error:
         return diskio.f_tell.filepos, diskio.f_tell.filesize
     }
 
-
-    sub read8hex() -> long {
+    private sub read8hex() -> long {
         str hex = "00000000"
         for cx16.r0L in 0 to 7 {
             hex[cx16.r0L] = cbm.CHRIN()

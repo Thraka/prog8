@@ -26,18 +26,17 @@ class C128Target: ICompilationTarget,
 
     override val FLOAT_MAX_POSITIVE = Mflpt5.FLOAT_MAX_POSITIVE
     override val FLOAT_MAX_NEGATIVE = Mflpt5.FLOAT_MAX_NEGATIVE
-    override val FLOAT_MEM_SIZE = Mflpt5.FLOAT_MEM_SIZE
+    override val FLOAT_MEM_SIZE = Mflpt5.FLOAT_MEM_SIZE.toUInt()
     override val STARTUP_CODE_RESERVED_SIZE = 20u
     override val PROGRAM_LOAD_ADDRESS = 0x1c01u
     override val PROGRAM_MEMTOP_ADDRESS = 0xc000u
 
-    override val BSSHIGHRAM_START = 0u    // TODO address?
-    override val BSSHIGHRAM_END = 0u      // TODO address?
-    override val BSSGOLDENRAM_START = 0u  // TODO address?
-    override val BSSGOLDENRAM_END = 0u    // TODO address?
+    override val BSSHIGHRAM_START = 0u      // no high ram
+    override val BSSHIGHRAM_END = 0u        // no high ram
+    override val BSSGOLDENRAM_START = 0x1300u
+    override val BSSGOLDENRAM_END = 0x1bdfu     //  note: $1be0 - $1bff contains the 16 virtual registers
 
     override lateinit var zeropage: Zeropage
-    override lateinit var golden: GoldenRam
 
     override fun getFloatAsmBytes(num: Number) = Mflpt5.fromNumber(num).makeFloatFillAsm()
 
@@ -71,11 +70,10 @@ class C128Target: ICompilationTarget,
         process.waitFor()
     }
 
-    override fun isIOAddress(address: UInt): Boolean = address==0u || address==1u || address in 0xd000u..0xdfffu
+    override fun isIOAddress(address: UInt): Boolean = address==0u || address==1u || address in 0xd000u..0xdfffu || address in 0xff00u..0xff04u
 
     override fun initializeMemoryAreas(compilerOptions: CompilationOptions) {
         zeropage = C128Zeropage(compilerOptions)
-        golden = GoldenRam(compilerOptions, UIntRange.EMPTY)    // TODO does the c128 have some of this somewhere?
     }
 
 }

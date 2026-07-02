@@ -131,7 +131,6 @@ monogfx {
             return
         }
 
-        word @zp d = 0
         cx16.r1L = 1  ; true      ; 'positive_ix'
         if dx < 0 {
             dx = -dx
@@ -139,9 +138,11 @@ monogfx {
         }
         word @zp dx2 = dx*2
         word @zp dy2 = dy*2
+        word @zp d        ; error term (initialized below based on shallow/steep)
         cx16.r14 = x1       ; internal plot X
 
         if dx >= dy {
+            d = dx >> 1   ; Initialize error to DX/2 for shallow lines
             if cx16.r1L!=0 {
                 repeat {
                     plot(cx16.r14, y1, draw)
@@ -169,6 +170,7 @@ monogfx {
             }
         }
         else {
+            d = dy >> 1   ; Initialize error to DY/2 for steep lines
             if cx16.r1L!=0 {
                 repeat {
                     plot(cx16.r14, y1, draw)
@@ -388,17 +390,17 @@ monogfx {
         sub push_stack(word sxl, word sxr, word sy, byte sdy) {
             cx16.r0s = sy+sdy
             if cx16.r0s>=0 and cx16.r0s<=height-1 {
-                stack.pushw(sxl as uword)
-                stack.pushw(sxr as uword)
-                stack.pushw(sy as uword)
-                stack.push(sdy as ubyte)
+                stack.push_w(sxl as uword)
+                stack.push_w(sxr as uword)
+                stack.push_w(sy as uword)
+                stack.push_b(sdy as ubyte)
             }
         }
         sub pop_stack() {
-            dy = stack.pop() as byte
-            yy = stack.popw() as word
-            x2 = stack.popw() as word
-            x1 = stack.popw() as word
+            dy = stack.pop_b() as byte
+            yy = stack.pop_w() as word
+            x2 = stack.pop_w() as word
+            x1 = stack.pop_w() as word
             yy+=dy
         }
         cx16.r11L = pget(xx as uword, yy as uword) as ubyte       ; old_color
@@ -449,15 +451,15 @@ skip:
     }
 
     sub text_charset(ubyte charset) {
-        ; -- select the text charset to use with the text() routine
-        ;    the charset number is the same as for the cx16.screen_set_charset() ROM function.
-        ;    1 = ISO charset, 2 = PETSCII uppercase+graphs, 3= PETSCII uppercase+lowercase.
-        ; TODO vm bitmap charset
+        ; This is a dummy operation for the VM; always uses the same charset for simplicity
     }
 
-    sub text(uword @zp xx, uword yy, bool draw, str sctextptr) {
+    sub text(uword xx, uword yy, bool draw, str sctextptr) {
         ; -- Write some text at the given pixel position. The text string must be in screencode encoding (not petscii!).
         ;    You must also have called text_charset() first to select and prepare the character set to use.
-        ; TODO vm bitmap charset
+        ubyte color = 255
+        if not draw
+            color = 0
+        sys.gfx_text(xx, yy, sctextptr, color)
     }
 }

@@ -1,7 +1,9 @@
 package prog8.codegen.cpu6502.assignment
 
+import prog8.code.StConstant
 import prog8.code.ast.*
 import prog8.code.core.*
+import prog8.code.core.BaseDataType
 import prog8.codegen.cpu6502.AsmGen6502Internal
 
 
@@ -49,8 +51,12 @@ internal class AsmAssignTarget(val kind: TargetStorageKind,
     }
 
     init {
-        if(register!=null && !datatype.isNumericOrBool)
-            throw AssemblyError("must be numeric type")
+        if(register!=null) {
+            if(datatype.isPointer)
+                throw AssemblyError("register target type must be uword, not pointer $datatype $position")
+            else if(!datatype.isNumericOrBool)
+                throw AssemblyError("target type must be numeric not $datatype $position")
+        }
         if(kind==TargetStorageKind.REGISTER)
             require(register!=null)
         else
@@ -192,6 +198,19 @@ internal class AsmAssignSource(val kind: SourceStorageKind,
                     val parameter = asmgen.findSubroutineParameter(value.name, asmgen)
                     if(parameter?.definingAsmSub() != null)
                         throw AssemblyError("can't assign from a asmsub register parameter $value ${value.position}")
+
+                    // Check if this identifier is a constant with a value - if so, use the value directly instead of reading from memory
+                    val symbol = asmgen.symbolTable.lookup(value.name)
+                    if(symbol is StConstant && symbol.value != null) {
+                        val constValue = symbol.value!!
+                        val baseType = when(symbol.dt.base) {
+                            BaseDataType.POINTER -> BaseDataType.UWORD
+                            else -> symbol.dt.base
+                        }
+                        return AsmAssignSource(SourceStorageKind.LITERALNUMBER, program, asmgen, symbol.dt,
+                            number = PtNumber(baseType, constValue, value.position))
+                    }
+
                     val varName=asmgen.asmVariableName(value)
                     // special case: "cx16.r[0-15]" are 16-bits virtual registers of the commander X16 system
                     if(value.type.isUnsignedWord && varName.lowercase().startsWith("cx16.r")) {
@@ -208,19 +227,20 @@ internal class AsmAssignSource(val kind: SourceStorageKind,
                 is PtArrayIndexer -> {
                     AsmAssignSource(SourceStorageKind.ARRAY, program, asmgen, value.type, array = value)
                 }
-                is PtBuiltinFunctionCall -> {
-                    AsmAssignSource(SourceStorageKind.EXPRESSION, program, asmgen, value.type, expression = value)
-                }
                 is PtFunctionCall -> {
-                    val symbol = asmgen.symbolTable.lookup(value.name) ?: throw AssemblyError("lookup error ${value.name}")
-                    val sub = symbol.astNode as IPtSubroutine
-                    val returnType =
-                        if(sub is PtSub && sub.signature.returns.size>1)
-                            DataType.UNDEFINED      // TODO list of types instead?
-                        else
-                            sub.returnsWhatWhere().firstOrNull { rr -> rr.first.registerOrPair != null || rr.first.statusflag!=null }?.second
-                            ?: throw AssemblyError("can't translate zero return values in assignment")
-                    AsmAssignSource(SourceStorageKind.EXPRESSION, program, asmgen, returnType, expression = value)
+                    if(value.builtin) {
+                        AsmAssignSource(SourceStorageKind.EXPRESSION, program, asmgen, value.type, expression = value)
+                    } else {
+                        val symbol = asmgen.symbolTable.lookup(value.name) ?: throw AssemblyError("lookup error ${value.name}  ${value.position}")
+                        val sub = symbol.astNode as IPtSubroutine
+                        val returnType =
+                            if(sub is PtSub && sub.signature.returns.size>1)
+                                DataType.UNDEFINED      // TODO list of types instead?
+                            else
+                                sub.returnsWhatWhere().firstOrNull { rr -> rr.first.registerOrPair != null || rr.first.statusflag!=null }?.second
+                                ?: throw AssemblyError("can't translate zero return values in assignment")
+                        AsmAssignSource(SourceStorageKind.EXPRESSION, program, asmgen, returnType, expression = value)
+                    }
                 }
                 else -> {
                     AsmAssignSource(SourceStorageKind.EXPRESSION, program, asmgen, value.type, expression = value)
@@ -262,7 +282,7 @@ internal sealed class AsmAssignmentBase(val source: AsmAssignSource,
     }
 
     val target: AsmAssignTarget
-        get() = targets.single()
+        get() = targets.singleOrNull() ?: throw AssemblyError("code assumes single target but assignment is multi-value $position")
 }
 
 internal class AsmAssignment(source: AsmAssignSource,

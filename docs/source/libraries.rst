@@ -63,15 +63,17 @@ Math
     Returns the value restricted to the given minimum and maximum.
     Supported for integer types only, for floats use ``floats.clampf()`` instead.
 
-:index:`divmod` (dividend, divisor, quotient, remainder)
-    Performs division only once and returns both quotient and remainder in a single call, where using '/' and '%' separately
-    would perform the division operation twice.
-    All values are ubytes or all are uwords.
-    The last two arguments must be variables to receive the quotient and remainder results, respectively.
+:index:`divmod` (dividend, divisor)
+    Returns quotient and remainder of the division as two ubyte or uword values.
+    Performs the division only once. Using '/' and '%' separately
+    would perform the division twice, so using divmod is much more efficient for this.
+    **Note:** Clobbers ``cx16.r15`` (the remainder is stored there for the word variant).
+    The ``%`` operator on its own used to also clobber ``cx16.r15`` but now preserves it.
 
 :index:`gcd` (a, b)
     Returns the GCD (greatest common divisor) of uwords a and b
     The routine is efficient and uses bit shifts instead of divisions.
+    **Clobbers:** ``cx16.r0`` and ``cx16.r1``.
 
 :index:`max` (x, y)
     Returns the largest of x and y. Supported for integer types only, for floats use ``floats.maxf()`` instead.
@@ -85,8 +87,45 @@ Math
 
 :index:`sqrt` (x)
     Returns the square root of the number.
-    Accepts unsigned integer (result is ubyte), long (result is uword, but this may not be implemented on all targets), and floating point numbers.
+    Accepts unsigned integer (result is ubyte), long (result is uword), and floating point numbers.
     To do the reverse - squaring a number - just write ``x*x``.
+
+CPU Stack
+^^^^^^^^^
+:index:`push` (value)
+    pushes a byte value on the CPU hardware stack.
+    Low-level function that is seldomly used in user code.
+
+:index:`pushw` (value)
+    pushes a 16-bit word value on the CPU hardware stack.
+    Low-level function that is seldomly used in user code.
+    Don't assume anything about the order in which the bytes are pushed - popw will make sense of them again.
+
+:index:`pushl` (value)
+    pushes a 32-bit value on the CPU hardware stack.
+    Low-level function that is seldomly used in user code.
+    Don't assume anything about the order in which the bytes are pushed - popl will make sense of them again.
+
+:index:`pushf` (value)
+    pushes a floating point value on the CPU hardware stack.
+    Low-level function that is seldomly used in user code.
+    Don't assume anything about the order in which the bytes are pushed - popf will make sense of them again.
+
+:index:`pop` ()
+    pops a byte value off the CPU hardware stack and returns it.
+    Low-level function that is seldomly used in user code.
+
+:index:`popw` ()
+    pops a 16-bit word value off the CPU hardware stack that was pushed before by pushw, and returns it.
+    Low-level function that is seldomly used in user code.
+
+:index:`popl` ()
+    pops a 32-bit value off the CPU hardware stack that was pushed before by pushl, and returns it.
+    Low-level function that is seldomly used in user code.
+
+:index:`popf` ()
+    pops a floating point value off the CPU hardware stack that was pushed before by pushl, and returns it.
+    Low-level function that is seldomly used in user code.
 
 
 Miscellaneous
@@ -107,7 +146,13 @@ Miscellaneous
 :index:`msb` (x)
     Get the most significant (highest) byte of the word or long value
     (so for a long value, msb($11223344) is $11, not $33. To grab the bank byte of a long variable, you need to do this:
-    ``lsb(msw(longvariable))`` or the equivalent ``@(&longvariable+2)``.)
+    ``lsb(msw(longvariable))`` or the equivalent ``@(&longvariable+2)``.)  But also look at the ``lmh`` function.
+
+:index:`lmh` (x)
+    Get the three low, mid and high (bank) bytes of the given long value. The upper byte (bits 24-31) of the long value is not considered.
+    So this means lmh($11223344) returns the three bytes $44, $33, $22 in that order.
+    For the Commander X16 a possible use of this function is to set the 24-bits Vera address in one assignment statement:
+    ``cx16.VERA_ADDR_L, cx16.VERA_ADDR_M, cx16.VERA_ADDR_H = lmh(address)``
 
 :index:`msw` (x)
     Get the most significant (higher) word of the value x. For all word and byte numbers this will always result in 0.
@@ -224,21 +269,28 @@ Miscellaneous
 :index:`setmsb` (x, value)
     Sets the most significant byte of word or long variable x to a new value.
 
-sizeof (name)  ;  sizeof (number)  ;  sizeof(datatype)
-    The constant number of bytes that the object 'name', the number 'number' or the type 'datatype' occupies in memory.
+sizeof (name)  ;  sizeof(datatype)  ;  sizeof(&name)  ;  sizeof(&&name)  ;  sizeof(^^type)
+    The constant number of bytes that the object 'name', the type 'datatype', or a pointer occupies in memory.
     For instance, for a variable of type uword, the sizeof is 2.
-    For an 10 element array of floats, it is 50 (on the C64, where a float is 5 bytes).
-    For a string, it returns the size of the string in memory (which includes the 0-byte terminator at the end)
-    Note: usually you will be interested in the number of elements in an array, or the number of characters in the string; use len() for that.
+    For a 10 element array of floats, it is 50 (on the C64, where a float is 5 bytes).
+    For a string, it returns the size of the string in memory (which includes the 0-byte terminator at the end).
+    For address-of expressions like ``&variable`` or ``&&variable``, it returns the size of a pointer (2 bytes).
+    For pointer types like ``^^float`` or ``^^MyStruct``, it returns the size of a pointer (2 bytes).
+    Note: usually you will be interested in the number of elements in an array, or the number of characters in the string; use ``len()`` for that.
 
 :index:`swap` (var1, var2)
     Swaps the values in var1 and var2 without the need of a temporary variable. Supports booleans and all other numeric datatypes including pointers.
     Note that complicated expressions that you want to swap, may not be implemented yet. To avoid such errors you'll have to just swap them
     in the old fashioned way, until an optimized code path gets implemented in a future Prog8 version.
 
-:index:`memory` (name, size, alignment)
-    Returns the address of the first location of a statically "reserved" block of memory of the given size in bytes,
-    with the given name. The name must be a string literal, it cannot be empty or be a variable.
+:index:`memory` (name, size, alignment)  ;  memory(name)
+    Returns the address of the first location of a statically "reserved" block of memory with the given name.
+    The 3-argument version reserves a block of the given size in bytes and optional alignment, and returns the address of it.
+    The 1-argument version acts only as a reference to a block that must be reserved elsewhere in the program.
+    The name must be a string literal, it cannot be empty or be a variable.
+    This routine can be used to "reserve" parts of the memory where a normal byte array variable would
+    not suffice; for instance if you need more than 256 consecutive bytes.
+    The return value is an uword address, and you can use that like a pointer to the memory buffer.
     The block is *uninitialized memory*; unlike other variables in Prog8 it is *not* set to zero at the start of the program!
     (if that is required, you can do so yourself using ``memset``).
     No *dynamic* allocation is done; the block with this name is placed in memory only once!
@@ -247,15 +299,12 @@ sizeof (name)  ;  sizeof (number)  ;  sizeof(datatype)
     memory block is aligned on a page boundary, and $2 means word aligned (even addresses).
     Requesting the address of such a named memory block again later with
     the same name, will result in the same address as before.
-    When reusing blocks in that way, it is required that the size argument is the same,
-    otherwise you'll get a compilation error.
-    This routine can be used to "reserve" parts of the memory where a normal byte array variable would
-    not suffice; for instance if you need more than 256 consecutive bytes.
-    The return value is an uword address, and you can use that like a pointer to the memory buffer.
+    When reusing blocks in that way (using the 3-argument version), it is required that the size and alignment arguments are identical,
+    otherwise you'll get a compilation error.  To avoid duplicating these details it's easier to use the 1-argument version and just refer to the name only.
 
 :index:`call` (address) -> uword
     Calls a subroutine given by its memory address. You cannot pass arguments directly,
-    although it is ofcourse possible to do this via the global ``cx16.r0...`` registers for example.
+    although it is of course possible to do this via the global ``cx16.r0...`` registers for example.
     It is *not* possible to use cpu registers to pass arguments, because these are clobbered while performing the call!
     It is assumed the subroutine returns a word value (in AY), if it does not, just add void to the call to ignore the result value.
     This function effectively creates an "indirect JSR" if you use it on a ``uword`` pointer variable.
@@ -301,6 +350,34 @@ Grouped per compilation target.
 Library modules
 ---------------
 
+adpcm  (cx16 only)
+^^^^^^^^^^^^^^^^^^
+Routines to decode IMA-ADPCM compressed audio sample data. This is a lossy compression that reduces the
+data size by a factor of 4. Reference info about the compression `here <https://wiki.multimedia.cx/index.php/IMA_ADPCM>`_ and
+`here <https://wiki.multimedia.cx/index.php/Microsoft_IMA_ADPCM>`_ .
+
+The decoder routines in this module support mono and stereo streams, *but only with 256 byte block size*
+The standard allows for other block sizes but this decoder only accepts 256!
+**NOTE:** for speed reasons this implementation doesn't guard against clipping errors.
+If the sound playback sounds distorted, lower the volume of the source waveform a little bit and try again.
+
+**How to create a compatible ADPCM audio file?**
+Use ffmpeg or `adpcm-xq <https://github.com/dbry/adpcm-xq>`_ like so (example):
+``ffmpeg -i source.mp3 -ar 16000 -ac 1 -c:a adpcm_ima_wav -block_size 256 -map_metadata -1 -bitexact out.wav``
+or with adpcm_xq: ``adpcm-xq -4 -b8 -n  uncompressed.wav output.wav``
+
+``sub decode_block_mono(uword nibblesptr)``
+    Decodes one 256 byte block of adpcm data, into the Vera's PCM FIFO buffer.
+    Decoded data is 16 bit mono PCM, 505 samples = 1010 bytes.
+
+``sub decode_block_stereo(uword nibblesptr)``
+    Decodes one 256 byte block of adpcm data, into the Vera's PCM FIFO buffer.
+    Decoded data is 16 bit stereo PCM, 498 samples = 996 bytes.
+
+If you just want to decode the data in memory you can use a few low-level routines directly to decode single nibbles etc.
+Look at the :source:`adpcm source code <compiler/res/prog8lib/cx16/adpcm.p8>` to find out what other routines are available.
+
+
 bcd
 ^^^
 .. index:: pair: Libraries; bcd
@@ -308,7 +385,7 @@ bcd
 Decimal addition and subtraction routines, so for example $0987 + $1111 =  $2098 (rather than the usual hex outcome $1a98)
 Utilizes the BCD mode of the CPU (note: not all 6502 variants support this mode).
 This mode is useful for example for counting decimal score in a game, to avoid costly conversion to a decimal display string:
-just print the hexadecimal score representation. (This gets especially noticable with long integers)
+just print the hexadecimal score representation. (This gets especially noticeable with long integers)
 Available routines:
 
 - ``sub addb(byte a, byte b) -> byte``
@@ -417,7 +494,7 @@ Decompressors are available for RLE, TSCrunch and ZX0 (Salvador).
 ``decode_tscrunch (uword compressed, uword target)``
     Decompress a block of data compressed in the TSCrunch format.
     It has extremely fast decompression (approaching RLE speeds),
-    better compression as RLE, but slightly worse compression ration than LZSA.
+    better compression as RLE, but slightly worse compression ratio than LZSA.
     See https://github.com/tonysavon/TSCrunch for the compression format and compressor tool.
     **NOTE:** for speed reasons this decompressor is *not* bank-aware and *not* I/O register aware;
     it only outputs to a memory buffer somewhere in the active 64 Kb address range.
@@ -435,7 +512,7 @@ Decompressors are available for RLE, TSCrunch and ZX0 (Salvador).
         The TSCrunch in-place format is a bit different than regular memory decompression.
         It works with PRG files (so with a 2 byte load-address header) for both the *source* and *compressed* data files.
         So if you want to compress and decompress a block of data from $a000-$c000 your source file has to start with
-        the bytes $00 $0a, then followed by the 8192 data byes, for a total of 8194 bytes.
+        the bytes $00 $0a, then followed by the 8192 data bytes, for a total of 8194 bytes.
         Then you need to call the compressor program with the '-i' argument to tell it to create an in-place compressed data file.
         The data file will *not* be loaded at $a000 but have its own load address closer to the end of the memory buffer.
         If all is well, you can then load and decompress it like so::
@@ -533,7 +610,7 @@ and allows you to print it anywhere on the screen.
 ``logo ()``
     prints the logo at the current cursor position
 ``logo_at (column, row)``
-    printss the logo at the given position
+    prints the logo at the given position
 
 
 diskio
@@ -563,7 +640,7 @@ On the Commander X16 it tries to use that machine's fast Kernal loading routines
 Routines to directly load data into video ram are also present (vload and vload_raw).
 Also contains a helper function to calculate the file size of a loaded file (although that is truncated
 to 16 bits, 64Kb)
-Als contains routines for operating on subdirectories (chdir, mkdir, rmdir), to relabel the disk,
+Also contains routines for operating on subdirectories (chdir, mkdir, rmdir), to relabel the disk,
 and to seek in open files.
 
 Read the :source:`diskio source code <compiler/res/prog8lib/cx16/diskio.p8>`
@@ -618,7 +695,7 @@ floats
 
 .. note::
     Floating point support is available on most cbm-compatible targets (except the C128 for now), and the virtual target.
-    On the X16, make sure rom bank 4 is still active before doing floationg point operations (it's the bank that contains the fp routines).
+    On the X16, make sure rom bank 4 is still active before doing floating point operations (it's the bank that contains the fp routines).
     On the C64, you have to make sure the Basic ROM is still banked in (same reason).
 
 Provides definitions for the ROM/Kernal subroutines and utility routines dealing with floating point variables.
@@ -666,7 +743,7 @@ Provides definitions for the ROM/Kernal subroutines and utility routines dealing
 
 ``lerp_fast(v0, v1, t)``
     Linear interpolation (LERP). Imprecise (but faster) method, which does not guarantee v = v1 when t = 1
-    Teturns an interpolation between two inputs (v0, v1) for a parameter t in the closed unit interval [0.0, 1.0]
+    Returns an interpolation between two inputs (v0, v1) for a parameter t in the closed unit interval [0.0, 1.0]
 
 ``ln (x)``
     Natural logarithm (base e).
@@ -756,6 +833,28 @@ Read the :source:`graphics source code <compiler/res/prog8lib/c64/graphics.p8>`
 to see what's in there. (Note: slight variations for different compiler targets)
 
 
+lineclip
+^^^^^^^^
+.. index:: pair: Libraries; lineclip
+
+Line clipping using the Elite-inspired two-stage algorithm (BBC Micro, 6502).
+Based on the deep dive by Mark Moxon at https://elite.bbcelite.com/deep_dives/line-clipping.html
+
+All coordinates are signed words (``word``). The clipping rectangle is set via ``set_cliprect``, then
+``clip`` is called to clip a line segment. The algorithm handles lines that are fully inside,
+fully outside, or partially crossing the clipping rectangle. With ``inside`` you can check a single pixel.
+
+``sub set_cliprect(word x1, word y1, word x2, word y2)``
+    Set the clipping rectangle coordinates, all inclusive. The rectangle must have x1 < x2 and y1 < y2.
+
+``sub inside(word x, word y) -> bool``
+    Returns true if (x,y) is inside the clipping rectangle set by ``set_cliprect``.
+
+``sub clip(word x1, word y1, word x2, word y2) -> bool, word, word, word, word``
+    Clip the line segment from (x1,y1) to (x2,y2) against the current clipping rectangle set by ``set_cliprect``.
+    Returns ``visible`` (boolean), plus the clipped coordinates (or (0,0)-(0,0) if not visible).
+
+
 math
 ^^^^
 .. index:: pair: Libraries; math
@@ -769,28 +868,25 @@ checksumming
 ''''''''''''
 .. index:: pair: Libraries; checksumming
 
-``crc16 (uword data, uword length) -> uword``
-    Returns a CRC-16 (XMODEM) checksum over the given data buffer.
-    Note: on the Commander X16, there is a CRC-16/IBM-3740 routine in the kernal: cx16.memory_crc().
-    That one is faster, but yields different results.
+``crc16 (uword data, uword length, uword initvalue, uword xorout) -> uword``
+    Returns a CRC-16 checksum over the given data buffer, with configurable initialization value and final result xor value.
+    For XMODEM type checksum, use initvalue=0 and xorout=0.
+    For IBM-3740 type checksum, use initvalue=$ffff and xorout=0. (this is then equivalent to the cx16.memory_crc routine).
+    Many other types are possible with different values...
 
-``crc16_start() / crc16_update(ubyte value) / crc16_end() -> uword``
+``crc16_start(initvalue) / crc16_update(ubyte value) / crc16_end(xorout) -> uword``
     "streaming" crc16 calculation routines, when the data doesn't fit in a single buffer.
     Tracks the crc16 checksum in cx16.r15! If your code uses that, it must save/restore it before calling this routine!
     Call the start() routine first, feed it bytes with the update() routine, finalize with calling the end() routine which returns the crc16 value.
-    Note: after calling the crc16_end() routine you must start over.
 
 ``crc32 (uword data, uword length) -> long``
     Calculates a CRC-32 (ISO-HDLC/PKZIP) checksum over the given data buffer.
     The 32 bits result is returned as a long value.  The routine clobbers R0/R1 and R12 through R15.
 
-``crc32_start() / crc32_update(ubyte value) / crc32_end() / crc32_end_result()``
+``crc32_start() / crc32_update(ubyte value) / crc32_end()``
     "streaming" crc32 calculation routines, when the data doesn't fit in a single buffer.
     Tracks the crc32 checksum in cx16.r14 and cx16.r15! If your code uses these, it must save/restore them before calling this routine!
     Call the start() routine first, feed it bytes with the update() routine, finalize with calling the end() routine that returns the result value as a long.
-    Instead of the normal end() routine you can also call crc32_end_result() which finalizes the calculation,
-    and actually returns the high and low words of the 32 bits result value as two return word values.
-    Note: after calling the crc32_end() or crc32_end_result() routine you must start over.
 
 interpolation
 '''''''''''''
@@ -816,7 +912,7 @@ large multiplications
 '''''''''''''''''''''
 .. index:: pair: Libraries; large multiplications
 
-``mul32 (woord w1, word w2) -> long``
+``mul32 (word w1, word w2) -> long``
    Returns the 32 bits signed long result of w1 * w2
 
 ``mul16_last_upper () -> uword``
@@ -845,6 +941,7 @@ miscellaneous
 ``direction_qd (ubyte quadrant, ubyte xdelta, ubyte ydelta)``
     If you already know the quadrant and x/y deltas, calculate discrete direction between 0 and 23.
     This is a heavily optimized routine (small and fast).
+    **Clobbers:** ``cx16.r0`` through ``cx16.r5`` (used as temporary variables).
 
 ``diff (ubyte b1, ubyte b2) -> ubyte``
     Returns the absolute difference, or distance, between the two byte values.
@@ -853,6 +950,7 @@ miscellaneous
 ``diffw (uword w1, uword w2) -> uword``
     Returns the absolute difference, or distance, between the two word values.
     (This routine is more efficient than doing a compare and a subtract separately, or using abs)
+    **Clobbers:** ``cx16.r0``
 
 
 random numbers
@@ -905,6 +1003,7 @@ random numbers
 
 ``log2w (uword v)``
     Returns the 2-Log of the word value v.
+    **Clobbers:** ``cx16.r0``
 
 trigonometry
 ''''''''''''
@@ -921,40 +1020,41 @@ trigonometry
 ``atan2 (ubyte x1, ubyte y1, ubyte x2, ubyte y2)``
     Fast arctan routine that uses more memory because of large lookup tables.
     Calculate the angle, in a 256-degree circle, between two points in the positive quadrant.
+    **Clobbers:** ``cx16.r0`` through ``cx16.r4`` (used as temporary variables).
 
 ``sin8u (x)``
-    Fast 8-bit ubyte sine.
+    Fast 8-bit ubyte sine using a lookup table.
     x = angle 0...2π scaled as 0...255. Result is unsigned, scaled as 0...255
 
 ``sin8 (x)``
-    Fast 8-bit byte sine.
+    Fast 8-bit byte sine using a lookup table.
     x = angle 0...2π scaled as 0...255. Result is signed, scaled as -127...127
 
 ``sinr8u (x)``
-    Fast 8-bit ubyte sine.
+    Fast 8-bit ubyte sine using a lookup table.
     x = angle 0...2π scaled as 0...179 (so each value increment is a 2° step). Result is unsigned, scaled as 0...255.
     Input values 180...255 lie outside of the valid input interval and will yield a garbage result!
 
 ``sinr8 (x)``
-    Fast 8-bit byte sine.
+    Fast 8-bit byte sine using a lookup table.
     x = angle 0...2π scaled as 0...179 (so each value increment is a 2° step). Result is signed, scaled as -127...127.
     Input values 180...255 lie outside of the valid input interval and will yield a garbage result!
 
 ``cos8u (x)``
-    Fast 8-bit ubyte cosine.
+    Fast 8-bit ubyte cosine using a lookup table.
     x = angle 0...2π scaled as 0...255. Result is unsigned, scaled as 0...255
 
 ``cos8 (x)``
-    Fast 8-bit byte cosine.
+    Fast 8-bit byte cosine using a lookup table.
     x = angle 0...2π scaled as 0...255. Result is signed, scaled as -127...127
 
 ``cosr8u (x)``
-    Fast 8-bit ubyte cosine.
+    Fast 8-bit ubyte cosine using a lookup table.
     x = angle 0...2π scaled as 0...179 (so each value increment is a 2° step). Result is unsigned, scaled as 0...255.
     Input values 180...255 lie outside of the valid input interval and will yield a garbage result!
 
 ``cosr8 (x)``
-    Fast 8-bit byte cosine.
+    Fast 8-bit byte cosine using a lookup table.
     x = of angle 0...2π scaled as 0...179 (so each value increment is a 2° step). Result is signed, scaled as -127...127.
     Input values 180...255 lie outside of the valid input interval and will yield a garbage result!
 
@@ -1048,7 +1148,7 @@ psg  (cx16 only)
 .. index:: pair: Libraries; psg
 
 Available for the Cx16 target.
-**Note: New code should probaly use the psg2 module instead!**
+**Note: New code should probably use the psg2 module instead!**
 Contains a simple abstraction for the Vera's PSG (programmable sound generator) to play simple waveforms.
 It includes an interrupt handler routine for handling automatic ASR volume envelopes as well.
 
@@ -1063,21 +1163,134 @@ Available for the Cx16 target.
 Contains an abstraction for the Vera's PSG (programmable sound generator) to play simple waveforms.
 It has better consistent envelope timings than the older ``psg`` module, and easier access to all voice parameters if desired.
 It includes an interrupt handler routine for handling automatic ASR volume envelopes as well.
-See the examples/cx16/bdmusic.p8  program for ideas how to use it.
 
-Read the :source:`psg source code <compiler/res/prog8lib/cx16/psg2.p8>` to see what's in there.
+Envelope timing (one tick = one call to ``update()``):
+
+- Attack and Release are linear volume ramps: ``duration_ticks = ceil(256 / speed)``
+- Higher speed = faster ramp (shorter duration)
+- speed=1 -> 256 ticks; speed=4 -> 64 ticks; speed=255 -> 1 tick
+- Even speed=255 applies on the *next* call to ``update()`` — there is always at least ~1 frame of delay if you depend on the normal update cycle.
+- For truly immediate changes (0ms), set the voice struct fields and call ``update()`` directly.
+- Sustain holds for ``speed`` ticks then transitions to Release
+- speed=0 stalls at that phase (useful for infinite sustain)
+- Actual real-time duration depends on how often ``update()`` is called.
+  If called every vsync at 60Hz, each tick is ~16.7ms.
+
+Available routines:
+
+``init ()``
+    Initialize the module, set all voices to default off state.
+
+``off ()``
+    Turn off all voices immediately, then call ``update`` automatically.
+
+``voice (voice_num, channels, volume, waveform, pulsewidth)``
+    Set all parameters for a voice (frequency unchanged). Disables any active envelope.
+
+``frequency (voice_num, freq)``
+    Set frequency word for the voice. This is the raw VERA PSG register value (no scaling, written directly to the hardware): ``freq = HERZ(Hz) / 0.3725290298461914``.
+
+``volume (voice_num, vol)``
+    Set volume directly (0-63). Disables any active envelope. Also sets the max volume for subsequent envelope use.
+
+``envelope (voice_num, attack, sustain, release)``
+    Start ASR envelope on the voice (volume starts from 0). ``attack`` and ``release`` are speeds 0-255, ``sustain`` is duration in ticks.
+    Speed 255 means "instant".
+
+``getvoice (voice_num) -> ^Voice``
+    Return pointer to a voice's parameter struct (for direct field access).
+
+``update () -> bool``
+    Advance all active envelopes by one tick, then write all 16 voices to the VERA PSG registers. This call is IRQ-safe!
+
+Waveform constants: ``PULSE``, ``SAWTOOTH``, ``TRIANGLE``, ``NOISE``
+Channel constants: ``LEFT``, ``RIGHT``, ``BOTH``, ``DISABLED``
+
+See the :source:`examples/cx16/bdmusic.p8` program for ideas how to use it.
+
+Read the :source:`psg2 source code <compiler/res/prog8lib/cx16/psg2.p8>` to see everything that's in there.
 
 
-sorting (experimental)
-^^^^^^^^^^^^^^^^^^^^^^
+serial  (cx16 only)
+^^^^^^^^^^^^^^^^^^^
+.. index:: pair: Libraries; serial
+
+Routines for the  serial/wifi card of the Commander X16.
+Supports up to 2 UART chips. The wifi functionality is handled via the
+ZiModem (ESP32) command set.
+
+Generic UART routines:
+
+``sub detect_uarts() -> uword, uword``
+    Scans the I/O address range for UART chips and returns the addresses
+    of up to two discovered UARTs (or 0 if none found).
+
+``sub initialize_uart(uword uart_addr)``
+    Initializes the given UART to 921600 baud, 8,N,1 with auto flow control and FIFOs enabled. 
+
+``sub write(uword uart_addr, str data)``
+    Writes the string data to the UART (terminated by 0 byte)
+
+``sub read_until(uword uart_addr, str match, ^^ubyte buffer, uword max_size) -> uword``
+    Reads bytes from the UART into buffer until the match string is
+    found (the match string itself is also included in the buffer)
+    or max_size bytes have been read. Returns the number of bytes read.
+
+``sub discard_until(uword uart_addr, str match)``
+    Reads and discards bytes from the UART until the match string is
+    found (the match string itself is also discarded).
+
+ZiModem wifi routines:
+
+``sub zi_initialize(uword uart_addr)``
+    Initializes the ZiModem on the given UART address.
+
+``sub zi_reset()``
+    Resets the ZiModem connection (``atz``).
+
+``sub zi_write_cmd(str command)``
+    Writes the given command to the ZiModem followed by CR/LF.
+
+``sub zi_start_get_file(str filename) -> long``
+    Starts a file download from the given URL and returns the file
+    size. Use ``zi_get_file_chunk()`` repeatedly to download the data.
+    Note: binary mode transfer can be unreliable; prefer hex mode.
+
+``sub zi_start_get_file_hexmode(str filename) -> bool``
+    Starts a file download in hex mode from the given URL.
+    Returns true if the file was found, false otherwise.
+    Use ``zi_get_file_chunk_hexmode()`` repeatedly to download chunks.
+    Hex mode is more reliable than binary mode for file transfers.
+
+``sub zi_get_file_chunk(^^ubyte buffer, uword buffer_size, long remaining_file_size) -> uword``
+    Reads the next chunk of data (up to buffer_size bytes) from an
+    active file download started with ``zi_start_get_file()``.
+    Returns the number of bytes read, or 0 when done.
+
+``sub zi_get_file_chunk_hexmode(^^ubyte buffer, uword buffer_size) -> uword``
+    Reads the next chunk of hex-encoded data (up to buffer_size bytes)
+    from an active file download started with ``zi_start_get_file_hexmode()``.
+    Buffer must be at least 40 bytes. Returns the number of bytes decoded, or 0 when done.
+
+``sub zi_end_get_file()``
+    Consumes the trailing ``OK`` response after downloading a file
+    with ``zi_start_get_file()`` / ``zi_get_file_chunk()``.
+
+``sub zi_get_ip_address() -> str``
+    Returns the IP address of the ZiModem wifi connection.
+
+Read the :source:`serial source code <compiler/res/prog8lib/cx16/serial.p8>` to see what's in there.
+
+
+sorting
+^^^^^^^
 .. index:: pair: Libraries; sorting
 
 Various sorting routines (gnome sort and shell sort variants) for byte, word and string arrays.
-API is experimental and may change or disappear in a future version.
 **NOTE:** all word and str arrays have to be @nosplit! Words and pointers need to be consecutive in memory for now.
 **NOTE:** sorting is done in ascending order.
 Read the :source:`sorting source code <compiler/res/prog8lib/sorting.p8>`
-to see what's in there.   Also check out the `sortingbech` example.
+to see what's in there.   Also check out the :source:`sortingbench <examples/cx16/sortingbench.p8>` example.
 
 
 sprites  (cx16 only)
@@ -1088,7 +1301,7 @@ Available for the Cx16 target. Simple routines to manipulate sprites.
 They're not written for high performance, but for simplicity.
 That's why they control one sprite at a time. The exception is the ``pos_batch`` routine,
 which is quite efficient to update sprite positions of multiple sprites in one go.
-See the examples/cx16/sprites/dragon.p8 and dragons.p8 programs for ideas how to use it.
+See the :source:`examples/cx16/sprites/dragon.p8` and :source:`dragons.p8 <examples/cx16/sprites/dragons.p8>` programs for ideas how to use it.
 
 Read the :source:`sprites source code <compiler/res/prog8lib/cx16/sprites.p8>`
 to see what's in there.
@@ -1106,6 +1319,9 @@ conversion and classification
 
 ``isdigit (char)``
     Returns boolean if the character is a numerical digit 0-9
+
+``isxdigit (char)``
+    Returns boolean if the character is a hexadecimal digit 0-9, a-f, or A-F.
 
 ``islower (char)``, ``isupper (char)``, ``isletter (char)``
     Returns true if the character is a shifted-PETSCII lowercase letter, uppercase letter, or any letter, respectively.
@@ -1378,6 +1594,7 @@ miscellaneous
     - 8 = Atari 8 bits
     - 16 = Commander X16
     - 25 = Foenix F256 family
+    - 32 = Commodore PET
     - 64 = Commodore 64
     - 128 = Commodore 128
     - 255 = Virtual machine
@@ -1387,6 +1604,9 @@ miscellaneous
     Note: the regular system irq handler has run for this to work as it depends on the system jiffy clock.
     If this is is not possible (for instance because your program is running its own irq handler logic *and* no longer calls
     the kernal's handler routine), you'll have to write your own wait routine instead.
+
+``waitirq ()``   (cx16 only)
+    efficiently wait until the next interrupt has occurred (any source). It uses the 65C02 'wai' instruction for this.
 
 ``waitvsync ()``
     busy wait till the next vsync has occurred (approximately), without depending on custom irq handling.
@@ -1433,36 +1653,14 @@ processor stack
 '''''''''''''''
 .. index:: pair: Libraries; processor stack
 
-``push (value)``
-    pushes a byte value on the CPU hardware stack.
-    Low-level function that is seldomly used in user code.
-
-``pushw (value)``
-    pushes a 16-bit word value on the CPU hardware stack.
-    Low-level function that is seldomly used in user code.
-    Don't assume anything about the order in which the bytes are pushed - popw will make sense of them again.
-
-``pushl (value)``
-    pushes a 32-bit value on the CPU hardware stack.
-    Low-level function that is seldomly used in user code.
-    Don't assume anything about the order in which the bytes are pushed - popl will make sense of them again.
+Pushing and popping values on the CPU hardware stack can be done via the stack related :ref:`builtinfunctions` (pop, push etc).
+There is a very specialized function in the sys module here as well:
 
 ``push_returnaddress (address)``
     pushes a 16 bit memory address on the CPU hardware stack in the same byte order as a JSR instruction would,
-    which means the next RTS instruction will jump to that address instead.you
+    which means the next RTS instruction will jump to that address instead.
     You cannot use pushw() for this because the bytes pushed by JSR are different
 
-``pop ()``
-    pops a byte value off the CPU hardware stack and returns it.
-    Low-level function that is seldomly used in user code.
-
-``popw ()``
-    pops a 16-bit word value off the CPU hardware stack that was pushed before by pushw, and returns it.
-    Low-level function that is seldomly used in user code.
-
-``popl ()``
-    pops a 32-bit value off the CPU hardware stack that was pushed before by pushl, and returns it.
-    Low-level function that is seldomly used in user code.
 
 
 textio (txt.*)
@@ -1531,3 +1729,26 @@ Available for the Cx16 target. Routines that use the Vera FX logic to accelerate
 Read the :source:`verafx source code <compiler/res/prog8lib/cx16/verafx.p8>`
 to see what's in there.
 
+
+wavfile
+^^^^^^^
+
+``sub parse_header(^^ubyte wav_data) -> bool``
+    Parses the header of a .wav file. Returns true if it's a valid wav file, false if is invalid.
+
+    These header fields can be read out afterwards::
+
+        uword sample_rate
+        ubyte bits_per_sample
+        uword data_offset
+        ubyte wavefmt           ; WAVE_FORMAT_PCM=1, WAVE_FORMAT_DVI_ADPCM=17, etc
+        ubyte nchannels
+        uword block_align
+        long data_size
+
+.. note::
+    the sample rate in hertz can be converted to a vera rate value via::
+
+        const float vera_freq_factor = 25e6 / 65536.0
+        vera_rate = (wavfile.sample_rate as float / vera_freq_factor) + 1.0 as ubyte
+        vera_rate_hz = (vera_rate as float) * vera_freq_factor as uword

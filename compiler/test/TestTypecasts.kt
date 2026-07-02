@@ -155,14 +155,14 @@ main {
             }"""
         val result = compileText(C64Target(), false, text, outputDir, writeAssembly = false)!!
         val stmts = result.compilerAst.entrypoint.statements
-        stmts.size shouldBe 8
-        val fcall1 = ((stmts[4] as Assignment).value as IFunctionCall)
+        stmts.size shouldBe 7
+        val fcall1 = ((stmts[3] as Assignment).value as IFunctionCall)
         fcall1.args[0] shouldBe NumericLiteral(BaseDataType.BOOL, 1.0, Position.DUMMY)
         fcall1.args[1] shouldBe NumericLiteral(BaseDataType.BOOL, 0.0, Position.DUMMY)
-        val fcall2 = ((stmts[5] as Assignment).value as IFunctionCall)
+        val fcall2 = ((stmts[4] as Assignment).value as IFunctionCall)
         fcall2.args[0] shouldBe NumericLiteral(BaseDataType.BOOL, 0.0, Position.DUMMY)
         fcall2.args[1] shouldBe NumericLiteral(BaseDataType.BOOL, 1.0, Position.DUMMY)
-        val ifCond = (stmts[6] as IfElse).condition as BinaryExpression
+        val ifCond = (stmts[5] as IfElse).condition as BinaryExpression
         ifCond.operator shouldBe "and" // no asm writing so logical expressions haven't been replaced with bitwise equivalents yet
         (ifCond.left as IdentifierReference).nameInSource shouldBe listOf("boolvalue1")
         (ifCond.right as IdentifierReference).nameInSource shouldBe listOf("boolvalue2")
@@ -246,9 +246,9 @@ main {
                 sub start() {
                     uword variable
             
-                    sys.pushw(variable)
-                    sys.pushw(handler)
-                    sys.pushw(&handler)
+                    pushw(variable)
+                    pushw(handler)
+                    pushw(&handler)
                     handler(variable)
                     handler(handler)
                     handler(&handler)
@@ -937,6 +937,17 @@ main {
         BinaryExpression.commonDatatype(DataType.pointer(BaseDataType.BOOL), DataType.UWORD, null, null).first shouldBe DataType.pointer(BaseDataType.BOOL)
         BinaryExpression.commonDatatype(DataType.pointer(BaseDataType.BOOL), DataType.BYTE, null, null).first shouldBe DataType.pointer(BaseDataType.BOOL)
         BinaryExpression.commonDatatype(DataType.pointer(BaseDataType.BOOL), DataType.WORD, null, null).first shouldBe DataType.pointer(BaseDataType.BOOL)
+
+        BinaryExpression.commonDatatype(DataType.LONG, DataType.BYTE, null, null).first shouldBe DataType.LONG
+        BinaryExpression.commonDatatype(DataType.LONG, DataType.UBYTE, null, null).first shouldBe DataType.LONG
+        BinaryExpression.commonDatatype(DataType.LONG, DataType.WORD, null, null).first shouldBe DataType.LONG
+        BinaryExpression.commonDatatype(DataType.LONG, DataType.UWORD, null, null).first shouldBe DataType.LONG
+        BinaryExpression.commonDatatype(DataType.LONG, DataType.LONG, null, null).first shouldBe DataType.LONG
+        BinaryExpression.commonDatatype(DataType.BYTE, DataType.LONG, null, null).first shouldBe DataType.LONG
+        BinaryExpression.commonDatatype(DataType.UBYTE, DataType.LONG, null, null).first shouldBe DataType.LONG
+        BinaryExpression.commonDatatype(DataType.WORD, DataType.LONG, null, null).first shouldBe DataType.LONG
+        BinaryExpression.commonDatatype(DataType.UWORD, DataType.LONG, null, null).first shouldBe DataType.LONG
+        BinaryExpression.commonDatatype(DataType.LONG, DataType.LONG, null, null).first shouldBe DataType.LONG
 
         BinaryExpression.commonDatatype(DataType.UBYTE, DataType.pointer(BaseDataType.BOOL), null, null).first shouldBe DataType.pointer(BaseDataType.BOOL)
         BinaryExpression.commonDatatype(DataType.UWORD, DataType.pointer(BaseDataType.BOOL), null, null).first shouldBe DataType.pointer(BaseDataType.BOOL)

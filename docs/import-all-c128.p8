@@ -8,6 +8,7 @@
 %import cx16logo
 %import diskio
 ;;%import floats
+%import lineclip
 %import math
 %import petgfx
 %import prog8_lib
@@ -16,3 +17,4 @@
 %import syslib
 %import test_stack
 %import textio
+%import wavfile

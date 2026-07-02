@@ -1,6 +1,6 @@
 package prog8.compiler
 
-import com.github.michaelbull.result.onFailure
+import com.github.michaelbull.result.onErr
 import prog8.ast.*
 import prog8.ast.expressions.Expression
 import prog8.ast.expressions.NumericLiteral
@@ -20,10 +20,13 @@ import prog8.code.target.VMTarget
 import prog8.code.target.getCompilationTargetByName
 import prog8.codegen.vm.VmCodeGen
 import prog8.compiler.astprocessing.*
+import prog8.compiler.simpleastprocessing.profilingInstrumentation
 import prog8.optimizer.*
+import prog8.parser.MultipleParseErrors
 import prog8.parser.ParseError
 import java.nio.file.Path
 import kotlin.io.path.Path
+import kotlin.io.path.absolute
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.nameWithoutExtension
 import kotlin.system.exitProcess
@@ -33,11 +36,16 @@ import kotlin.time.measureTime
 import kotlin.time.measureTimedValue
 
 
+private data class AssemblyResult(val success: Boolean, val irInstructionCount: Int, val irChunkCount: Int, val irRegisterCount: Int)
+
+
 class CompilationResult(val compilerAst: Program,   // deprecated, use codegenAst instead
                         val codegenAst: PtProgram?,
                         val codegenSymboltable: SymbolTable?,
                         val compilationOptions: CompilationOptions,
-                        val importedFiles: List<Path>)
+                        val importedFiles: List<Path>,
+                        val irInstructionCount: Int = 0,
+                        val irRegisterCount: Int = 0)
 
 class CompilerArguments(val filepath: Path,
                         val optimize: Boolean,
@@ -61,9 +69,12 @@ class CompilerArguments(val filepath: Path,
                         val printAst1: Boolean,
                         val printAst2: Boolean,
                         val ignoreFootguns: Boolean,
+                        val profilingInstrumentation: Boolean,
+                        val nostdlib: Boolean,
                         val symbolDefs: Map<String, String>,
                         val sourceDirs: List<String> = emptyList(),
                         val outputDir: Path = Path(""),
+                        val cwd: Path = Path("").absolute(),
                         val errors: IErrorReporter = ErrorReporter(ErrorReporter.AnsiColors))
 
 
@@ -73,6 +84,8 @@ fun compileProgram(args: CompilerArguments): CompilationResult? {
     var ast: PtProgram? = null
     var resultingProgram: Program? = null
     var importedFiles: List<Path>
+    var irInstructionCount = 0
+    var irRegisterCount = 0
 
     val targetConfigFile = expandTilde(Path(args.compilationTarget))
     val compTarget = if(targetConfigFile.isRegularFile()) {
@@ -100,7 +113,9 @@ fun compileProgram(args: CompilerArguments): CompilationResult? {
                     compTarget,
                     args.sourceDirs,
                     libraryDirs,
-                    args.quietAll
+                    args.cwd,
+                    args.quietAll,
+                    args.nostdlib
                 )
             }
 
@@ -113,6 +128,7 @@ fun compileProgram(args: CompilerArguments): CompilationResult? {
                 optimize = args.optimize
                 asmQuiet = args.quietAssembler
                 quiet = args.quietAll
+                profilingInstrumentation = args.profilingInstrumentation
                 asmListfile = args.asmListfile
                 includeSourcelines = args.includeSourcelines
                 experimentalCodegen = args.experimentalCodegen
@@ -190,10 +206,39 @@ fun compileProgram(args: CompilerArguments): CompilationResult? {
                     args.errors.report()
                     symbolTable = stMaker.make()        // need an updated ST because the postprocessing changes stuff
 
+                    /*
+                     * IMPORTANT: Optimization order matters!
+                     * 
+                     * 1. optimizeSimplifiedAst() - Runs the main optimization passes (algebraic identities,
+                     *    boolean simplifications, comparison optimizations, etc.). These optimizations
+                     *    need to see the original AST patterns including typecasts to create optimization
+                     *    opportunities (e.g., pointer arithmetic patterns like `ptr + (value as uword)`).
+                     * 
+                     * 2. removeRedundantPointerCasts() - Removes redundant (pointer as uword) typecasts.
+                     *    This MUST run AFTER optimizeSimplifiedAst() because:
+                     *    - The optimizer needs to see typecast patterns to match optimization rules
+                     *    - Removing typecasts too early prevents pattern matching in the optimizer
+                     *    - But typecasts must be removed before code generation to produce efficient code
+                     *    
+                     *    This step runs regardless of the -noopt flag because redundant pointer typecasts
+                     *    would otherwise generate inefficient assembly code (extra loads/stores to temp vars).
+                     */
+
                     if (compilationOptions.optimize) {
                         optimizeSimplifiedAst(intermediateAst, compilationOptions, symbolTable!!, args.errors)
                         args.errors.report()
-                        symbolTable = stMaker.make()        // need an updated ST because the optimization changes stuff
+                        // symbolTable = stMaker.make()        // need an updated ST because the optimization changes stuff
+                    }
+
+                    // Remove redundant pointer typecasts - must run AFTER optimization, BEFORE code generation
+                    SubtypeResolver.removeRedundantPointerCasts(intermediateAst)
+                    args.errors.report()
+                    symbolTable = stMaker.make()        // need an updated ST because the typecast removal changes stuff
+
+                    if (compilationOptions.profilingInstrumentation) {
+                        require(compilationOptions.compTarget.name == Cx16Target.NAME)
+                        profilingInstrumentation(intermediateAst, symbolTable, args.errors)
+                        args.errors.report()
                     }
 
                     if (args.printAst2) {
@@ -209,17 +254,24 @@ fun compileProgram(args: CompilerArguments): CompilationResult? {
                 simplifiedAstDuration = simplifiedAstDuration2
 
                 createAssemblyDuration = measureTime {
-                    if (!createAssemblyAndAssemble(
+                    val result = createAssemblyAndAssemble(
                             intermediateAst,
                             symbolTable!!,
                             args.errors,
                             compilationOptions,
                             program.generatedLabelSequenceNumber
                         )
-                    ) {
+                    irInstructionCount = result.irInstructionCount
+                    irRegisterCount = result.irRegisterCount
+                    if (!result.success) {
+                        System.out.flush()
                         System.err.println("Error in codegeneration or assembler")
+                        System.err.flush()
                         return null
                     }
+                }
+                if (irInstructionCount < 0) {
+                    return null
                 }
                 ast = intermediateAst
             } else {
@@ -252,9 +304,13 @@ fun compileProgram(args: CompilerArguments): CompilationResult? {
         if(!args.quietAll) {
             println("\nTotal compilation+assemble time: ${totalTime.toString(DurationUnit.SECONDS, 3)}.")
         }
-        return CompilationResult(resultingProgram!!, ast, symbolTable, compilationOptions, importedFiles)
+        return CompilationResult(resultingProgram!!, ast, symbolTable, compilationOptions, importedFiles, irInstructionCount, irRegisterCount)
+    } catch (mpe: MultipleParseErrors) {
+        mpe.errors.forEach { error ->
+            args.errors.printSingleError("ERROR ${error.position.toClickableStr()} parse error: ${error.message}")
+        }
     } catch (px: ParseError) {
-        args.errors.printSingleError("${px.position.toClickableStr()} parse error: ${px.message}".trim())
+        args.errors.printSingleError("ERROR ${px.position.toClickableStr()} parse error: ${px.message}".trim())
     } catch (ac: ErrorsReportedException) {
         if(args.printAst1 && resultingProgram!=null) {
             println("\n*********** COMPILER AST *************")
@@ -277,6 +333,13 @@ fun compileProgram(args: CompilerArguments): CompilationResult? {
         args.errors.printSingleError("File not found: ${nsf.message}")
     } catch (ax: AstException) {
         args.errors.printSingleError(ax.toString())
+    } catch(fx: FileSystemException) {
+        if(fx.cause!=null) {
+            args.errors.printSingleError("\nfile I/O error: ${fx.file}: ${fx.cause}")
+        } else {
+            args.errors.printSingleError("\nfile I/O error")
+            throw fx
+        }
     } catch (x: Exception) {
         args.errors.printSingleError("\ninternal error")
         throw x
@@ -317,11 +380,11 @@ private class BuiltinFunctionsFacade(functions: Map<String, FSignature>): IBuilt
     lateinit var program: Program
 
     override val names = functions.keys
-    override val purefunctionNames = functions.filter { it.value.pure }.map { it.key }.toSet()
+    override val purefunctionNames = functions.filter { it.value.pure }.mapTo(mutableSetOf()) { it.key }
 
-    override fun constValue(funcName: String, args: List<Expression>, position: Position): NumericLiteral? {
+    override fun constValues(funcName: String, args: List<Expression>, position: Position): List<NumericLiteral>? {
         if(funcName=="msw" && !args[0].inferType(program).isLong)
-            return NumericLiteral.optimalInteger(0, position)
+            return listOf(NumericLiteral.optimalInteger(0, position))
 
         val func = BuiltinFunctions[funcName]
         if(func!=null) {
@@ -340,7 +403,7 @@ private class BuiltinFunctionsFacade(functions: Map<String, FSignature>): IBuilt
         }
         return null
     }
-    override fun returnType(funcName: String) = builtinFunctionReturnType(funcName)
+    override fun returnTypes(funcName: String) = builtinFunctionReturnTypes(funcName)
 }
 
 fun parseMainModule(filepath: Path,
@@ -348,14 +411,16 @@ fun parseMainModule(filepath: Path,
                     compTarget: ICompilationTarget,
                     sourceDirs: List<String>,
                     libraryDirs: List<String>,
-                    quiet: Boolean): Triple<Program, CompilationOptions, List<Path>> {
+                    cwd: Path,
+                    quiet: Boolean,
+                    nostdlib: Boolean): Triple<Program, CompilationOptions, List<Path>> {
     val bf = BuiltinFunctionsFacade(BuiltinFunctions)
     val program = Program(filepath.nameWithoutExtension, bf, compTarget, compTarget)
     bf.program = program
 
-    val importer = ModuleImporter(program, compTarget.name, errors, sourceDirs, libraryDirs, quiet)
+    val importer = ModuleImporter(program, compTarget.name, errors, sourceDirs, libraryDirs, cwd, quiet, nostdlib)
     val importedModuleResult = importer.importMainModule(filepath)
-    importedModuleResult.onFailure { throw it }
+    importedModuleResult.onErr { throw it }
     errors.report()
 
     val importedFiles = program.modules.map { it.source }
@@ -380,7 +445,7 @@ fun parseMainModule(filepath: Path,
         if(!compilerOptions.noSysInit)
             errors.err("library cannot use sysinit", program.toplevelModule.position)
     } else {
-        if (compilerOptions.launcher == CbmPrgLauncherType.BASIC && compilerOptions.output != OutputType.PRG)
+        if (compilerOptions.launcher == CbmPrgLauncherType.BASIC && compilerOptions.output != OutputType.PRG && compTarget.customLauncher.isEmpty())
             errors.err("BASIC launcher requires output type PRG", program.toplevelModule.position)
     }
 
@@ -403,7 +468,7 @@ internal fun determineCompilationOptions(program: Program, compTarget: ICompilat
     val allOptions = program.modules.flatMap { it.options() }.toSet()
     val floatsEnabled = "enable_floats" in allOptions
     var noSysInit = "no_sysinit" in allOptions
-    val rombale = "romable" in allOptions
+    val romable = "romable" in allOptions
     var zpType: ZeropageType =
         if (zpoption == null)
             if (floatsEnabled) ZeropageType.FLOATSAFE else ZeropageType.KERNALSAFE
@@ -458,11 +523,17 @@ internal fun determineCompilationOptions(program: Program, compTarget: ICompilat
         noSysInit = true
     }
 
-    return CompilationOptions(
-        outputType, launcherType,
-        zpType, zpReserved, zpAllowed, floatsEnabled, noSysInit, rombale,
-        compTarget, VERSION, 0u, 0xffffu
-    )
+    return CompilationOptions.builder(compTarget)
+        .output(outputType)
+        .launcher(launcherType)
+        .zeropage(zpType)
+        .zpReserved(zpReserved)
+        .zpAllowed(if (zpAllowed.isEmpty()) CompilationOptions.AllZeropageAllowed else zpAllowed)
+        .floats(floatsEnabled)
+        .noSysInit(noSysInit)
+        .romable(romable)
+        .compilerVersion(VERSION)
+        .build()
 }
 
 private fun processAst(program: Program, errors: IErrorReporter, compilerOptions: CompilationOptions) {
@@ -472,6 +543,8 @@ private fun processAst(program: Program, errors: IErrorReporter, compilerOptions
         exitProcess(0)
     }
 
+    program.checkPrivateAccess(errors)
+    errors.report()
     program.checkIdentifiers(errors, compilerOptions)
     errors.report()
     program.charLiteralsToUByteLiterals(compilerOptions.compTarget, errors)
@@ -496,22 +569,22 @@ private fun processAst(program: Program, errors: IErrorReporter, compilerOptions
 
 private fun optimizeAst(program: Program, compilerOptions: CompilationOptions, errors: IErrorReporter, functions: IBuiltinFunctions) {
     fun removeUnusedCode(program: Program, errors: IErrorReporter, compilerOptions: CompilationOptions) {
-        val remover = UnusedCodeRemover(program, errors, compilerOptions.compTarget)
+        val remover = UnusedCodeRemover(program, errors, compilerOptions)
         remover.visit(program)
         while (errors.noErrors() && remover.applyModifications() > 0) {
             remover.visit(program)
         }
     }
 
-    removeUnusedCode(program, errors,compilerOptions)
+    removeUnusedCode(program, errors, compilerOptions)
     program.constantFold(errors, compilerOptions)
 
     for(numCycles in 0..10000) {
         // keep optimizing expressions and statements until no more steps remain
-        val optsDone1 = program.simplifyExpressions(errors)
+        val optsDone1 = program.simplifyExpressions(errors, compilerOptions)
         val optsDone2 = program.optimizeStatements(errors, functions, compilerOptions)
-        val optsDone3 = program.inlineSubroutines(compilerOptions)
         program.constantFold(errors, compilerOptions) // because simplified statements and expressions can result in more constants that can be folded away
+        val optsDone3 = program.inlineSubroutines(compilerOptions)  // inlining can expose new calls to inline
         if(!errors.noErrors()) {
             errors.report()
             break
@@ -524,10 +597,11 @@ private fun optimizeAst(program: Program, compilerOptions: CompilationOptions, e
             throw InternalCompilerException("optimizeAst() is looping endlessly, numOpts = $numOpts")
         }
     }
+    
     removeUnusedCode(program, errors, compilerOptions)
     if(errors.noErrors()) {
-        // last round of optimizations because constFold may have enabled more...
-        program.simplifyExpressions(errors)
+        // last round of optimizations because inlining may have enabled more...
+        program.simplifyExpressions(errors, compilerOptions)
         program.optimizeStatements(errors, functions, compilerOptions)
         program.constantFold(errors, compilerOptions) // because simplified statements and expressions can result in more constants that can be folded away
     }
@@ -575,7 +649,7 @@ private fun createAssemblyAndAssemble(program: PtProgram,
                                       errors: IErrorReporter,
                                       compilerOptions: CompilationOptions,
                                       lastGeneratedLabelSequenceNr: Int
-): Boolean {
+): AssemblyResult {
 
     val retainSSAforIR = true
 
@@ -591,9 +665,15 @@ private fun createAssemblyAndAssemble(program: PtProgram,
     val assembly = asmgen.generate(program, symbolTable, compilerOptions, errors)
     errors.report()
 
-    return if(assembly!=null && errors.noErrors()) {
+    val instructionCount = assembly?.irInstructionCount ?: 0
+    val chunkCount = assembly?.irChunkCount ?: 0
+    val registerCount = assembly?.irRegisterCount ?: 0
+
+    val success = if(assembly!=null && errors.noErrors()) {
         assembly.assemble(compilerOptions, errors)
     } else {
         false
     }
+    return AssemblyResult(success, instructionCount, chunkCount, registerCount)
 }
+

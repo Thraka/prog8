@@ -114,11 +114,11 @@ fun parseIRCodeLine(line: String): Either<IRInstruction, String> {
     var reg1: Int? = null
     var reg2: Int? = null
     var reg3: Int? = null
-    var fpReg1: Int? = null
-    var fpReg2: Int? = null
+    var fpReg1: RegisterNum? = null
+    var fpReg2: RegisterNum? = null
     var immediateInt: Int? = null
     var immediateFp: Double? = null
-    var address: Int? = null
+    var address: UInt? = null
     var labelSymbol: String? = null
 
     fun parseValueOrPlaceholder(operand: String): Double? {
@@ -130,11 +130,11 @@ fun parseIRCodeLine(line: String): Either<IRInstruction, String> {
     }
     if(format.sysCall) {
         val call = parseCall(rest)
-        val syscallNum = call.address ?: parseIRValue(call.target ?: "").toInt()
+        val syscallNum = call.address?.toInt() ?: (call.target?.let { parseIRValue(it).toInt() } ?: throw IRParseException("Missing syscall number"))
         return left(IRInstruction(Opcode.SYSCALL, immediate = syscallNum, fcallArgs = FunctionCallArgs(call.args, call.returns)))
     } else if (format.funcCall) {
         val call = parseCall(rest)
-        return left(IRInstruction(Opcode.CALL, address = call.address, labelSymbol = call.target, fcallArgs = FunctionCallArgs(call.args, call.returns)))
+        return left(IRInstruction(Opcode.CALL, address = call.address?.toAddress(), labelSymbol = call.target, fcallArgs = FunctionCallArgs(call.args, call.returns)))
     } else {
         operands.forEach { oper ->
             if (oper[0] == '&')
@@ -145,15 +145,15 @@ fun parseIRCodeLine(line: String): Either<IRInstruction, String> {
                 else if (reg3 == null) reg3 = oper.substring(1).toInt()
                 else throw IRParseException("too many register operands")
             } else if (isFloatRegisterName(oper)) {
-                if (fpReg1 == null) fpReg1 = oper.substring(2).toInt()
-                else if (fpReg2 == null) fpReg2 = oper.substring(2).toInt()
+                if (fpReg1 == null) fpReg1 = RegisterNum(oper.substring(2).toInt())
+                else if (fpReg2 == null) fpReg2 = RegisterNum(oper.substring(2).toInt())
                 else throw IRParseException("too many fp register operands")
             } else if (oper[0] in "0123456789$%-#" || oper.startsWith("0x")) {
                 val value = if(oper[0]=='#') parseIRValue(oper.drop(1)) else parseIRValue(oper)
                 if (format.immediate) {
                     if (immediateInt == null && immediateFp == null) {
                         when (type) {
-                            IRDataType.FLOAT if opcode != Opcode.LOADFIELD && opcode != Opcode.STOREFIELD -> immediateFp = value
+                            IRDataType.FLOAT if opcode != Opcode.LOADI && opcode != Opcode.STOREI -> immediateFp = value
                             IRDataType.LONG -> {
                                 val immediateLong = value.toLong()
                                 immediateInt = if (immediateLong == 0x80000000L) -2147483648 else immediateLong.toInt()
@@ -161,10 +161,10 @@ fun parseIRCodeLine(line: String): Either<IRInstruction, String> {
                             else -> immediateInt = value.toInt()
                         }
                     } else {
-                        address = value.toInt()
+                        address = value.toUInt()
                     }
                 } else {
-                    address = value.toInt()
+                    address = value.toUInt()
                 }
             } else {
                 if (!oper[0].isLetter())
@@ -172,7 +172,7 @@ fun parseIRCodeLine(line: String): Either<IRInstruction, String> {
                 labelSymbol = oper
                 val value = parseValueOrPlaceholder(oper)
                 if (value != null)
-                    address = value.toInt()
+                    address = value.toUInt()
             }
         }
     }
@@ -204,9 +204,9 @@ fun parseIRCodeLine(line: String): Either<IRInstruction, String> {
     if(format.immediate && opcode!=Opcode.SYSCALL) {
         if(immediateInt==null && immediateFp==null && labelSymbol==null)
             throw IRParseException("needs value or symbol for $line")
-        if(opcode==Opcode.LOADFIELD || opcode==Opcode.STOREFIELD) {
+        if(opcode==Opcode.LOADI || opcode==Opcode.STOREI) {
             if(immediateInt !in 0..65535)
-                throw IRParseException("immediate value out of range for loadfield/storefield: $immediateInt")
+                throw IRParseException("immediate value out of range for loadi/storei: $immediateInt")
         } else {
             when (type) {
                 IRDataType.BYTE -> {
@@ -243,7 +243,7 @@ fun parseIRCodeLine(line: String): Either<IRInstruction, String> {
         }
     }
 
-    return left(IRInstruction(opcode, type, reg1, reg2, reg3, fpReg1, fpReg2, immediateInt, immediateFp, address, labelSymbol = labelSymbol, symbolOffset = offset))
+    return left(IRInstruction(opcode, type, reg1, reg2, reg3, fpReg1, fpReg2, immediateInt, immediateFp, address?.toAddress(), labelSymbol = labelSymbol, symbolOffset = offset))
 }
 
 private fun isRegisterName(oper: String): Boolean {
@@ -272,10 +272,12 @@ private fun isFloatRegisterName(oper: String): Boolean {
 
 private class ParsedCall(
     val target: String?,
-    val address: Int?,
+    val address: UInt?,
     val args: List<FunctionCallArgs.ArgumentSpec>,
     val returns: List<FunctionCallArgs.RegSpec>
 )
+
+private val callPattern = Regex("(?<target>.+?)\\((?<arglist>.*?)\\)(:(?<returns>.+?))?")
 
 private fun parseCall(rest: String): ParsedCall {
 
@@ -295,7 +297,7 @@ private fun parseCall(rest: String): ParsedCall {
                 val cpuRegStr = match.groups[3]!!.value.drop(1)
                 parseRegisterOrStatusflag(cpuRegStr)
             } else null
-        return FunctionCallArgs.RegSpec(type, num, cpuRegister)
+        return FunctionCallArgs.RegSpec(type, RegisterNum(num), cpuRegister)
     }
 
     fun parseReturnRegspec(regs: String?): List<FunctionCallArgs.RegSpec> {
@@ -303,7 +305,7 @@ private fun parseCall(rest: String): ParsedCall {
             return emptyList()
         return regs.split(',').map { reg->
             if (reg.startsWith('@')) {
-                FunctionCallArgs.RegSpec(IRDataType.BYTE, -1, parseRegisterOrStatusflag(reg.drop(1)))
+                FunctionCallArgs.RegSpec(IRDataType.BYTE, RegisterNum(-1), parseRegisterOrStatusflag(reg.drop(1)))
             } else {
                 parseRegspec(reg)
             }
@@ -323,17 +325,16 @@ private fun parseCall(rest: String): ParsedCall {
         }
     }
 
-    val pattern = Regex("(?<target>.+?)\\((?<arglist>.*?)\\)(:(?<returns>.+?))?")
-    val match = pattern.matchEntire(rest.replace(" ","")) ?: throw IRParseException("invalid call spec $rest")
+    val match = callPattern.matchEntire(rest.replace(" ","")) ?: throw IRParseException("invalid call spec $rest")
     val target = match.groups["target"]!!.value
     val args = match.groups["arglist"]!!.value
     val arguments = parseArgs(args)
     val returns = match.groups["returns"]?.value
-    var address: Int? = null
+    var address: UInt? = null
     var actualTarget: String? = target
 
     if(target.startsWith('$') || target[0].isDigit()) {
-        address = parseIRValue(target).toInt()
+        address = parseIRValue(target).toUInt()
         actualTarget = null
     }
 

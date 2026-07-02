@@ -18,6 +18,9 @@ internal class AssignmentAsmGen(
 ) {
     lateinit var augmentableAsmGen: AugmentableAssignmentAsmGen
 
+    internal fun isRightTrivial(expr: PtExpression): Boolean =
+        expr is PtNumber || expr is PtBool || expr is PtIdentifier
+
     fun translate(assignment: PtAssignment) {
         val target = AsmAssignTarget.fromAstAssignment(assignment.target, assignment.definingISub(), asmgen)
         val source = AsmAssignSource.fromAstSource(assignment.value, program, asmgen).adjustSignedUnsigned(target)
@@ -38,96 +41,79 @@ internal class AssignmentAsmGen(
         val values = assignment.value as? PtFunctionCall
             ?: throw AssemblyError("only function calls can return multiple values in a multi-assign")
 
-        val extsub = asmgen.symbolTable.lookup(values.name) as? StExtSub
-        if(extsub!=null) {
-            require(extsub.returns.size>=2)
-            if(extsub.returns.any { it.type.isFloat })
-                TODO("deal with (multiple?) FP return registers  ${assignment.position}")
+        val thing = asmgen.symbolTable.lookup(values.name)
+        if(thing?.type== StNodeType.EXTSUB) {
+            val extsub = thing as StExtSub
+            require(extsub.returns.size>=2) {
+                "extsub ${extsub.name} must return at least 2 values but got ${extsub.returns.size}  ${assignment.position}"
+            }
 
             asmgen.translate(values)
 
             val assignmentTargets = assignment.children.dropLast(1)
             if(extsub.returns.size==assignmentTargets.size) {
-                // because we can only handle integer results right now we can just zip() it all up
-                val (statusFlagResults, registersResults) = extsub.returns.zip(assignmentTargets).partition { it.first.register.statusflag!=null }
-                if (statusFlagResults.isEmpty())
+                // Filter out void targets first, then separate by result type
+                val allResults = extsub.returns.zip(assignmentTargets)
+                val floatResults = allResults.filter { it.first.type.isFloat && !(it.second as PtAssignTarget).void }
+                val nonVoidResults = allResults.filter { !(it.second as PtAssignTarget).void && !it.first.type.isFloat }
+                val (statusFlagResults, registersResults) = nonVoidResults.partition { it.first.register.statusflag!=null }
+                val saveFlags = statusFlagResults.size > 1
+
+                // Check if we need to save A register before extracting status flags
+                // (flag extraction functions like assignCarryFlagResult overwrite A)
+                val hasByteInA = registersResults.any { (ret, _) ->
+                    ret.type.isByteOrBool && ret.register.registerOrPair == RegisterOrPair.A
+                }
+                if(hasByteInA && statusFlagResults.isNotEmpty()) {
+                    asmgen.out("  pha")  // Save A (contains return value) before flag extraction
+                }
+
+                // Save status flags first (before float MOVMF or other ops clobber them)
+                if(statusFlagResults.isNotEmpty()) {
+                    if(saveFlags) asmgen.out("  php")
+                    statusFlagResults.forEach { (returns, target) ->
+                        when(returns.register.statusflag) {
+                            Statusflag.Pc -> assignCarryFlagResult(target as PtAssignTarget)
+                            Statusflag.Pz -> assignZeroFlagResult(target as PtAssignTarget, saveFlags)
+                            Statusflag.Pn -> assignNegativeFlagResult(target as PtAssignTarget, saveFlags)
+                            Statusflag.Pv -> assignOverflowFlagResult(target as PtAssignTarget)
+                            else -> throw AssemblyError("unknown status flag")
+                        }
+                    }
+                    if(saveFlags) asmgen.out("  plp")
+                }
+
+                // Save float results (these use ldx/ldy/jsr which clobber flags)
+                floatResults.forEach { (returns, target) ->
+                    val asmTarget = AsmAssignTarget.fromAstAssignment(target as PtAssignTarget, target.definingISub(), asmgen)
+                    if(returns.register.registerOrPair == RegisterOrPair.FAC1) {
+                        assignFAC1float(asmTarget)
+                    } else if(returns.register.registerOrPair == RegisterOrPair.FAC2) {
+                        assignFAC2float(asmTarget)
+                    } else {
+                        throw AssemblyError("float result must be in FAC1 or FAC2")
+                    }
+                }
+
+                // Restore A if we saved it for flag extraction
+                if(hasByteInA && statusFlagResults.isNotEmpty()) {
+                    asmgen.out("  pla")
+                }
+
+                // Handle non-float register results (not status flags)
+                if(registersResults.isNotEmpty()) {
                     assignRegisterResults(registersResults)
-                else if(registersResults.isEmpty())
-                    assignOnlyTheStatusFlagsResults(false, statusFlagResults)
-                else
-                    assignStatusFlagsAndRegistersResults(statusFlagResults, registersResults)
+                }
             } else {
                 throw AssemblyError("number of values and targets don't match")
             }
-        } else {
-            val sub = asmgen.symbolTable.lookup(values.name) as? StSub
-            if(sub!=null) {
-                val scope = assignment.definingISub()
-                val source = AsmAssignSource.fromAstSource(assignment.children.last() as PtExpression, program, asmgen)
-                val targets = AsmAssignTarget.fromAstAssignmentMulti(assignment.children.dropLast(1).map { it as PtAssignTarget }, scope, asmgen)
-                val asmassign = AsmAssignment(source, targets, program.memsizer, assignment.position)
-                assignExpression(asmassign, scope)
-            }
-            else throw AssemblyError("expected extsub or normal sub")
-        }
-    }
-
-    private fun assignStatusFlagsAndRegistersResults(
-        statusFlagResults: List<Pair<StExtSubParameter, PtNode>>,
-        registersResults: List<Pair<StExtSubParameter, PtNode>>
-    ) {
-
-        fun needsToSaveA(registersResults: List<Pair<StExtSubParameter, PtNode>>): Boolean =
-            if(registersResults.isEmpty())
-                false
-            else if(registersResults.all { (it.second as PtAssignTarget).identifier!=null})
-                false
-            else
-                true
-
-        if(registersResults.all {
-                val tgt = it.second as PtAssignTarget
-                tgt.void || tgt.identifier!=null})
-        {
-            // all other results are just stored into identifiers directly so first handle those
-            // (simple store instructions that don't modify the carry flag)
-            assignRegisterResults(registersResults)
-            assignOnlyTheStatusFlagsResults(false, statusFlagResults)
-        } else {
-            val saveA = needsToSaveA(registersResults)
-            assignOnlyTheStatusFlagsResults(saveA, statusFlagResults)
-            assignRegisterResults(registersResults)
-        }
-    }
-
-    private fun assignOnlyTheStatusFlagsResults(saveA: Boolean, statusFlagResults: List<Pair<StExtSubParameter, PtNode>>) {
-        // assigning flags to their variables targets requires load-instructions that destroy flags
-        // so if there's more than 1, we need to save and restore the flags
-        val saveFlags = statusFlagResults.size>1
-
-        fun hasFlag(statusFlagResults: List<Pair<StExtSubParameter, PtNode>>, flag: Statusflag): PtAssignTarget? {
-            for ((returns, target) in statusFlagResults) {
-                if(returns.register.statusflag!! == flag)
-                    return target as PtAssignTarget
-            }
-            return null
-        }
-
-        val targetCarry = hasFlag(statusFlagResults, Statusflag.Pc)
-        val targetZero = hasFlag(statusFlagResults, Statusflag.Pz)
-        val targetNeg = hasFlag(statusFlagResults, Statusflag.Pn)
-        val targetOverflow = hasFlag(statusFlagResults, Statusflag.Pv)
-
-        if(saveA) asmgen.out("  pha")
-        if(targetZero!=null && !targetZero.void)
-            assignZeroFlagResult(targetZero, saveFlags)
-        if(targetNeg!=null && !targetNeg.void)
-            assignNegativeFlagResult(targetNeg, saveFlags)
-        if(targetCarry!=null && !targetCarry.void)
-            assignCarryFlagResult(targetCarry)
-        if(targetOverflow!=null && !targetOverflow.void)
-            assignOverflowFlagResult(targetOverflow)
-        if(saveA) asmgen.out("  pla")
+        } else if(thing?.type==StNodeType.SUBROUTINE || thing?.type==StNodeType.BUILTINFUNC) {
+            val scope = assignment.definingISub()
+            val source = AsmAssignSource.fromAstSource(assignment.children.last() as PtExpression, program, asmgen)
+            val targets = AsmAssignTarget.fromAstAssignmentMulti(assignment.children.dropLast(1).map { it as PtAssignTarget }, scope, asmgen)
+            val asmassign = AsmAssignment(source, targets, program.memsizer, assignment.position)
+            assignExpression(asmassign, scope)
+        } else throw AssemblyError("expected extsub or normal sub or builtinfunc")
     }
 
     private fun assignRegisterResults(registersResults: List<Pair<StExtSubParameter, PtNode>>) {
@@ -241,7 +227,7 @@ internal class AssignmentAsmGen(
                     }
                     targetDt.isByte -> assignVariableByte(assign.target, variable)
                     targetDt.isSignedWord -> assignVariableWord(assign.target, variable, assign.source.datatype)
-                    targetDt.isUnsignedWord -> {
+                    targetDt.isUnsignedWord || targetDt.isPointer -> {
                         if(assign.source.datatype.isPassByRef)
                             assignAddressOf(assign.target, variable, false, assign.source.datatype, assign.source.array ?: PtNumber(BaseDataType.UBYTE, 0.0, assign.position))
                         else
@@ -250,7 +236,6 @@ internal class AssignmentAsmGen(
                     targetDt.isLong -> assignVariableLong(assign.target, variable, assign.source.datatype)
                     targetDt.isFloat -> assignVariableFloat(assign.target, variable)
                     targetDt.isString -> assignVariableString(assign.target, variable)
-                    targetDt.isPointer -> assignVariableWord(assign.target, variable, assign.source.datatype)
                     else -> throw AssemblyError("unsupported assignment target type ${assign.target.datatype} ${assign.position}")
                 }
             }
@@ -259,13 +244,13 @@ internal class AssignmentAsmGen(
                 val elementDt = assign.source.datatype
                 val valueVar = value.variable
                 if(valueVar==null) {
-                    TODO("translate assignment of pointer ${value.position}")
+                    TODO("translate assignment of indexed ${elementDt} pointer ${value.position}")
                     return
                 }
                 val arrayVarName = asmgen.asmVariableName(valueVar)
 
                 if(valueVar.type.isPointer) {
-                    pointergen.assignIndexedPointer(assign.target, arrayVarName, value.index, valueVar.type)
+                    pointergen.assignIndexedPointer(assign.target, arrayVarName, value, valueVar.type)
                     return
                 }
 
@@ -376,7 +361,11 @@ internal class AssignmentAsmGen(
             if(result!=null) {
                 val addressOfIdentifier = (result.first as? PtAddressOf)?.identifier
                 if(addressOfIdentifier!=null) {
-                    val varname = asmgen.asmVariableName(addressOfIdentifier)
+                    var varname = asmgen.asmVariableName(addressOfIdentifier)
+                    if(addressOfIdentifier.type.isSplitWordArray) {
+                        val addrOf = result.first as PtAddressOf
+                        varname = if(addrOf.isMsbForSplitArray) varname+"_msb" else varname+"_lsb"
+                    }
                     if(result.second is PtNumber) {
                         val offset = (result.second as PtNumber).number.toInt()
                         asmgen.out("  lda  $varname+$offset")
@@ -503,13 +492,7 @@ internal class AssignmentAsmGen(
                     val identifier = value.identifier!!
                     val source = asmgen.symbolTable.lookup(identifier.name)
                     require(source !is StConstant) { "addressOf of a constant should have been rewritten to a simple addition expression" }
-                    val sourceName =
-                        if (value.isMsbForSplitArray)
-                            asmgen.asmSymbolName(identifier) + "_msb"
-                        else if (identifier.type.isSplitWordArray)
-                            asmgen.asmSymbolName(identifier) + "_lsb"  // the _lsb split array comes first in memory
-                        else
-                            asmgen.asmSymbolName(identifier)
+                    val sourceName = asmgen.asmSymbolName(identifier)
                     assignAddressOf(assign.target, sourceName, value.isMsbForSplitArray, identifier.type, value.arrayIndexExpr)
                 } else {
                     val ptrderef = value.dereference!!
@@ -537,7 +520,6 @@ internal class AssignmentAsmGen(
             is PtMemoryByte -> throw AssemblyError("source kind should have been memory")
             is PtTypeCast -> assignTypeCastedValue(assign.target, value.type, value.value, value)
             is PtFunctionCall -> assignFunctionCall(assign, value)
-            is PtBuiltinFunctionCall -> assignBuiltinFunctionCall(assign.target, value)
             is PtPrefix -> assignPrefixExpr(assign, value, scope)
             is PtContainmentCheck -> {
                 containmentCheckIntoA(value)
@@ -552,8 +534,12 @@ internal class AssignmentAsmGen(
                             asmgen.assignRegister(RegisterOrPair.A, assign.target)
                         }
                         dt.isWord ||dt.isPointer -> {
-                            asmgen.loadIndirectWord(zpPtrVar, offset)
-                            asmgen.assignRegister(RegisterOrPair.AY, assign.target)
+                            if(assign.target.register in arrayOf(RegisterOrPair.AX, RegisterOrPair.AY, RegisterOrPair.XY)) {
+                                asmgen.loadIndirectWordIntoRegisters(zpPtrVar, offset, assign.target.register!!)
+                            } else {
+                                asmgen.loadIndirectWordAY(zpPtrVar, offset)
+                                asmgen.assignRegister(RegisterOrPair.AY, assign.target)
+                            }
                         }
                         dt.isFloat -> {
                             asmgen.loadIndirectFloat(zpPtrVar, offset)
@@ -576,6 +562,12 @@ internal class AssignmentAsmGen(
             is PtIfExpression -> asmgen.assignIfExpression(assign.target, value)
             is PtBranchCondExpression -> asmgen.assignBranchCondExpression(assign.target, value)
             is PtPointerDeref -> pointergen.assignPointerDerefExpression(assign.target, value)
+            is PtConstant -> {
+                val slab = value.memorySlab
+                require(slab != null) { "remaining PtConstant in asmgen as assignment value can only be a memory slab reference at ${value.position}" }
+                val label = "$StMemorySlabBlockName.${slab.name}"
+                assignAddressOf(assign.target, label, false, DataType.UWORD, null)
+            }
             else -> throw AssemblyError("weird assignment value type $value")
         }
     }
@@ -674,83 +666,99 @@ internal class AssignmentAsmGen(
         }
     }
 
-    private fun assignBuiltinFunctionCall(target: AsmAssignTarget, value: PtBuiltinFunctionCall) {
-
-        if(value.name=="peekl" && target.kind==TargetStorageKind.VARIABLE) {
-            val arg = value.args[0]
-            if(arg is PtNumber) {
-                val address = arg.number.toInt()
-                asmgen.out("""
-                    lda  $address
-                    sta  ${target.asmVarname}
-                    lda  $address+1
-                    sta  ${target.asmVarname}+1
-                    lda  $address+2
-                    sta  ${target.asmVarname}+2
-                    lda  $address+3
-                    sta  ${target.asmVarname}+3""")
-                return
-            }
-            else if(arg is PtIdentifier) {
-                val varname = asmgen.asmVariableName(arg)
-                if(asmgen.isZpVar(arg)) {
-                    asmgen.out("""
-                        ldy  #0
-                        lda  ($varname),y
-                        sta  ${target.asmVarname}
-                        iny
-                        lda  ($varname),y
-                        sta  ${target.asmVarname}+1
-                        iny
-                        lda  ($varname),y
-                        sta  ${target.asmVarname}+2
-                        iny
-                        lda  ($varname),y
-                        sta  ${target.asmVarname}+3""")
-                    return
-                }
-            }
-        }
-
-        val returnDt = asmgen.translateBuiltinFunctionCallExpression(value, target.register)
-        if(target.register==null) {
-            // still need to assign the result to the target variable/etc.
-            when {
-                returnDt?.isByteOrBool==true -> assignRegisterByte(target, CpuRegister.A, returnDt.isSigned, false)            // function's byte result is in A
-                returnDt?.isWord==true -> assignRegisterpairWord(target, RegisterOrPair.AY)    // function's word result is in AY
-                returnDt==BaseDataType.STR -> {
-                    if (target.datatype.isUnsignedWord) assignRegisterpairWord(target, RegisterOrPair.AY)
-                    else throw AssemblyError("str return value type mismatch with target")
-                }
-                returnDt== BaseDataType.LONG -> {
-                    // longs are in R14:R15 (r14=lsw, r15=msw)
-                    assignRegisterLong(target, RegisterOrPair.R14R15)
-                }
-                returnDt==BaseDataType.FLOAT -> {
-                    // float result from function sits in FAC1
-                    assignFAC1float(target)
-                }
-                else -> throw AssemblyError("weird result type")
-            }
-        }
-    }
-
     private fun assignFunctionCall(assign: AsmAssignment, value: PtFunctionCall) {
         val symbol = asmgen.symbolTable.lookup(value.name)
-        val sub = symbol!!.astNode as IPtSubroutine
+        if(symbol!!.type==StNodeType.BUILTINFUNC) {
+            // builtin function call
+
+            if (value.type.isLong && assign.targets.single().kind == TargetStorageKind.VARIABLE) {
+
+                val targetVarName = assign.targets.single().asmVarname
+
+                fun handleResultInRegister(resultReg: Array<RegisterOrPair>) {
+                    resultReg.singleOrNull()?.let {
+                        asmgen.out("  ;--REG TO VAR")
+                        asmgen.assignRegister(it, assign.targets[0])
+                        asmgen.out("  ;--REG TO VAR DONE")
+                    }
+                }
+                
+                when(value.name) {
+                    "peekl" -> {
+                        val resultInRegister = asmgen.builtinFunctionsAsmGen.funcPeekL(value, targetVarName)
+                        return handleResultInRegister(resultInRegister)
+                    }
+                    "mklong" -> {
+                        val resultInRegister = asmgen.builtinFunctionsAsmGen.funcMklong(value, RegisterOrPair.R14R15, targetVarName)
+                        return handleResultInRegister(resultInRegister)
+                    }
+                    "mklong2" -> {
+                        val resultInRegister = asmgen.builtinFunctionsAsmGen.funcMklong(value, RegisterOrPair.R14R15, targetVarName)
+                        return handleResultInRegister(resultInRegister)
+                    }
+                }
+            }
+
+            if(value.name=="lmh") {
+                // avoid temporary variable use when assigning lmh results
+                val arg = value.args.single()
+                if(arg is PtIdentifier) {
+                    val (targetL, targetM, targetH) = assign.targets
+                    val acceptedTargets = arrayOf(TargetStorageKind.VARIABLE, TargetStorageKind.VOID)
+                    if(targetL.kind in acceptedTargets && targetM.kind in acceptedTargets && targetH.kind in acceptedTargets) {
+                        val varname = asmgen.asmVariableName(arg)
+                        if(targetL.kind==TargetStorageKind.VARIABLE) asmgen.out("  lda  $varname |  sta  ${targetL.asmVarname}")
+                        if(targetM.kind==TargetStorageKind.VARIABLE) asmgen.out("  lda  $varname+1 |  sta  ${targetM.asmVarname}")
+                        if(targetH.kind==TargetStorageKind.VARIABLE) asmgen.out("  lda  $varname+2 |  sta  ${targetH.asmVarname}")
+                        return
+                    }
+                }
+            }
+
+            // TODO optimized float functions into variable? (to avoid needless FAC1 register copying?)
+
+            val firstTarget = assign.targets.firstOrNull()
+            val actualResultRegisters = asmgen.translateBuiltinFunctionCallExpression(value, firstTarget?.register)
+
+            require(actualResultRegisters.size==assign.targets.size) { "builtin function call should have same number return values as assignment targets ${value.position}" }
+//            assign.targets.zip(actualResultRegisters).forEach { (target, register) ->
+//                if(target.kind==TargetStorageKind.REGISTER) {
+//                    if(target.register!! != register) {
+//                        println("OPTIMIZE: ${value.name} builtin func output register mismatch ${target.register}  got $register  ${value.position}")
+//                    }
+//                }
+//            }
+
+            if(assign.targets.size>1) {
+                assign.targets.zip(actualResultRegisters)
+                    .filter { it.first.kind != TargetStorageKind.VOID }
+                    .forEach { target -> asmgen.assignRegister(target.second, target.first) }
+            } else if(actualResultRegisters.isNotEmpty() && assign.targets.single().kind != TargetStorageKind.VOID) {
+                val target = assign.targets.single()
+                if(target.kind != TargetStorageKind.VOID) {
+                    asmgen.assignRegister(actualResultRegisters.single(), target)
+                }
+            }
+            return
+        }
+
+        // regular subroutine call
+        val sub = symbol.astNode as IPtSubroutine
+        val returns = sub.returnsWhatWhere()
         asmgen.translateFunctionCall(value)
         if(sub is PtSub && sub.signature.returns.size>1) {
             // note: multi-value returns are passed throug A or AY (for the first value) then cx16.R15 down to R0
             // (this allows unencumbered use of many Rx registers if you don't return that many values)
-            val returnRegs = sub.returnsWhatWhere()
-            assign.targets.zip(returnRegs).forEach { target ->
+            assign.targets.zip(returns).forEach { target ->
                 if(target.first.kind != TargetStorageKind.VOID) {
                     asmgen.assignRegister(target.second.first.registerOrPair!!, target.first)
                 }
             }
         } else {
             val target = assign.target
-            val returnValue = sub.returnsWhatWhere().singleOrNull { it.first.registerOrPair!=null } ?: sub.returnsWhatWhere().single { it.first.statusflag!=null }
+            if(target.kind==TargetStorageKind.VOID)
+                return
+            val returnValue = returns.singleOrNull { it.first.registerOrPair!=null } ?: returns.single { it.first.statusflag!=null }
             when {
                 returnValue.second.isString -> {
                     val targetDt = target.datatype
@@ -855,12 +863,8 @@ internal class AssignmentAsmGen(
 
         return if(translatedOk)
             true
-        else {
-            if(expr.type.isLong && expr.operator in "*/%")
-                TODO("long multiplication or division - use floats for now ${expr.position} ")
-
+        else
             anyExprGen.assignAnyExpressionUsingStack(expr, assign)
-        }
     }
 
     private fun optimizedComparison(expr: PtBinaryExpression, assign: AsmAssignment): Boolean {
@@ -992,12 +996,12 @@ internal class AssignmentAsmGen(
                 && expr.right.type.isWord) {
                 // word X>Y -> X<Y, X<=Y -> Y>=X  , easier to do in 6502  (codegen also expects these to no longe exist!)
                 exprClone = PtBinaryExpression(if(expr.operator==">") "<" else ">=", expr.type, expr.position)
-                exprClone.children.add(expr.children[1]) // doesn't seem to need a deep clone
-                exprClone.children.add(expr.children[0]) // doesn't seem to need a deep clone
+                exprClone.add(expr.children[1]) // doesn't seem to need a deep clone
+                exprClone.add(expr.children[0]) // doesn't seem to need a deep clone
             } else {
                 exprClone = PtBinaryExpression(expr.operator, expr.type, expr.position)
-                exprClone.children.add(expr.children[0]) // doesn't seem to need a deep clone
-                exprClone.children.add(expr.children[1]) // doesn't seem to need a deep clone
+                exprClone.add(expr.children[0]) // doesn't seem to need a deep clone
+                exprClone.add(expr.children[1]) // doesn't seem to need a deep clone
             }
             ifelse.add(exprClone)
             ifelse.add(ifPart)
@@ -1080,12 +1084,12 @@ internal class AssignmentAsmGen(
             && expr.right.type.isWord) {
             // word X>Y -> X<Y, X<=Y -> Y>=X  , easier to do in 6502  (codegen also expects these to no longe exist!)
             exprClone = PtBinaryExpression(if(expr.operator==">") "<" else ">=", expr.type, expr.position)
-            exprClone.children.add(expr.children[1]) // doesn't seem to need a deep clone
-            exprClone.children.add(expr.children[0]) // doesn't seem to need a deep clone
+            exprClone.add(expr.children[1]) // doesn't seem to need a deep clone
+            exprClone.add(expr.children[0]) // doesn't seem to need a deep clone
         } else {
             exprClone = PtBinaryExpression(expr.operator, expr.type, expr.position)
-            exprClone.children.add(expr.children[0]) // doesn't seem to need a deep clone
-            exprClone.children.add(expr.children[1]) // doesn't seem to need a deep clone
+            exprClone.add(expr.children[0]) // doesn't seem to need a deep clone
+            exprClone.add(expr.children[1]) // doesn't seem to need a deep clone
         }
         ifelse.add(exprClone)
         ifelse.add(ifPart)
@@ -1100,7 +1104,7 @@ internal class AssignmentAsmGen(
             is PtIdentifier -> true
             is PtIrRegister -> true
             is PtNumber -> true
-            is PtBuiltinFunctionCall -> expr.name in arrayOf("lsb", "msb")
+            is PtFunctionCall -> expr.builtin && expr.name in arrayOf("lsb", "msb")
             else -> false
         }
     }
@@ -1124,6 +1128,35 @@ internal class AssignmentAsmGen(
                 asmgen.out("  jsr  prog8_math.divmod_uw_asm")
                 assignVariableWord(target, "P8ZP_SCRATCH_W2", DataType.UWORD)
                 return true
+            }
+            expr.type.isSignedByte -> {
+                asmgen.errors.err("remainder can only be used on unsigned integer operands on 6502 target for now", expr.right.position)
+                return true
+                // TODO implement the signed remainder asm routine
+//                assignExpressionToRegister(expr.left, RegisterOrPair.A, true)
+//                if(!directIntoY(expr.right)) asmgen.out("  pha")
+//                assignExpressionToRegister(expr.right, RegisterOrPair.Y, true)
+//                if(!directIntoY(expr.right)) asmgen.out("  pla")
+//                asmgen.out("  jsr  prog8_math.divmod_b_asm")
+//                if(target.register==RegisterOrPair.A)
+//                    asmgen.out("  cmp  #0")     // fix the status register
+//                else
+//                    assignRegisterByte(target, CpuRegister.A, true, true)
+//                return true
+            }
+            expr.type.isSignedWord -> {
+                asmgen.errors.err("remainder can only be used on unsigned integer operands on 6502 target for now", expr.right.position)
+                return true
+                // TODO implement the signed remainder asm routine
+//                asmgen.assignWordOperandsToAYAndVar(expr.right, expr.left, "P8ZP_SCRATCH_W1")
+//                asmgen.out("  jsr  prog8_math.divmod_w_asm")
+//                assignVariableWord(target, "cx16.r15", DataType.WORD)
+//                return true
+            }
+            expr.type.isLong -> {
+                asmgen.errors.err("remainder can only be used on unsigned integer operands on 6502 target for now", expr.right.position)
+                return true
+                // TODO implement the signed long remainder asm routine
             }
             else -> return false
         }
@@ -1160,6 +1193,17 @@ internal class AssignmentAsmGen(
                 asmgen.assignWordOperandsToAYAndVar(expr.right, expr.left, "P8ZP_SCRATCH_W1")
                 asmgen.out("  jsr  prog8_math.divmod_w_asm")
                 assignRegisterpairWord(target, RegisterOrPair.AY)
+                return true
+            }
+            expr.type.isLong -> {
+                asmgen.assignExpressionToRegister(expr.left, RegisterOrPair.R12R13, true)
+                if(!isRightTrivial(expr.right))
+                    asmgen.pushLongRegisters(RegisterOrPair.R12R13, 1)
+                asmgen.assignExpressionToRegister(expr.right, RegisterOrPair.R14R15, true)
+                if(!isRightTrivial(expr.right))
+                    asmgen.popLongRegisters(RegisterOrPair.R12R13, 1)
+                asmgen.out("  jsr  prog8_math.div_longs")
+                assignRegisterLong(target, RegisterOrPair.R14R15)
                 return true
             }
             else -> return false
@@ -1202,6 +1246,17 @@ internal class AssignmentAsmGen(
                         asmgen.out("  jsr  prog8_math.multiply_words")
                         assignRegisterpairWord(target, RegisterOrPair.AY)
                     }
+                    return true
+                }
+                expr.type.isLong -> {
+                    asmgen.assignExpressionToRegister(expr.left, RegisterOrPair.R12R13, true)
+                    if(!isRightTrivial(expr.right))
+                        asmgen.pushLongRegisters(RegisterOrPair.R12R13, 1)
+                    asmgen.assignExpressionToRegister(expr.right, RegisterOrPair.R14R15, true)
+                    if(!isRightTrivial(expr.right))
+                        asmgen.popLongRegisters(RegisterOrPair.R12R13, 1)
+                    asmgen.out("  jsr  prog8_math.multiply_longs")
+                    assignRegisterLong(target, RegisterOrPair.R14R15)
                     return true
                 }
                 else -> return false
@@ -1265,6 +1320,17 @@ internal class AssignmentAsmGen(
                         }
                     }
                     assignRegisterpairWord(target, RegisterOrPair.AY)
+                    return true
+                }
+                expr.type.isLong -> {
+                    // long * constant
+                    asmgen.assignExpressionToRegister(expr.left, RegisterOrPair.R12R13, true)
+                    asmgen.out("  lda  #<${value} |  sta  cx16.r14")
+                    asmgen.out("  lda  #>${value} |  sta  cx16.r14+1")
+                    asmgen.out("  lda  #<(${value}>>16) |  sta  cx16.r15")
+                    asmgen.out("  lda  #>(${value}>>16) |  sta  cx16.r15+1")
+                    asmgen.out("  jsr  prog8_math.multiply_longs")
+                    assignRegisterLong(target, RegisterOrPair.R14R15)
                     return true
                 }
                 else -> return false
@@ -1486,8 +1552,30 @@ internal class AssignmentAsmGen(
         return false
     }
 
+    private fun getIdentForNoopCastOrIdent(expr: PtExpression): Pair<String, DataType>? {
+        // Returns the variable name and type if the expression is:
+        // 1. A plain identifier (returns its name and type)
+        // 2. A no-op type cast (word<->uword) - unwraps and returns the inner identifier
+        // Otherwise returns null
+        val identifier = when (expr) {
+            is PtIdentifier -> expr
+            is PtTypeCast -> {
+                // Check if this is a no-op cast (word<->uword)
+                if (expr.value is PtIdentifier &&
+                    ((expr.type.isWord && expr.value.type.isUnsignedWord) ||
+                     (expr.type.isUnsignedWord && expr.value.type.isWord) ||
+                     (expr.type.isByte && expr.value.type.isByte))) {
+                    expr.value as PtIdentifier
+                } else {
+                    return null
+                }
+            }
+            else -> return null
+        }
+        return Pair(asmgen.asmVariableName(identifier), identifier.type)
+    }
+
     private fun optimizedPlusMinExpr(expr: PtBinaryExpression, target: AsmAssignTarget): Boolean {
-        // TODO can this use the target directly as intermediate, when it's a variable?  To save the final assignRegister call.
         val dt = expr.type
         val left = expr.left
         val right = expr.right
@@ -1583,32 +1671,42 @@ internal class AssignmentAsmGen(
         } else if(dt.isWord || dt.isPointer) {
 
             fun doAddOrSubWordExpr() {
-                if(expr.operator=="+" && expr.left.type.isWord && expr.left is PtIdentifier) {
-                    val symname = asmgen.asmVariableName(expr.left as PtIdentifier)
+                val leftAddr = asmgen.getStaticAddressLowHigh(expr.left)
+                val rightAddr = asmgen.getStaticAddressLowHigh(expr.right)
+
+                if (expr.operator == "+" && leftAddr != null) {
                     assignExpressionToRegister(expr.right, RegisterOrPair.AY, expr.right.type.isSigned)
                     asmgen.out("""
                             clc
-                            adc  $symname
+                            adc  ${leftAddr.first}
                             tax
                             tya
-                            adc  $symname+1
+                            adc  ${leftAddr.second}
                             tay
                             txa""")
-                }
-                else if(expr.operator=="-" && expr.right.type.isWord && expr.right is PtIdentifier) {
-                    val symname = asmgen.asmVariableName(expr.right as PtIdentifier)
+                } else if (expr.operator == "+" && rightAddr != null) {
+                    assignExpressionToRegister(expr.left, RegisterOrPair.AY, expr.left.type.isSigned)
+                    asmgen.out("""
+                            clc
+                            adc  ${rightAddr.first}
+                            tax
+                            tya
+                            adc  ${rightAddr.second}
+                            tay
+                            txa""")
+                } else if (expr.operator == "-" && rightAddr != null) {
                     assignExpressionToRegister(expr.left, RegisterOrPair.AY, expr.left.type.isSigned)
                     asmgen.out("""
                             sec
-                            sbc  $symname
+                            sbc  ${rightAddr.first}
                             tax
                             tya
-                            sbc  $symname+1
+                            sbc  ${rightAddr.second}
                             tay
                             txa""")
                 } else {
                     asmgen.assignWordOperandsToAYAndVar(expr.left, expr.right, "P8ZP_SCRATCH_W1")
-                    if(expr.operator=="+")
+                    if (expr.operator == "+")
                         asmgen.out("""
                                     clc
                                     adc  P8ZP_SCRATCH_W1
@@ -1628,6 +1726,66 @@ internal class AssignmentAsmGen(
                                     txa""")
                 }
                 assignRegisterpairWord(target, RegisterOrPair.AY)
+            }
+
+            // Handle when left is PtAddressOf of a split word array
+            val leftAddressOf = left as? PtAddressOf
+            if(leftAddressOf!=null && leftAddressOf.identifier!=null && !leftAddressOf.isFromArrayElement && leftAddressOf.dereference==null) {
+                if(leftAddressOf.identifier!!.type.isSplitWordArray) {
+                    var symbol = asmgen.asmVariableName(leftAddressOf.identifier!!)
+                    symbol = if(leftAddressOf.isMsbForSplitArray) symbol+"_msb" else symbol+"_lsb"
+                    assignExpressionToRegister(right, RegisterOrPair.AY, right.type.isSigned)
+                    if(expr.operator=="+")
+                        asmgen.out("""
+                                clc
+                                adc  #<$symbol
+                                tax
+                                tya
+                                adc  #>$symbol
+                                tay
+                                txa""")
+                    else
+                        asmgen.out("""
+                                sec
+                                sbc  #<$symbol
+                                tax
+                                tya
+                                sbc  #>$symbol
+                                tay
+                                txa""")
+                    assignRegisterpairWord(target, RegisterOrPair.AY)
+                    return true
+                }
+            }
+
+            // Memory-to-memory optimization: when both operands and target are static variables
+            // Also handles no-op type casts (word<->uword) by unwrapping them
+            if(target.kind == TargetStorageKind.VARIABLE) {
+                val leftInfo = getIdentForNoopCastOrIdent(expr.left)
+                val rightInfo = getIdentForNoopCastOrIdent(expr.right)
+                if(leftInfo!=null && rightInfo!=null) {
+                    val targetSym = target.asmVarname
+                    if(expr.operator=="+") {
+                        asmgen.out("""
+                                lda  ${leftInfo.first}
+                                clc
+                                adc  ${rightInfo.first}
+                                sta  $targetSym
+                                lda  ${leftInfo.first}+1
+                                adc  ${rightInfo.first}+1
+                                sta  $targetSym+1""")
+                    } else {
+                        asmgen.out("""
+                                lda  ${leftInfo.first}
+                                sec
+                                sbc  ${rightInfo.first}
+                                sta  $targetSym
+                                lda  ${leftInfo.first}+1
+                                sbc  ${rightInfo.first}+1
+                                sta  $targetSym+1""")
+                    }
+                    return true
+                }
             }
 
             when (right) {
@@ -1686,6 +1844,34 @@ internal class AssignmentAsmGen(
                                 tay
                                 txa""")
                     assignRegisterpairWord(target, RegisterOrPair.AY)
+                    return true
+                }
+                is PtConstant -> {
+                    val addr = asmgen.getStaticAddressLowHigh(right)
+                    if (addr != null) {
+                        assignExpressionToRegister(left, RegisterOrPair.AY, dt.isSigned)
+                        if (expr.operator == "+")
+                            asmgen.out("""
+                                clc
+                                adc  ${addr.first}
+                                tax
+                                tya
+                                adc  ${addr.second}
+                                tay
+                                txa""")
+                        else
+                            asmgen.out("""
+                                sec
+                                sbc  ${addr.first}
+                                tax
+                                tya
+                                sbc  ${addr.second}
+                                tay
+                                txa""")
+                        assignRegisterpairWord(target, RegisterOrPair.AY)
+                        return true
+                    }
+                    doAddOrSubWordExpr()
                     return true
                 }
                 is PtNumber -> {
@@ -2005,13 +2191,17 @@ internal class AssignmentAsmGen(
                 else
                     asmgen.pushLongRegisters(RegisterOrPair.R12R13, 2)
                 assignExpressionToRegister(expr.left, RegisterOrPair.R14R15, expr.left.type.isSigned)
+                // save left operand because right eval may clobber R14R15
+                asmgen.pushLongRegisters(RegisterOrPair.R14R15, 1)
                 assignExpressionToRegister(expr.right, RegisterOrPair.R12R13, expr.right.type.isSigned)
+                // restore left operand
+                asmgen.popLongRegisters(RegisterOrPair.R14R15, 1)
                 augmentableAsmGen.inplacemodificationLongWithVariable("cx16.r14", expr.operator, "cx16.r12")
                 assignRegisterLong(target, RegisterOrPair.R14R15)
                 if(targetreg==RegisterOrPair.R14R15)
                     asmgen.popLongRegisters(RegisterOrPair.R12R13, 1)
                 else
-                    asmgen.popLongRegisters(RegisterOrPair.R14R15, 2)
+                    asmgen.popLongRegisters(RegisterOrPair.R12R13, 2)
                 return true
             }
         }
@@ -2189,8 +2379,12 @@ internal class AssignmentAsmGen(
             else if(varname!=null)
                 augmentableAsmGen.inplacemodificationLongWithVariable("cx16.r14", expr.operator, varname)
             else {
-                // TODO: preserve R14:R15 on stack here?  (the function does't do it for us)
-                augmentableAsmGen.inplacemodificationLongWithExpression("cx16.r14", expr.operator, expr.right)
+                if(!isRightTrivial(expr.right))
+                    asmgen.pushLongRegisters(RegisterOrPair.R14R15, 1)
+                assignExpressionToRegister(expr.right, RegisterOrPair.R12R13, expr.right.type.isSigned)
+                if(!isRightTrivial(expr.right))
+                    asmgen.popLongRegisters(RegisterOrPair.R14R15, 1)
+                augmentableAsmGen.inplacemodificationLongWithVariable("cx16.r14", expr.operator, "cx16.r12")
             }
             assignRegisterLong(target, RegisterOrPair.R14R15)
             if(targetreg!=RegisterOrPair.R14R15) {
@@ -2231,7 +2425,32 @@ internal class AssignmentAsmGen(
 
             assignExpressionToRegister(left, RegisterOrPair.A, false)
             when(right) {
-                is PtBool -> throw AssemblyError("bool literal in logical expr should have been optimized away")
+                is PtBool -> {
+                    // Handle boolean literals that weren't optimized away (e.g., with -noopt)
+                    when {
+                        operator == "and" && right.value -> {
+                            // left AND true = left (already in A, do nothing)
+                        }
+                        operator == "and" && !right.value -> {
+                            // left AND false = false
+                            asmgen.out("  lda  #0")
+                        }
+                        operator == "or" && right.value -> {
+                            // left OR true = true
+                            asmgen.out("  lda  #1")
+                        }
+                        operator == "or" && !right.value -> {
+                            // left OR false = left (already in A, do nothing)
+                        }
+                        operator == "xor" && right.value -> {
+                            // left XOR true = NOT left (invert low bit)
+                            asmgen.out("  eor  #1")
+                        }
+                        operator == "xor" && !right.value -> {
+                            // left XOR false = left (already in A, do nothing)
+                        }
+                    }
+                }
                 is PtIdentifier -> {
                     val varname = asmgen.asmVariableName(right)
                     when (operator) {
@@ -2278,10 +2497,13 @@ internal class AssignmentAsmGen(
         fun requiresCmp(expr: PtExpression) =
             when (expr) {
                 is PtFunctionCall -> {
-                    val function = asmgen.symbolTable.lookup(expr.name)
-                    function is StExtSub        // don't assume the extsub/asmsub has set the cpu flags correctly on exit, add an explicit cmp
+                    if(expr.builtin)
+                        true
+                    else {
+                        val function = asmgen.symbolTable.lookup(expr.name)
+                        function is StExtSub        // don't assume the extsub/asmsub has set the cpu flags correctly on exit, add an explicit cmp
+                    }
                 }
-                is PtBuiltinFunctionCall -> true
                 is PtIfExpression -> true
                 else -> false
             }
@@ -2968,7 +3190,7 @@ $endLabel""")
     }
 
     private fun assignCastWordViaLsbFunc(value: PtExpression, target: AsmAssignTarget) {
-        val lsb = PtBuiltinFunctionCall("lsb", false, true, DataType.UBYTE, value.position)
+        val lsb = PtFunctionCall("lsb", true, true,arrayOf(DataType.UBYTE), value.position)
         lsb.parent = value.parent
         lsb.add(value)
         val src = AsmAssignSource(SourceStorageKind.EXPRESSION, program, asmgen, DataType.UBYTE, expression = lsb)
@@ -2977,7 +3199,7 @@ $endLabel""")
     }
 
     private fun assignCastViaLswFunc(value: PtExpression, target: AsmAssignTarget) {
-        val lsb = PtBuiltinFunctionCall("lsw", false, true, DataType.UWORD, value.position)
+        val lsb = PtFunctionCall("lsw", true, true, arrayOf(DataType.UWORD), value.position)
         lsb.parent = value.parent
         lsb.add(value)
         val src = AsmAssignSource(SourceStorageKind.EXPRESSION, program, asmgen, DataType.UWORD, expression = lsb)
@@ -3432,17 +3654,26 @@ $endLabel""")
     }
 
     private fun assignAddressOf(target: AsmAssignTarget, sourceName: String, msb: Boolean, arrayDt: DataType?, arrayIndexExpr: PtExpression?) {
+        var actualSourceName = sourceName
+        var actualMsb = msb
+        if (arrayDt?.isSplitWordArray == true) {
+            if (!sourceName.endsWith("_lsb") && !sourceName.endsWith("_msb")) {
+                actualSourceName = if (msb) sourceName + "_msb" else sourceName + "_lsb"
+            }
+            actualMsb = false
+        }
+
         if(arrayIndexExpr!=null) {
             if(arrayDt?.isPointer==true) {
-                require(!msb)
-                return pointergen.assignAddressOfIndexedPointer(target, sourceName, arrayDt, arrayIndexExpr)
+                require(!actualMsb)
+                return pointergen.assignAddressOfIndexedPointer(target, actualSourceName, arrayDt, arrayIndexExpr)
             }
             val constIndex = arrayIndexExpr.asConstInteger()
             if(constIndex!=null) {
                 if (arrayDt!!.isUnsignedWord) {
                     // using a UWORD pointer with array indexing, always bytes
-                    require(!msb)
-                    assignVariableToRegister(sourceName, RegisterOrPair.AY, false, arrayIndexExpr.definingISub(), arrayIndexExpr.position)
+                    require(!actualMsb)
+                    assignVariableToRegister(actualSourceName, RegisterOrPair.AY, false, arrayIndexExpr.definingISub(), arrayIndexExpr.position)
                     if(constIndex in 1..255)
                         asmgen.out("""
                             clc
@@ -3464,9 +3695,9 @@ $endLabel""")
                 else {
                     if(constIndex>0) {
                         val offset = if(arrayDt.isSplitWordArray) constIndex else program.memsizer.memorySize(arrayDt, constIndex)  // add arrayIndexExpr * elementsize  to the address of the array variable.
-                        asmgen.out("  lda  #<($sourceName + $offset) |  ldy  #>($sourceName + $offset)")
+                        asmgen.out("  lda  #<($actualSourceName + $offset) |  ldy  #>($actualSourceName + $offset)")
                     } else {
-                        asmgen.out("  lda  #<$sourceName |  ldy  #>$sourceName")
+                        asmgen.out("  lda  #<$actualSourceName |  ldy  #>$actualSourceName")
                     }
                 }
                 assignRegisterpairWord(target, RegisterOrPair.AY)
@@ -3474,8 +3705,8 @@ $endLabel""")
             } else {
                 if (arrayDt!!.isUnsignedWord) {
                     // using a UWORD pointer with array indexing, always bytes
-                    require(!msb)
-                    assignVariableToRegister(sourceName, RegisterOrPair.AY, false, arrayIndexExpr.definingISub(), arrayIndexExpr.position)
+                    require(!actualMsb)
+                    assignVariableToRegister(actualSourceName, RegisterOrPair.AY, false, arrayIndexExpr.definingISub(), arrayIndexExpr.position)
                     asmgen.saveRegisterStack(CpuRegister.A, false)
                     asmgen.saveRegisterStack(CpuRegister.Y, false)
                     if(arrayIndexExpr.type.isWord) {
@@ -3517,7 +3748,7 @@ $endLabel""")
                             asmgen.out("  asl  a")
                         }
                     } else if(subtype==BaseDataType.FLOAT) {
-                        if(asmgen.options.compTarget.FLOAT_MEM_SIZE != 5)
+                        if(asmgen.options.compTarget.FLOAT_MEM_SIZE != 5u)
                             TODO("support float size other than 5 ${arrayIndexExpr.position}")
                         asmgen.out("""
                             sta  P8ZP_SCRATCH_REG
@@ -3528,9 +3759,9 @@ $endLabel""")
                         )
                     } else throw AssemblyError("weird type $subtype")
                     asmgen.out("""
-                        ldy  #>$sourceName
+                        ldy  #>$actualSourceName
                         clc
-                        adc  #<$sourceName
+                        adc  #<$actualSourceName
                         bcc  +
                         iny
 +""")
@@ -3541,12 +3772,12 @@ $endLabel""")
         }
 
         // address of a normal variable
-        require(!msb)
+        require(!actualMsb)
         when(target.kind) {
             TargetStorageKind.VARIABLE -> {
                 asmgen.out("""
-                        lda  #<$sourceName
-                        ldy  #>$sourceName
+                        lda  #<$actualSourceName
+                        ldy  #>$actualSourceName
                         sta  ${target.asmVarname}
                         sty  ${target.asmVarname}+1""")
             }
@@ -3554,25 +3785,25 @@ $endLabel""")
                 throw AssemblyError("can't store word into memory byte")
             }
             TargetStorageKind.ARRAY -> {
-                asmgen.out("  lda  #<$sourceName |  ldy  #>$sourceName")
+                asmgen.out("  lda  #<$actualSourceName |  ldy  #>$actualSourceName")
                 assignRegisterpairWord(target, RegisterOrPair.AY)
             }
             TargetStorageKind.REGISTER -> {
                 when(target.register!!) {
-                    RegisterOrPair.AX -> asmgen.out("  ldx  #>$sourceName |  lda  #<$sourceName")
-                    RegisterOrPair.AY -> asmgen.out("  ldy  #>$sourceName |  lda  #<$sourceName")
-                    RegisterOrPair.XY -> asmgen.out("  ldy  #>$sourceName |  ldx  #<$sourceName")
+                    RegisterOrPair.AX -> asmgen.out("  ldx  #>$actualSourceName |  lda  #<$actualSourceName")
+                    RegisterOrPair.AY -> asmgen.out("  ldy  #>$actualSourceName |  lda  #<$actualSourceName")
+                    RegisterOrPair.XY -> asmgen.out("  ldy  #>$actualSourceName |  ldx  #<$actualSourceName")
                     in Cx16VirtualRegisters -> {
                         asmgen.out("""
-                            lda  #<$sourceName
-                            ldy  #>$sourceName
+                            lda  #<$actualSourceName
+                            ldy  #>$actualSourceName
                             sta  cx16.${target.register.toString().lowercase()}
                             sty  cx16.${target.register.toString().lowercase()}+1""")
                     }
                     else -> throw AssemblyError("can only load address into 16 bit register")
                 }
             }
-            TargetStorageKind.POINTER -> pointergen.assignAddressOf(PtrTarget(target), sourceName)
+            TargetStorageKind.POINTER -> pointergen.assignAddressOf(PtrTarget(target), actualSourceName)
             TargetStorageKind.VOID -> { /* do nothing */ }
         }
     }
@@ -3610,15 +3841,13 @@ $endLabel""")
                         TODO("ubyte to long var ${target.position}")
                     }
                     DataType.LONG -> {
+                        // Long to long variable copy - use loop
                         asmgen.out("""
-                            lda  $varName
-                            sta  ${target.asmVarname}
-                            lda  $varName+1
-                            sta  ${target.asmVarname}+1
-                            lda  $varName+2
-                            sta  ${target.asmVarname}+2
-                            lda  $varName+3
-                            sta  ${target.asmVarname}+3""")
+                            ldy  #3
+-                           lda  $varName,y
+                            sta  ${target.asmVarname},y
+                            dey
+                            bpl  -""")
                     }
                     else -> throw AssemblyError("wrong dt ${target.position}")
                 }
@@ -3756,7 +3985,12 @@ $endLabel""")
             assignRegisterpairWord(target, RegisterOrPair.AY)
             return
         }
-        require(sourceDt.isWord || sourceDt.isUnsignedByte || sourceDt.isBool || sourceDt.isPointer) { "weird source dt for word variable" }
+        require(sourceDt.isWord || sourceDt.isUnsignedByte || sourceDt.isBool || sourceDt.isPointer) {
+            if(sourceDt.isString)
+                "str source type for word variable should have been uword or ^^ubyte, a && is likely missing on the source variable $sourceDt ${target.position}"
+            else
+                "weird source dt for word variable: $sourceDt ${target.position}"
+        }
         when(target.kind) {
             TargetStorageKind.VARIABLE -> {
                 if(sourceDt.isUnsignedByte || sourceDt.isBool) {
@@ -4237,14 +4471,11 @@ $endLabel""")
                 if(pairedRegisters in CombinedLongRegisters) {
                     val startreg = pairedRegisters.startregname()
                     asmgen.out("""
-                        lda  cx16.$startreg
-                        sta  ${target.asmVarname}
-                        lda  cx16.$startreg+1
-                        sta  ${target.asmVarname}+1
-                        lda  cx16.$startreg+2
-                        sta  ${target.asmVarname}+2
-                        lda  cx16.$startreg+3
-                        sta  ${target.asmVarname}+3""")
+                        ldy  #3
+-                       lda  cx16.$startreg,y
+                        sta  ${target.asmVarname},y
+                        dey
+                        bpl  -""")
                 }
                 else throw AssemblyError("only combined vreg allowed as long target ${target.position}")
             }
@@ -4252,6 +4483,7 @@ $endLabel""")
                 asmgen.loadScaledArrayIndexIntoRegister(target.array!!, CpuRegister.Y)
                 val arrayVarName = asmgen.asmSymbolName(target.array.variable!!)
                 val startreg = pairedRegisters.startregname()
+                // Unrolled copy to preserve array index in Y
                 asmgen.out("""
                     lda  cx16.$startreg
                     sta  $arrayVarName,y
@@ -4269,15 +4501,13 @@ $endLabel""")
                 if(targetreg!=pairedRegisters) {
                     val sourceStartReg = pairedRegisters.startregname()
                     val targetStartReg = targetreg.startregname()
+                    // Loop-based copy between register pairs
                     asmgen.out("""
-                        lda  cx16.$sourceStartReg
-                        sta  cx16.$targetStartReg
-                        lda  cx16.$sourceStartReg+1
-                        sta  cx16.$targetStartReg+1
-                        lda  cx16.$sourceStartReg+2
-                        sta  cx16.$targetStartReg+2
-                        lda  cx16.$sourceStartReg+3
-                        sta  cx16.$targetStartReg+3""")
+                        ldy  #3
+-                       lda  cx16.$sourceStartReg,y
+                        sta  cx16.$targetStartReg,y
+                        dey
+                        bpl  -""")
                 }
             }
             TargetStorageKind.POINTER -> {
@@ -5312,7 +5542,11 @@ $endLabel""")
                 } else if(addressOf.dereference!=null) {
                     throw AssemblyError("write &dereference, makes no sense at ${addressOf.position}")
                 } else {
-                    asmgen.out("  sta  ${asmgen.asmSymbolName(addressOf.identifier!!)}")
+                    var symbolName = asmgen.asmSymbolName(addressOf.identifier!!)
+                    if(addressOf.identifier!!.type.isSplitWordArray) {
+                        symbolName = if(addressOf.isMsbForSplitArray) symbolName+"_msb" else symbolName+"_lsb"
+                    }
+                    asmgen.out("  sta  $symbolName")
                 }
             }
             addressExpr is PtIdentifier -> {
@@ -5323,7 +5557,11 @@ $endLabel""")
                 if(result!=null) {
                     val addressOfIdentifier = (result.first as? PtAddressOf)?.identifier
                     if(addressOfIdentifier!=null) {
-                        val varname = asmgen.asmVariableName(addressOfIdentifier)
+                        var varname = asmgen.asmVariableName(addressOfIdentifier)
+                        if(addressOfIdentifier.type.isSplitWordArray) {
+                            val addrOf = result.first as PtAddressOf
+                            varname = if(addrOf.isMsbForSplitArray) varname+"_msb" else varname+"_lsb"
+                        }
                         if(result.second is PtNumber) {
                             val offset = (result.second as PtNumber).number.toInt()
                             asmgen.out("  sta  $varname+$offset")
@@ -5364,7 +5602,7 @@ $endLabel""")
     internal fun assignVariableToRegister(asmVarName: String, register: RegisterOrPair, signed: Boolean, scope: IPtSubroutine?, pos: Position) {
         val tgt = AsmAssignTarget.fromRegisters(register, signed, pos, null, asmgen)
         val src = AsmAssignSource(SourceStorageKind.VARIABLE, program, asmgen, tgt.datatype, variableAsmName = asmVarName)
-        val assign = AsmAssignment(src, listOf(tgt), program.memsizer, Position.DUMMY)
+        val assign = AsmAssignment(src, listOf(tgt), program.memsizer, pos)
         translateNormalAssignment(assign, scope)
     }
 

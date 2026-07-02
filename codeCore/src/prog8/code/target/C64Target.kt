@@ -29,7 +29,7 @@ class C64Target: ICompilationTarget,
 
     override val FLOAT_MAX_POSITIVE = Mflpt5.FLOAT_MAX_POSITIVE
     override val FLOAT_MAX_NEGATIVE = Mflpt5.FLOAT_MAX_NEGATIVE
-    override val FLOAT_MEM_SIZE = Mflpt5.FLOAT_MEM_SIZE
+    override val FLOAT_MEM_SIZE = Mflpt5.FLOAT_MEM_SIZE.toUInt()
     override val STARTUP_CODE_RESERVED_SIZE = 20u
     override val PROGRAM_LOAD_ADDRESS = 0x0801u
     override val PROGRAM_MEMTOP_ADDRESS = 0xcfe0u      // $a000  if floats are used
@@ -41,7 +41,6 @@ class C64Target: ICompilationTarget,
     override val BSSGOLDENRAM_END = 0u
 
     override lateinit var zeropage: Zeropage
-    override lateinit var golden: GoldenRam
 
     override fun getFloatAsmBytes(num: Number) = Mflpt5.fromNumber(num).makeFloatFillAsm()
 
@@ -87,7 +86,6 @@ class C64Target: ICompilationTarget,
 
     override fun initializeMemoryAreas(compilerOptions: CompilationOptions) {
         zeropage = C64Zeropage(compilerOptions)
-        golden = GoldenRam(compilerOptions, UIntRange.EMPTY)
     }
 
 }

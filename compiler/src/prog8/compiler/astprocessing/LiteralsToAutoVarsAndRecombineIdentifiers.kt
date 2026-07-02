@@ -3,15 +3,14 @@ package prog8.compiler.astprocessing
 import prog8.ast.*
 import prog8.ast.expressions.*
 import prog8.ast.statements.*
-import prog8.ast.walk.AstWalker
-import prog8.ast.walk.IAstModification
+import prog8.ast.walk.*
 import prog8.code.ast.PtContainmentCheck
 import prog8.code.core.IErrorReporter
 
 
 internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Program, private val errors: IErrorReporter) : AstWalker() {
 
-    override fun after(string: StringLiteral, parent: Node): Iterable<IAstModification> {
+    override fun after(string: StringLiteral, parent: Node): Iterable<AstModification> {
         if(string.parent !is VarDecl && string.parent !is WhenChoice) {
             val binExpr = string.parent as? BinaryExpression
             if(binExpr!=null &&(binExpr.operator=="+" || binExpr.operator=="*"))
@@ -20,19 +19,21 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
             // replace the literal string by an identifier reference to the interned string
             val parentFunc = (string.parent as? IFunctionCall)?.target
             if(parentFunc!=null) {
-                if(parentFunc.nameInSource.size==1 && parentFunc.nameInSource[0]=="memory") {
+                val parentCall = string.parent as? IFunctionCall
+                if(parentCall!=null && (parentCall.isMemoryCall || parentCall.isMemoryRefCall)) {
                     // memory() builtin function just uses the string as a label name
                     return noModifications
                 }
             }
-            val scopedName = program.internString(string)
+            val isInStruct = findParentNode<StaticStructInitializer>(string) != null
+            val scopedName = program.internString(string, deduplicate = !isInStruct)
             val identifier = IdentifierReference(scopedName, string.position)
-            return listOf(IAstModification.ReplaceNode(string, identifier, parent))
+            return listOf(AstReplaceNode(string, identifier, parent))
         }
         return noModifications
     }
 
-    override fun after(array: ArrayLiteral, parent: Node): Iterable<IAstModification> {
+    override fun after(array: ArrayLiteral, parent: Node): Iterable<AstModification> {
         val vardecl = array.parent as? VarDecl
         if(vardecl!=null) {
             // adjust the datatype of the array (to an educated guess from the vardecl type)
@@ -40,7 +41,7 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
             if(!(arrayDt istype vardecl.datatype)) {
                 val cast = array.cast(vardecl.datatype)
                 if(cast!=null && cast !== array)
-                    return listOf(IAstModification.ReplaceNode(vardecl.value!!, cast, vardecl))
+                    return listOf(AstReplaceNode(vardecl.value!!, cast, vardecl))
             }
         } else {
             val arrayDt = array.guessDatatype(program)
@@ -66,8 +67,8 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
                         val vardecl2 = VarDecl.createAuto(litval2)
                         val identifier = IdentifierReference(listOf(vardecl2.name), vardecl2.position)
                         return listOf(
-                            IAstModification.ReplaceNode(array, identifier, parent),
-                            IAstModification.InsertFirst(vardecl2, array.definingScope)
+                            AstReplaceNode(array, identifier, parent),
+                            AstInsert.first(array.definingScope, vardecl2)
                         )
                     }
                 }
@@ -77,13 +78,19 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
         return noModifications
     }
 
-    override fun after(decl: VarDecl, parent: Node): Iterable<IAstModification> {
+    override fun after(decl: VarDecl, parent: Node): Iterable<AstModification> {
         if(decl.names.size>1) {
 
-            val fcallTarget = (decl.value as? IFunctionCall)?.target?.targetSubroutine()
-            if(fcallTarget!=null) {
+            val fcall = decl.value as? IFunctionCall
+            val fcallTarget = fcall?.target?.targetSubroutine()
+            val isBuiltinMultiReturn = fcall?.target?.let { target ->
+                val name = target.nameInSource.singleOrNull()
+                name != null && name in program.builtinFunctions.names && program.builtinFunctions.returnTypes(name).size > 1
+            } ?: false
+            if(fcallTarget!=null || isBuiltinMultiReturn) {
                 // ubyte a,b,c = multi() --> ubyte a,b,c / a,b,c = multi()
-                val modifications = mutableListOf<IAstModification>()
+                // also handles builtin functions that return multiple values (like divmod)
+                val modifications = mutableListOf<AstModification>()
                 val variables = decl.names.map {
                     AssignTarget(
                         IdentifierReference(listOf(it), decl.position),
@@ -103,7 +110,7 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
                     position = decl.position
                 ), decl.value!!, AssignmentOrigin.VARINIT, decl.position)
                 decl.value = null
-                modifications += IAstModification.InsertAfter(decl, multiassignFuncCall, parent as IStatementContainer)
+                modifications += AstInsert.after(decl, multiassignFuncCall, parent as IStatementContainer)
                 return modifications
             }
 
@@ -119,14 +126,14 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
             if(errors.noErrors()) {
                 // desugar into individual vardecl per name.
                 return decl.desugarMultiDecl().map {
-                    IAstModification.InsertBefore(decl, it, parent as IStatementContainer)
-                } + IAstModification.Remove(decl, parent as IStatementContainer)
+                    AstInsert.before(decl, it, parent as IStatementContainer)
+                } + AstRemove(decl, parent as IStatementContainer)
             }
         }
         return noModifications
     }
 
-    override fun after(identifier: IdentifierReference, parent: Node): Iterable<IAstModification> {
+    override fun after(identifier: IdentifierReference, parent: Node): Iterable<AstModification> {
         val target = identifier.targetStatement(program.builtinFunctions)
 
         if(target is StructFieldRef) {
@@ -135,32 +142,53 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
             if(parent !is Alias && (parent !is BinaryExpression || parent.operator != ".")) {
                 val chain = identifier.nameInSource
                 val deref = PtrDereference(chain, false, identifier.position)
-                return listOf(IAstModification.ReplaceNode(identifier, deref, parent))
+                return listOf(AstReplaceNode(identifier, deref, parent))
             }
         }
 
         if(target==null && identifier.nameInSource.size>1) {
-            // maybe the first component of the scoped name is an alias?
-            val tgt2 = identifier.definingScope.lookup(identifier.nameInSource.take(1)) as? Alias
+            // First component might be an alias
+            val tgt2 = identifier.definingScope.lookup(identifier.nameInSource[0]) as? Alias
             if(tgt2!=null && parent !is Alias) {
-                if(tgt2.target.targetStatement(program.builtinFunctions) !is Alias) {
-                    val actual = IdentifierReference(tgt2.target.nameInSource + identifier.nameInSource.drop(1), identifier.position)
-                    return listOf(IAstModification.ReplaceNode(identifier, actual, parent))
+                if(tgt2.isPrivate) {
+                    val referencingBlock = findParentNode<Block>(identifier)
+                    val aliasBlock = findParentNode<Block>(tgt2)
+                    if(referencingBlock!=null && aliasBlock!=null && referencingBlock!==aliasBlock) {
+                        errors.err("cannot access private alias '${tgt2.alias}' from outside its block", identifier.position)
+                        return noModifications
+                    }
+                }
+                val aliasTarget = resolveAliasTarget(tgt2)
+                if(aliasTarget != null) {
+                    val actual = when(aliasTarget) {
+                        is INamedStatement -> IdentifierReference(aliasTarget.scopedName + identifier.nameInSource.drop(1), identifier.position)
+                        else -> IdentifierReference(tgt2.target.nameInSource + identifier.nameInSource.drop(1), identifier.position)
+                    }
+                    return listOf(AstReplaceNode(identifier, actual, parent))
                 }
             }
         }
 
-        if(target is Alias && parent !is Alias) {     // don't replace an identifier in an Alias
-            val targetStatement = target.target.targetStatement(program.builtinFunctions)
+        if(target is Alias && parent !is Alias) {
+            if(target.isPrivate) {
+                val referencingBlock = findParentNode<Block>(identifier)
+                val aliasBlock = findParentNode<Block>(target)
+                if(referencingBlock!=null && aliasBlock!=null && referencingBlock!==aliasBlock) {
+                    errors.err("cannot access private alias '${target.alias}' from outside its block", identifier.position)
+                    return noModifications
+                }
+            }
+            val targetStatement = resolveAliasTarget(target)
+            if(targetStatement == null) {
+                return noModifications  // alias loop or unresolved
+            }
             val replacement: IdentifierReference =
                 when (targetStatement) {
                     is StructFieldRef -> {
-                        // replace with target struct field reference
                         target.target.copy(position = identifier.position)
                     }
                     is VarDecl -> {
                         val scoped = if (targetStatement.names.isNotEmpty()) {
-                            // points to a vardecl of multiple names in 1 statement
                             (targetStatement.parent as INamedStatement).scopedName + target.target.nameInSource.last()
                         } else {
                             (targetStatement as INamedStatement).scopedName
@@ -169,23 +197,21 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
                         IdentifierReference(scoped, identifier.position)
                     }
                     is BuiltinFunctionPlaceholder -> {
-                        // replace with unscoped identifier
                         IdentifierReference(listOf(targetStatement.name), identifier.position)
                     }
                     else -> {
-                        // replace with scoped identifier
                         val scoped = (targetStatement as INamedStatement).scopedName
                         require(scoped.last() != "<multiple>")
                         IdentifierReference(scoped, identifier.position)
                     }
                 }
 
-            return listOf(IAstModification.ReplaceNode(identifier, replacement, parent))
+            return listOf(AstReplaceNode(identifier, replacement, parent))
         }
         return noModifications
     }
 
-    override fun after(expr: BinaryExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(expr: BinaryExpression, parent: Node): Iterable<AstModification> {
         if(expr.operator==".") {
             val leftIdent = expr.left as? IdentifierReference
             val rightIndex = expr.right as? ArrayIndexedExpression
@@ -196,8 +222,8 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
                     if(rightIndex.plainarrayvar!=null) {
                         val combinedName = leftIdent.nameInSource + rightIndex.plainarrayvar!!.nameInSource
                         val combined = IdentifierReference(combinedName, leftIdent.position)
-                        val indexer = ArrayIndexedExpression(combined, null, rightIndex.indexer, leftIdent.position)
-                        return listOf(IAstModification.ReplaceNode(expr, indexer, parent))
+                        val indexer = ArrayIndexedExpression(combined, null, null, rightIndex.indexer, leftIdent.position)
+                        return listOf(AstReplaceNode(expr, indexer, parent))
                     } else {
                         throw FatalAstException("didn't expect pointer[idx] in this phase already")
                     }
@@ -207,16 +233,51 @@ internal class LiteralsToAutoVarsAndRecombineIdentifiers(private val program: Pr
         return noModifications
     }
 
-    override fun after(deref: PtrDereference, parent: Node): Iterable<IAstModification> {
-        // handle aliases
-        // maybe the first component of the dereference chain is an alias?
-        val tgt2 = deref.definingScope.lookup(deref.chain.take(1)) as? Alias
+    override fun after(deref: PtrDereference, parent: Node): Iterable<AstModification> {
+        if(deref.chain.isEmpty()) return emptyList()
+        val tgt2 = deref.definingScope.lookup(deref.chain[0]) as? Alias
         if(tgt2!=null && parent !is Alias) {
-            if(tgt2.target.targetStatement(program.builtinFunctions) !is Alias) {
-                val unaliased = PtrDereference(tgt2.target.nameInSource + deref.chain.drop(1), deref.derefLast, deref.position)
-                return listOf(IAstModification.ReplaceNode(deref, unaliased, parent))
+            if(tgt2.isPrivate) {
+                val referencingBlock = findParentNode<Block>(deref)
+                val aliasBlock = findParentNode<Block>(tgt2)
+                if(referencingBlock!=null && aliasBlock!=null && referencingBlock!==aliasBlock) {
+                    errors.err("cannot access private alias '${tgt2.alias}' from outside its block", deref.position)
+                    return noModifications
+                }
+            }
+            val aliasTarget = resolveAliasTarget(tgt2)
+            if(aliasTarget != null) {
+                val unaliased = when(aliasTarget) {
+                    is INamedStatement -> PtrDereference(aliasTarget.scopedName + deref.chain.drop(1), deref.derefLast, deref.position)
+                    else -> PtrDereference(tgt2.target.nameInSource + deref.chain.drop(1), deref.derefLast, deref.position)
+                }
+                return listOf(AstReplaceNode(deref, unaliased, parent))
             }
         }
         return noModifications
+    }
+
+    /** Follows alias chains, returns null on loop or unresolved. */
+    private fun resolveAliasTarget(alias: Alias): Statement? {
+        var currentAlias = alias
+        val visited = mutableSetOf<String>()
+        var hops = 0
+        val maxHops = 100
+
+        while (hops < maxHops) {
+            val aliasKey = currentAlias.alias + "->" + currentAlias.target.nameInSource.joinToString(".")
+            if (aliasKey in visited) {
+                return null  // alias loop detected
+            }
+            visited.add(aliasKey)
+
+            val target = currentAlias.target.targetStatement(program.builtinFunctions) ?: return null
+            if (target !is Alias) {
+                return target  // resolved to non-alias
+            }
+            currentAlias = target
+            hops++
+        }
+        return null  // likely loop
     }
 }

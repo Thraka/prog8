@@ -3,13 +3,11 @@ package prog8.compiler.astprocessing
 import prog8.ast.*
 import prog8.ast.expressions.*
 import prog8.ast.statements.*
-import prog8.ast.walk.AstWalker
-import prog8.ast.walk.IAstModification
+import prog8.ast.walk.*
 import prog8.code.core.*
 
 
 internal class CodeDesugarer(val program: Program, private val target: ICompilationTarget, private val errors: IErrorReporter) : AstWalker() {
-
     // Some more code shuffling to simplify the Ast that the codegenerator has to process.
     // Several changes have already been done by the StatementReorderer !
     // But the ones here are simpler and are repeated once again after all optimization steps
@@ -28,12 +26,28 @@ internal class CodeDesugarer(val program: Program, private val target: ICompilat
     // - replace ptr^^ by @(ptr) if ptr is just an uword.
     // - replace p1^^ = p2^^  by memcopy.
 
-    override fun before(breakStmt: Break, parent: Node): Iterable<IAstModification> {
-        fun jumpAfter(stmt: Statement): Iterable<IAstModification> {
+    private val globalReservedSlabs = mutableMapOf<String, MemorySlabReservation>()
+
+    override fun before(program: Program): Iterable<AstModification> {
+        globalReservedSlabs.clear()
+        // Pre-collect existing reservations from the entire program to avoid duplicates in multiple passes
+        val collector = object : IAstVisitor {
+            override fun visit(reservation: MemorySlabReservation) {
+                globalReservedSlabs[reservation.slabName] = reservation
+            }
+        }
+        program.modules.forEach { module ->
+            module.accept(collector)
+        }
+        return super.before(program)
+    }
+    
+    override fun before(breakStmt: Break, parent: Node): Iterable<AstModification> {
+        fun jumpAfter(stmt: Statement): Iterable<AstModification> {
             val label = program.makeLabel("after", breakStmt.position)
             return listOf(
-                IAstModification.ReplaceNode(breakStmt, program.jumpLabel(label), parent),
-                IAstModification.InsertAfter(stmt, label, stmt.parent as IStatementContainer)
+                AstReplaceNode(breakStmt, program.jumpLabel(label), parent),
+                AstInsert.after(stmt, label, stmt.parent as IStatementContainer)
             )
         }
 
@@ -53,20 +67,20 @@ internal class CodeDesugarer(val program: Program, private val target: ICompilat
         }
     }
 
-    override fun before(continueStmt: Continue, parent: Node): Iterable<IAstModification> {
-        fun jumpToBottom(scope: IStatementContainer): Iterable<IAstModification> {
+    override fun before(continueStmt: Continue, parent: Node): Iterable<AstModification> {
+        fun jumpToBottom(scope: IStatementContainer): Iterable<AstModification> {
             val label = program.makeLabel("cont", continueStmt.position)
             return listOf(
-                IAstModification.ReplaceNode(continueStmt, program.jumpLabel(label), parent),
-                IAstModification.InsertLast(label, scope)
+                AstReplaceNode(continueStmt, program.jumpLabel(label), parent),
+                AstInsert.last(scope, label)
             )
         }
 
-        fun jumpToBefore(loop: WhileLoop): Iterable<IAstModification> {
+        fun jumpToBefore(loop: WhileLoop): Iterable<AstModification> {
             val label = program.makeLabel("cont", continueStmt.position)
             return listOf(
-                IAstModification.ReplaceNode(continueStmt, program.jumpLabel(label), parent),
-                IAstModification.InsertBefore(loop, label, loop.parent as IStatementContainer)
+                AstReplaceNode(continueStmt, program.jumpLabel(label), parent),
+                AstInsert.before(loop, label, loop.parent as IStatementContainer)
             )
         }
 
@@ -86,7 +100,7 @@ internal class CodeDesugarer(val program: Program, private val target: ICompilat
         }
     }
 
-    override fun after(untilLoop: UntilLoop, parent: Node): Iterable<IAstModification> {
+    override fun after(untilLoop: UntilLoop, parent: Node): Iterable<AstModification> {
         /*
 do { STUFF } until CONDITION
     ===>
@@ -110,10 +124,10 @@ if not CONDITION
                 AnonymousScope.empty(),
                 pos)
         ), pos)
-        return listOf(IAstModification.ReplaceNode(untilLoop, replacement, parent))
+        return listOf(AstReplaceNode(untilLoop, replacement, parent))
     }
 
-    override fun after(expr: PrefixExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(expr: PrefixExpression, parent: Node): Iterable<AstModification> {
         val dt = expr.expression.inferType(program).getOrUndef()
         if(dt.isPointerArray || dt.isPointer) {
             errors.err("pointers don't support prefix operators", expr.position)
@@ -134,7 +148,7 @@ if not CONDITION
         return null
     }
 
-    override fun after(whileLoop: WhileLoop, parent: Node): Iterable<IAstModification> {
+    override fun after(whileLoop: WhileLoop, parent: Node): Iterable<AstModification> {
 
         /*
         while true -> repeat
@@ -151,10 +165,10 @@ if not CONDITION
         if(constCondition==true) {
             errors.warn("condition is always true", whileLoop.condition.position)
             val repeat = RepeatLoop(null, whileLoop.body, whileLoop.position)
-            return listOf(IAstModification.ReplaceNode(whileLoop, repeat, parent))
+            return listOf(AstReplaceNode(whileLoop, repeat, parent))
         } else if(constCondition==false) {
             errors.warn("condition is always false", whileLoop.condition.position)
-            return listOf(IAstModification.Remove(whileLoop, parent as IStatementContainer))
+            return listOf(AstRemove(whileLoop, parent as IStatementContainer))
         }
 
 
@@ -180,7 +194,7 @@ _after:
             program.jumpLabel(loopLabel),
             afterLabel
         ), pos)
-        return listOf(IAstModification.ReplaceNode(whileLoop, replacement, parent))
+        return listOf(AstReplaceNode(whileLoop, replacement, parent))
     }
 
     override fun before(functionCallStatement: FunctionCallStatement, parent: Node) =
@@ -189,13 +203,13 @@ _after:
     override fun before(functionCallExpr: FunctionCallExpression, parent: Node) =
         before(functionCallExpr as IFunctionCall, parent, functionCallExpr.position)
 
-    private fun before(functionCall: IFunctionCall, parent: Node, position: Position): Iterable<IAstModification> {
+    private fun before(functionCall: IFunctionCall, parent: Node, position: Position): Iterable<AstModification> {
         val outerFunc = functionCall.target.nameInSource
 
         if(outerFunc==listOf("peek")) {
             // peek(a) is synonymous with @(a)
             val memread = DirectMemoryRead(functionCall.args.single(), position)
-            return listOf(IAstModification.ReplaceNode(functionCall as Node, memread, parent))
+            return listOf(AstReplaceNode(functionCall as Node, memread, parent))
         }
         if(outerFunc==listOf("poke") && parent !is Assignment) {
             // poke(a, v) is synonymous with @(a) = v
@@ -208,7 +222,7 @@ _after:
                 position = position
             )
             val assign = Assignment(tgt, functionCall.args[1], AssignmentOrigin.OPTIMIZER, position)
-            return listOf(IAstModification.ReplaceNode(functionCall as Node, assign, parent))
+            return listOf(AstReplaceNode(functionCall as Node, assign, parent))
         }
 
         if(outerFunc==listOf("pokew") || outerFunc==listOf("pokel") || outerFunc==listOf("pokef")) {
@@ -235,7 +249,7 @@ _after:
                     }
 
                     if(copy!=null)
-                        return listOf(IAstModification.ReplaceNode(functionCall as Node, copy, parent))
+                        return listOf(AstReplaceNode(functionCall as Node, copy, parent))
                 }
             }
         }
@@ -243,31 +257,193 @@ _after:
         return noModifications
     }
 
-    override fun after(repeatLoop: RepeatLoop, parent: Node): Iterable<IAstModification> {
+    private fun sanitizeSlabName(name: String): String {
+        return name.replace(Regex("[^a-zA-Z0-9_]"), "_")
+    }
+
+    override fun after(functionCallExpr: FunctionCallExpression, parent: Node): Iterable<AstModification> {
+        if (functionCallExpr.isMemoryRefCall) {
+            val str = functionCallExpr.args[0] as? StringLiteral
+            if (str == null) {
+                errors.err("memory name argument must be a string literal", functionCallExpr.args[0].position)
+                return noModifications
+            } else if (str.value.isEmpty()) {
+                errors.err("memory name argument cannot be empty string", functionCallExpr.args[0].position)
+                return noModifications
+            }
+            val slabName = sanitizeSlabName(str.value)
+            val ref = MemorySlabRef(slabName, functionCallExpr.position)
+            return listOf(AstReplaceNode(functionCallExpr, ref, parent))
+        }
+
+        if (functionCallExpr.isMemoryCall) {
+            val str = functionCallExpr.args[0] as? StringLiteral
+            if (str == null) {
+                errors.err("memory name argument must be a string literal", functionCallExpr.args[0].position)
+                return noModifications
+            } else if (str.value.isEmpty()) {
+                errors.err("memory name argument cannot be empty string", functionCallExpr.args[0].position)
+                return noModifications
+            }
+
+            val sizeNum = (functionCallExpr.args[1] as? NumericLiteral)?.number?.toInt()
+            val alignNum = (functionCallExpr.args[2] as? NumericLiteral)?.number?.toInt()
+            if (sizeNum == null) {
+                errors.err("argument must be a constant", functionCallExpr.args[1].position)
+                return noModifications
+            }
+            if (alignNum == null) {
+                errors.err("argument must be a constant", functionCallExpr.args[2].position)
+                return noModifications
+            } else if (alignNum != 0 && (alignNum !in 0..256 || (alignNum and (alignNum - 1)) != 0)) {
+                errors.err("alignment must be 0 or a power of 2 (max 256)", functionCallExpr.args[2].position)
+                return noModifications
+            }
+
+            val slabName = sanitizeSlabName(str.value)
+            val size = sizeNum.toUInt()
+            val align = alignNum.toUInt()
+
+            val reservation = MemorySlabReservation(slabName, size, align, functionCallExpr.position)
+            val ref = MemorySlabRef(slabName, functionCallExpr.position)
+
+            val containingStmt = findContainingStatement(functionCallExpr)
+            val container = containingStmt.parent as IStatementContainer
+            
+            val mods = mutableListOf<AstModification>(AstReplaceNode(functionCallExpr, ref, parent))
+            val existing = globalReservedSlabs[slabName]
+            if (existing == null || existing.size != size || existing.align != align) {
+                mods.add(AstInsert.before(containingStmt, reservation, container))
+                globalReservedSlabs[slabName] = reservation
+            }
+            return mods
+        }
+        return noModifications
+    }
+
+    override fun after(functionCallStatement: FunctionCallStatement, parent: Node): Iterable<AstModification> {
+        if (functionCallStatement.isMemoryRefCall) {
+            val container = parent as IStatementContainer
+            return listOf(AstRemove(functionCallStatement, container))
+        }
+
+        if (functionCallStatement.isMemoryCall) {
+            val str = functionCallStatement.args[0] as? StringLiteral
+            if (str == null) {
+                errors.err("memory name argument must be a string literal", functionCallStatement.args[0].position)
+                return noModifications
+            } else if (str.value.isEmpty()) {
+                errors.err("memory name argument cannot be empty string", functionCallStatement.args[0].position)
+                return noModifications
+            }
+
+            val sizeNum = (functionCallStatement.args[1] as? NumericLiteral)?.number?.toInt()
+            val alignNum = (functionCallStatement.args[2] as? NumericLiteral)?.number?.toInt()
+            if (sizeNum == null) {
+                errors.err("argument must be a constant", functionCallStatement.args[1].position)
+                return noModifications
+            }
+            if (alignNum == null) {
+                errors.err("argument must be a constant", functionCallStatement.args[2].position)
+                return noModifications
+            } else if (alignNum != 0 && (alignNum !in 0..256 || (alignNum and (alignNum - 1)) != 0)) {
+                errors.err("alignment must be 0 or a power of 2 (max 256)", functionCallStatement.args[2].position)
+                return noModifications
+            }
+
+            val slabName = sanitizeSlabName(str.value)
+            val size = sizeNum.toUInt()
+            val align = alignNum.toUInt()
+
+            val container = parent as IStatementContainer
+            val existing = globalReservedSlabs[slabName]
+            return if (existing != null && existing.size == size && existing.align == align) {
+                listOf(AstRemove(functionCallStatement, container))
+            } else {
+                val reservation = MemorySlabReservation(slabName, size, align, functionCallStatement.position)
+                globalReservedSlabs[slabName] = reservation
+                listOf(AstReplaceNode(functionCallStatement, reservation, parent))
+            }
+        }
+        return noModifications
+    }
+
+    private fun findContainingStatement(node: Node): Statement {
+        var n = node
+        while (n !is Statement) n = n.parent
+        return n
+    }
+
+    override fun after(repeatLoop: RepeatLoop, parent: Node): Iterable<AstModification> {
         if(repeatLoop.iterations==null) {
             // replace with a jump at the end, but make sure the jump is inserted *before* any subroutines that may occur inside this block
-            val subroutineMovements = mutableListOf<IAstModification>()
+            val subroutineMovements = mutableListOf<AstModification>()
             val subroutines = repeatLoop.body.statements.filterIsInstance<Subroutine>()
             subroutines.forEach { sub ->
-                subroutineMovements += IAstModification.Remove(sub, sub.parent as IStatementContainer)
-                subroutineMovements += IAstModification.InsertLast(sub, sub.parent as IStatementContainer)
+                subroutineMovements += AstRemove(sub, sub.parent as IStatementContainer)
+                subroutineMovements += AstInsert.last(sub.parent as IStatementContainer, sub)
             }
 
             val label = program.makeLabel("repeat", repeatLoop.position)
             val jump = program.jumpLabel(label)
             return listOf(
-                IAstModification.InsertFirst(label, repeatLoop.body),
-                IAstModification.InsertLast(jump, repeatLoop.body),
-                IAstModification.ReplaceNode(repeatLoop, repeatLoop.body, parent)
+                AstInsert.first(repeatLoop.body, label),
+                AstInsert.last(repeatLoop.body, jump),
+                AstReplaceNode(repeatLoop, repeatLoop.body, parent)
             ) + subroutineMovements
         }
         return noModifications
     }
 
-    override fun after(arrayIndexedExpression: ArrayIndexedExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(arrayIndexedExpression: ArrayIndexedExpression, parent: Node): Iterable<AstModification> {
+        // Handle 2D array indexing: matrix[row][col] -> matrix[row * numCols + col]
+        // This must be done FIRST, before any other array transformations
+        if(arrayIndexedExpression.nestedArray != null) {
+            val nested = arrayIndexedExpression.nestedArray!!
+            val outerIndex = arrayIndexedExpression.indexer.indexExpr
+
+            // Check for 3D+ indexing
+            if(nested.nestedArray != null) {
+                errors.err("3D or higher array indexing is not supported", arrayIndexedExpression.position)
+                return noModifications
+            }
+
+            // Find the variable declaration
+            val targetVarDecl = nested.plainarrayvar?.targetStatement(program.builtinFunctions) as? VarDecl
+
+            if(targetVarDecl == null) {
+                // Complex expression - can't determine dimensions, report error
+                errors.err("chained indexing requires the variable to be declared as a 2D array", arrayIndexedExpression.position)
+                return noModifications
+            }
+
+            if(!targetVarDecl.is2DArray) {
+                errors.err("chained indexing requires the variable to be declared as a 2D array", arrayIndexedExpression.position)
+                return noModifications
+            }
+
+            val numCols = targetVarDecl.matrixNumCols ?: return noModifications
+            val innerIndex = nested.indexer.indexExpr
+
+            // Calculate: row * numCols + col
+            val rowTimesCols = BinaryExpression(innerIndex, "*", numCols.copy(), arrayIndexedExpression.position)
+            val flatIndex = BinaryExpression(rowTimesCols, "+", outerIndex.copy(), arrayIndexedExpression.position)
+
+            // Create flattened ArrayIndexedExpression
+            val flatArrayIndex = ArrayIndex(flatIndex, arrayIndexedExpression.position)
+            val desugared = ArrayIndexedExpression(
+                nested.plainarrayvar?.copy(),
+                null,  // No more nesting
+                nested.pointerderef?.copy(),
+                flatArrayIndex,
+                arrayIndexedExpression.position
+            )
+            return listOf(AstReplaceNode(arrayIndexedExpression, desugared, parent))
+        }
+
         // replace pointervar[word] by @(pointervar+word) to avoid the
         // "array indexing is limited to byte size 0..255" error for pointervariables.
-        // (uses pokew or pokef if the ointer is a word or float pointer).
+        // (uses pokew or pokef if the pointer is a word or float pointer).
 
         if(arrayIndexedExpression.pointerderef!=null) {
             return noModifications
@@ -288,7 +464,7 @@ _after:
                     // assignment to array
                     val memwrite = DirectMemoryWrite(address, arrayIndexedExpression.position)
                     val newtarget = AssignTarget(null, null, memwrite, null, false, position = arrayIndexedExpression.position)
-                    listOf(IAstModification.ReplaceNode(parent, newtarget, parent.parent))
+                    listOf(AstReplaceNode(parent, newtarget, parent.parent))
                 } else {
                     // read from array
                     val memread = DirectMemoryRead(address, arrayIndexedExpression.position)
@@ -296,7 +472,7 @@ _after:
                             TypecastExpression(memread, DataType.BYTE, true, memread.position)
                         else
                             memread
-                    listOf(IAstModification.ReplaceNode(arrayIndexedExpression, replacement, parent))
+                    listOf(AstReplaceNode(arrayIndexedExpression, replacement, parent))
                 }
             } else if(arrayVar.datatype.sub?.isWord==true) {
                 // use peekw/pokew
@@ -304,14 +480,14 @@ _after:
                     val assignment = parent.parent as Assignment
                     val args = mutableListOf(address, assignment.value)
                     val poke = FunctionCallStatement(IdentifierReference(listOf("pokew"), arrayIndexedExpression.position), args, false, arrayIndexedExpression.position)
-                    return listOf(IAstModification.ReplaceNode(assignment, poke, assignment.parent))
+                    return listOf(AstReplaceNode(assignment, poke, assignment.parent))
                 } else {
                     val peek = FunctionCallExpression(IdentifierReference(listOf("peekw"), arrayIndexedExpression.position), mutableListOf(address), arrayIndexedExpression.position)
                     val replacement = if(arrayVar.datatype.sub?.isSigned==true)
                             TypecastExpression(peek, DataType.WORD, true, peek.position)
                         else
                             peek
-                    return listOf(IAstModification.ReplaceNode(arrayIndexedExpression, replacement, parent))
+                    return listOf(AstReplaceNode(arrayIndexedExpression, replacement, parent))
                 }
             } else if(arrayVar.datatype.sub==BaseDataType.BOOL) {
                 // use peekbool/pokebool
@@ -319,10 +495,10 @@ _after:
                     val assignment = parent.parent as Assignment
                     val args = mutableListOf(address, assignment.value)
                     val poke = FunctionCallStatement(IdentifierReference(listOf("pokebool"), arrayIndexedExpression.position), args, false, arrayIndexedExpression.position)
-                    return listOf(IAstModification.ReplaceNode(assignment, poke, assignment.parent))
+                    return listOf(AstReplaceNode(assignment, poke, assignment.parent))
                 } else {
                     val peek = FunctionCallExpression(IdentifierReference(listOf("peekbool"), arrayIndexedExpression.position), mutableListOf(address), arrayIndexedExpression.position)
-                    return listOf(IAstModification.ReplaceNode(arrayIndexedExpression, peek, parent))
+                    return listOf(AstReplaceNode(arrayIndexedExpression, peek, parent))
                 }
             } else if(arrayVar.datatype.sub==BaseDataType.LONG) {
                 // use peekl/pokel
@@ -330,10 +506,10 @@ _after:
                     val assignment = parent.parent as Assignment
                     val args = mutableListOf(address, assignment.value)
                     val poke = FunctionCallStatement(IdentifierReference(listOf("pokel"), arrayIndexedExpression.position), args, false, arrayIndexedExpression.position)
-                    return listOf(IAstModification.ReplaceNode(assignment, poke, assignment.parent))
+                    return listOf(AstReplaceNode(assignment, poke, assignment.parent))
                 } else {
                     val peek = FunctionCallExpression(IdentifierReference(listOf("peekl"), arrayIndexedExpression.position), mutableListOf(address), arrayIndexedExpression.position)
-                    return listOf(IAstModification.ReplaceNode(arrayIndexedExpression, peek, parent))
+                    return listOf(AstReplaceNode(arrayIndexedExpression, peek, parent))
                 }
             } else if(arrayVar.datatype.sub==BaseDataType.FLOAT) {
                 // use peekf/pokef
@@ -341,10 +517,10 @@ _after:
                     val assignment = parent.parent as Assignment
                     val args = mutableListOf(address, assignment.value)
                     val poke = FunctionCallStatement(IdentifierReference(listOf("pokef"), arrayIndexedExpression.position), args, false, arrayIndexedExpression.position)
-                    return listOf(IAstModification.ReplaceNode(assignment, poke, assignment.parent))
+                    return listOf(AstReplaceNode(assignment, poke, assignment.parent))
                 } else {
                     val peek = FunctionCallExpression(IdentifierReference(listOf("peekf"), arrayIndexedExpression.position), mutableListOf(address), arrayIndexedExpression.position)
-                    return listOf(IAstModification.ReplaceNode(arrayIndexedExpression, peek, parent))
+                    return listOf(AstReplaceNode(arrayIndexedExpression, peek, parent))
                 }
             }
         } else if(arrayVar!=null && (arrayVar.type==VarDeclType.MEMORY || arrayVar.datatype.isString || arrayVar.datatype.isPointer || arrayVar.datatype.isArray)) {
@@ -360,17 +536,17 @@ _after:
 //                val address = BinaryExpression(arrayIndexedExpression.arrayvar.copy(), "+", index, arrayIndexedExpression.position)
 //                if(parent is AssignTarget) {
 //                    val memwrite = DirectMemoryWrite(address, arrayIndexedExpression.position)
-//                    return listOf(IAstModification.ReplaceNode(arrayIndexedExpression, memwrite, parent))
+//                    return listOf(AstReplaceNode(arrayIndexedExpression, memwrite, parent))
 //                } else {
 //                    val memread = DirectMemoryRead(address, arrayIndexedExpression.position)
-//                    return listOf(IAstModification.ReplaceNode(arrayIndexedExpression, memread, parent))
+//                    return listOf(AstReplaceNode(arrayIndexedExpression, memread, parent))
 //                }
 //            }
 //        }
         return noModifications
     }
 
-    override fun after(expr: BinaryExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(expr: BinaryExpression, parent: Node): Iterable<AstModification> {
         fun isStringComparison(leftDt: InferredTypes.InferredType, rightDt: InferredTypes.InferredType): Boolean {
             return when {
                 leftDt issimpletype BaseDataType.STR && rightDt issimpletype BaseDataType.STR -> true
@@ -383,7 +559,7 @@ _after:
 
         if(expr.operator=="in") {
             val containment = ContainmentCheck(expr.left, expr.right, expr.position)
-            return listOf(IAstModification.ReplaceNode(expr, containment, parent))
+            return listOf(AstReplaceNode(expr, containment, parent))
         }
 
         if(expr.operator in ComparisonOperators) {
@@ -397,7 +573,7 @@ _after:
                     mutableListOf(expr.left.copy(), expr.right.copy()), expr.position)
                 val zero = NumericLiteral.optimalInteger(0, expr.position)
                 val comparison = BinaryExpression(stringCompare, expr.operator, zero, expr.position)
-                return listOf(IAstModification.ReplaceNode(expr, comparison, parent))
+                return listOf(AstReplaceNode(expr, comparison, parent))
             }
         }
 
@@ -408,7 +584,7 @@ _after:
             val squareCall = FunctionCallExpression(
                 IdentifierReference(listOf(function), expr.position),
                 mutableListOf(expr.left.copy()), expr.position)
-            return listOf(IAstModification.ReplaceNode(expr, squareCall, parent))
+            return listOf(AstReplaceNode(expr, squareCall, parent))
         }
 
         if(expr.operator==".") {
@@ -418,8 +594,8 @@ _after:
                 if(ri!=null && ri.plainarrayvar!=null) {
                     // a.b   .  c.d[i]  ->  a.b.c.d[i]
                     val joined = (expr.left as IdentifierReference).nameInSource + ri.plainarrayvar!!.nameInSource
-                    val ai = ArrayIndexedExpression(IdentifierReference(joined, expr.position), null, ri.indexer, expr.position)
-                    return listOf(IAstModification.ReplaceNode(expr, ai, parent))
+                    val ai = ArrayIndexedExpression(IdentifierReference(joined, expr.position), null, null, ri.indexer, expr.position)
+                    return listOf(AstReplaceNode(expr, ai, parent))
                 }
             }
 
@@ -446,11 +622,11 @@ _after:
                         //       x.y.z[i]           field
 
                         val combinedIdentifier = IdentifierReference(parentLeft.nameInSource+left.plainarrayvar!!.nameInSource, parentLeft.position)
-                        val newleft = ArrayIndexedExpression(combinedIdentifier, null, left.indexer, left.position)
+                        val newleft = ArrayIndexedExpression(combinedIdentifier, null, null, left.indexer, left.position)
                         val newright = IdentifierReference(listOf(right.chain.single()), right.position)
                         return listOf(
-                            IAstModification.ReplaceNode(parent.left, newleft, parent),
-                            IAstModification.ReplaceNode(parent.right, newright, parent)
+                            AstReplaceNode(parent.left, newleft, parent),
+                            AstReplaceNode(parent.right, newright, parent)
                         )
                     }
                 }
@@ -460,14 +636,14 @@ _after:
                 // replace  replace x.y.listarray[2]^^.value    with  just  x.y.listarray[2] . value
                 // this will be further modified elsewhere
                 val ident = IdentifierReference(right.chain, right.position)
-                return listOf(IAstModification.ReplaceNode(expr.right, ident, expr))
+                return listOf(AstReplaceNode(expr.right, ident, expr))
             }
         }
 
         return noModifications
     }
 
-    override fun after(memread: DirectMemoryRead, parent: Node): Iterable<IAstModification> {
+    override fun after(memread: DirectMemoryRead, parent: Node): Iterable<AstModification> {
         // for word variables:
         // @(&var) --> lsb(var)
         // @(&var+1) --> msb(var)           NOTE: ONLY WHEN VAR IS AN ACTUAL WORD VARIABLE (POINTER)
@@ -477,7 +653,7 @@ _after:
             return noModifications
         if(addrOf!=null && addrOf.identifier?.inferType(program)?.isWords==true) {
             val lsb = FunctionCallExpression(IdentifierReference(listOf("lsb"), memread.position), mutableListOf(addrOf.identifier!!), memread.position)
-            return listOf(IAstModification.ReplaceNode(memread, lsb, parent))
+            return listOf(AstReplaceNode(memread, lsb, parent))
         }
         val expr = memread.addressExpression as? BinaryExpression
         if(expr!=null && expr.operator=="+") {
@@ -489,7 +665,7 @@ _after:
                     val msb = FunctionCallExpression(IdentifierReference(listOf("msb"), memread.position), mutableListOf(
                         addressOf.identifier!!
                     ), memread.position)
-                    return listOf(IAstModification.ReplaceNode(memread, msb, parent))
+                    return listOf(AstReplaceNode(memread, msb, parent))
                 }
             }
         }
@@ -497,7 +673,7 @@ _after:
         return noModifications
     }
 
-    override fun after(chainedAssignment: ChainedAssignment, parent: Node): Iterable<IAstModification> {
+    override fun after(chainedAssignment: ChainedAssignment, parent: Node): Iterable<AstModification> {
         val assign = chainedAssignment.nested as? Assignment
         if(assign!=null) {
             // unpack starting from last in the chain
@@ -521,13 +697,13 @@ _after:
                     pc = pc.parent as? ChainedAssignment
                 }
             }
-            return listOf(IAstModification.ReplaceNode(lastChained,
+            return listOf(AstReplaceNode(lastChained,
                 AnonymousScope(assigns, chainedAssignment.position), lastChained.parent))
         }
         return noModifications
     }
 
-    override fun after(whenChoice: WhenChoice, parent: Node): Iterable<IAstModification> {
+    override fun after(whenChoice: WhenChoice, parent: Node): Iterable<AstModification> {
         // replace a range expression in a when by the actual list of numbers it represents
         val values = whenChoice.values
         if(values!=null && values.size==1) {
@@ -558,7 +734,7 @@ _after:
         return noModifications
     }
 
-    override fun after(identifier: IdentifierReference, parent: Node): Iterable<IAstModification> {
+    override fun after(identifier: IdentifierReference, parent: Node): Iterable<AstModification> {
 
         if (identifier.nameInSource.size>1) {
             val firstTarget = (identifier.firstTarget() as? VarDecl)
@@ -586,13 +762,13 @@ _after:
                     }
                 }
                 val deref = PtrDereference(chain, false, identifier.position)
-                return listOf(IAstModification.ReplaceNode(identifier, deref, parent))
+                return listOf(AstReplaceNode(identifier, deref, parent))
             }
         }
         return noModifications
     }
 
-    override fun after(ongoto: OnGoto, parent: Node): Iterable<IAstModification> {
+    override fun after(ongoto: OnGoto, parent: Node): Iterable<AstModification> {
         val indexDt = ongoto.index.inferType(program).getOrUndef()
         if(!indexDt.isUnsignedByte)
             return noModifications
@@ -616,13 +792,13 @@ _after:
             assignIndex = null
             conditionVar = null
         } else {
-            conditionVar = VarDecl.createAuto(indexDt)
+            conditionVar = VarDecl.createAuto(indexDt, ongoto.index.position)
             indexValue = IdentifierReference(listOf(conditionVar.name), conditionVar.position)
             val varTarget = AssignTarget(indexValue, null, null, null, false, position=conditionVar.position)
             assignIndex = Assignment(varTarget, ongoto.index, AssignmentOrigin.USERCODE, ongoto.position)
         }
 
-        val callTarget = ArrayIndexedExpression(IdentifierReference(listOf(jumplistArray.name), jumplistArray.position), null, ArrayIndex(indexValue.copy(), indexValue.position), ongoto.position)
+        val callTarget = ArrayIndexedExpression(IdentifierReference(listOf(jumplistArray.name), jumplistArray.position), null, null, ArrayIndex(indexValue.copy(), indexValue.position), ongoto.position)
         val callIndexed = AnonymousScope.empty(ongoto.position)
         if(ongoto.isCall) {
             callIndexed.statements.add(FunctionCallStatement(IdentifierReference(listOf("call"), ongoto.position), mutableListOf(callTarget), true, ongoto.position))
@@ -646,12 +822,12 @@ _after:
                 mutableListOf(conditionVar, assignIndex!!, ifSt)
             , ongoto.position)
         return listOf(
-            IAstModification.ReplaceNode(ongoto, replacementScope, parent),
-            IAstModification.InsertFirst(jumplistArray, ongoto.definingScope)
+            AstReplaceNode(ongoto, replacementScope, parent),
+            AstInsert.first(ongoto.definingScope, jumplistArray)
         )
     }
 
-    override fun after(deref: PtrDereference, parent: Node): Iterable<IAstModification> {
+    override fun after(deref: PtrDereference, parent: Node): Iterable<AstModification> {
         val isLHS = parent is AssignTarget
         val varDt = (deref.firstTarget() as? VarDecl)?.datatype
         if(varDt?.isUnsignedWord==true || (varDt?.isPointer==true && varDt.sub?.isByte==true)) {
@@ -659,14 +835,14 @@ _after:
             val identifier = IdentifierReference(deref.chain, deref.position)
             if(isLHS && varDt.sub==BaseDataType.UBYTE) {
                 val memwrite = DirectMemoryWrite(identifier, deref.position)
-                return listOf(IAstModification.ReplaceNode(deref, memwrite, parent))
+                return listOf(AstReplaceNode(deref, memwrite, parent))
             } else if(!isLHS) {
                 val memread = DirectMemoryRead(identifier, deref.position)
                 val replacement = if (varDt.sub == BaseDataType.BYTE)
                     TypecastExpression(memread, DataType.BYTE, true, memread.position)
                 else
                     memread
-                return listOf(IAstModification.ReplaceNode(deref, replacement, parent))
+                return listOf(AstReplaceNode(deref, replacement, parent))
             }
         }
 
@@ -676,15 +852,15 @@ _after:
                 // replace  (a) . (b^^)  by (a.b)^^
                 val name = (expr.left as IdentifierReference).nameInSource + deref.chain
                 val replacement = PtrDereference(name, deref.derefLast, deref.position)
-                return listOf(IAstModification.ReplaceNode(expr, replacement, expr.parent))
+                return listOf(AstReplaceNode(expr, replacement, expr.parent))
             } else if(expr.left===deref && expr.right is ArrayIndexedExpression) {
                 // replace  (a^^) . ( s[b] )  by  (a^^.s^^)[b]
                 val idx = expr.right as ArrayIndexedExpression
                 if(idx.plainarrayvar!=null) {
                     val name = deref.chain + idx.plainarrayvar!!.nameInSource
                     val ptrDeref = PtrDereference(name, false, deref.position)
-                    val indexer = ArrayIndexedExpression(null, ptrDeref, idx.indexer, idx.position)
-                    return listOf(IAstModification.ReplaceNode(expr, indexer, expr.parent))
+                    val indexer = ArrayIndexedExpression(null, null, ptrDeref, idx.indexer, idx.position)
+                    return listOf(AstReplaceNode(expr, indexer, expr.parent))
                 } else {
                     TODO("convert ptr.p[idx]  ${idx.position}")
                 }
@@ -694,8 +870,79 @@ _after:
         return noModifications
     }
 
-    override fun after(deref: ArrayIndexedPtrDereference, parent: Node): Iterable<IAstModification> {
+    override fun after(deref: ArrayIndexedPtrDereference, parent: Node): Iterable<AstModification> {
         // get rid of the ArrayIndexedPtrDereference AST node, replace it with other AST nodes that are equivalent
+
+        /**
+         * Build the chain from a BinaryExpression with "." operator (e.g., "ptr[ idx].field").
+         * Returns null if the expression doesn't match this pattern.
+         */
+        fun buildChainFromDotExpression(expr: BinaryExpression): List<Pair<String, ArrayIndex?>>? {
+            if(expr.operator!=".") return null
+            val right = expr.right as? IdentifierReference ?: return null
+            val left = expr.left
+            // left could be ArrayIndexedExpression (for ptr[idx]) or IdentifierReference (for ptr)
+            return when(left) {
+                is ArrayIndexedExpression -> {
+                    val ptrName = left.plainarrayvar?.nameInSource ?: return null
+                    listOf(Pair(ptrName[0], left.indexer), Pair(right.nameInSource[0], null))
+                }
+                is IdentifierReference -> {
+                    val ptrName = left.nameInSource
+                    listOf(Pair(ptrName[0], null), Pair(right.nameInSource[0], null))
+                }
+                is BinaryExpression -> {
+                    // Nested dot expression like a.b.c
+                    val leftChain = buildChainFromDotExpression(left) ?: return null
+                    leftChain + Pair(right.nameInSource[0], null)
+                }
+                else -> null
+            }
+        }
+
+        /**
+         * For augmented assignments, convert pointer dereferences in the value that match the same memory location
+         * to DirectMemoryRead, so SimplifiedAstMaker can recognize the augmented pattern.
+         */
+        fun convertAugmentedValueToMemoryRead(value: Expression, origDeref: ArrayIndexedPtrDereference, address: Expression): Expression {
+            // Check if the value IS the same pointer dereference - replace directly
+            if(value is ArrayIndexedPtrDereference && value.chain == origDeref.chain && value.derefLast == origDeref.derefLast) {
+                return DirectMemoryRead(address.copy(), value.position)
+            }
+            // Handle "ptr[idx].field" represented as BinaryExpression with "." operator
+            if(value is BinaryExpression && value.operator==".") {
+                val chain = buildChainFromDotExpression(value)
+                if(chain != null && chain == origDeref.chain && origDeref.derefLast == false) {
+                    return DirectMemoryRead(address.copy(), value.position)
+                }
+            }
+            // For BinaryExpressions, recursively check left and right
+            if(value is BinaryExpression) {
+                val newLeft = convertAugmentedValueToMemoryRead(value.left, origDeref, address)
+                val newRight = convertAugmentedValueToMemoryRead(value.right, origDeref, address)
+                if(newLeft !== value.left || newRight !== value.right) {
+                    // Use replaceChildNode to properly update parent links
+                    val result = value.copy()
+                    if(newLeft !== value.left) {
+                        result.replaceChildNode(result.left, newLeft)
+                    }
+                    if(newRight !== value.right) {
+                        result.replaceChildNode(result.right, newRight)
+                    }
+                    return result
+                }
+            }
+            // For PrefixExpressions, recursively check the inner expression
+            if(value is PrefixExpression) {
+                val newInner = convertAugmentedValueToMemoryRead(value.expression, origDeref, address)
+                if(newInner !== value.expression) {
+                    val result = value.copy()
+                    result.replaceChildNode(result.expression, newInner)
+                    return result
+                }
+            }
+            return value
+        }
 
         fun pokeFunc(dt: DataType): Pair<String, DataType?> {
             return when {
@@ -734,18 +981,63 @@ _after:
                         }
                         else {
                             // pointerarray[idx].field = value  -->  pokeXXX(pointerarray[idx] as uword + offsetof(Struct.field), value)
-                            val index = ArrayIndexedExpression(pointerIdentifier, null, ptr.last().second!!, deref.position)
+                            val index = ArrayIndexedExpression(pointerIdentifier, null, null, ptr.last().second!!, deref.position)
                             val pointerAsUword = TypecastExpression(index, DataType.UWORD, true, deref.position)
                             address = BinaryExpression(pointerAsUword, "+", offsetNumber, deref.position)
                         }
+
+                        // For augmented assignments, keep as DirectMemoryWrite so the IR codegen can optimize in-place.
+                        // Also convert matching pointer dereferences in the value to DirectMemoryRead for proper recognition.
+                        // Check for augmented pattern: value references the same memory location as the address.
+
+                        /**
+                         * Check if a value expression represents an augmented assignment pattern for a memory target.
+                         * E.g., @(addr) = @(addr) + 1  or  @(addr) = ~@(addr)
+                         */
+                        fun isAugmentedMemoryPattern(value: Expression, addr: Expression, origDeref: ArrayIndexedPtrDereference): Boolean {
+                            fun Expression.referencesSameAddress(a: Expression, od: ArrayIndexedPtrDereference): Boolean {
+                                if(this is DirectMemoryRead)
+                                    return this.addressExpression isSameAs a
+                                if(this is ArrayIndexedPtrDereference)
+                                    return this.chain == od.chain && this.derefLast == od.derefLast
+                                // Handle "ptr[idx].field" represented as BinaryExpression with "." operator
+                                if(this is BinaryExpression && this.operator==".") {
+                                    // Check if this corresponds to the same chain as origDeref
+                                    // Build the chain from the binary expression and compare
+                                    val chain = buildChainFromDotExpression(this)
+                                    return chain != null && chain == od.chain
+                                }
+                                return false
+                            }
+                            if(value is BinaryExpression) {
+                                if(value.left.referencesSameAddress(addr, origDeref)) return true
+                                if(value.operator in CommutativeOperators && value.right.referencesSameAddress(addr, origDeref)) return true
+                                if(value.operator in "+-" && value.right is BinaryExpression) {
+                                    val rightBin = value.right as BinaryExpression
+                                    if(rightBin.left.referencesSameAddress(addr, origDeref) || rightBin.right.referencesSameAddress(addr, origDeref)) return true
+                                }
+                            }
+                            if(value is PrefixExpression) {
+                                return value.expression.referencesSameAddress(addr, origDeref)
+                            }
+                            return false
+                        }
+
+                        val isAugmentedPattern = isAugmentedMemoryPattern(assignment.value, address, deref)
+                        if(isAugmentedPattern) {
+                            val memwrite = DirectMemoryWrite(address, deref.position)
+                            val target = AssignTarget(null, null, memwrite, null, false, null, null, deref.position)
+                            val newValue = convertAugmentedValueToMemoryRead(assignment.value, deref, address)
+                            val newAssignment = Assignment(target, newValue, assignment.origin, assignment.position)
+                            newAssignment.isAugmentedMemoryAssign = true
+                            return listOf(AstReplaceNode(assignment, newAssignment, assignment.parent))
+                        }
+
                         val (pokeFunc, valueCast) = pokeFunc(parent.inferType(program).getOrUndef())
                         val value = if(valueCast==null) assignment.value else TypecastExpression(assignment.value, valueCast, true, assignment.value.position)
                         val pokeCall = FunctionCallStatement(IdentifierReference(listOf(pokeFunc), assignment.position),
                             mutableListOf(address, value), false, assignment.position)
-
-                        if(assignment.isAugmentable)
-                            errors.warn("in-place assignment of indexed pointer variable currently is very inefficient, maybe use a temporary pointer variable", assignment.position)
-                        return listOf(IAstModification.ReplaceNode(assignment, pokeCall, assignment.parent))
+                        return listOf(AstReplaceNode(assignment, pokeCall, assignment.parent))
                     }
                 }
             }
@@ -772,14 +1064,14 @@ _after:
                             else throw FatalAstException("can only deref a numeric or boolean pointer here")
                         val indexer = deref.chain.last().second!!
                         val identifier = IdentifierReference(deref.chain.map { it.first }, deref.position)
-                        val indexed = ArrayIndexedExpression(identifier, null, indexer, deref.position)
+                        val indexed = ArrayIndexedExpression(identifier, null, null, indexer, deref.position)
                         val peekIdent = IdentifierReference(listOf(peekFunc), deref.position)
                         val peekCall = FunctionCallExpression(peekIdent, mutableListOf(indexed), deref.position)
                         if(cast==null)
-                            return listOf(IAstModification.ReplaceNode(parent.value, peekCall, parent))
+                            return listOf(AstReplaceNode(parent.value, peekCall, parent))
                         else {
                             val casted = TypecastExpression(peekCall, cast, true, deref.position)
-                            return listOf(IAstModification.ReplaceNode(parent.value, casted, parent))
+                            return listOf(AstReplaceNode(parent.value, casted, parent))
                         }
                     }
                 }
@@ -792,7 +1084,7 @@ _after:
                         val combinedIdentifier = left.nameInSource+right.chain.map { it.first }
                         val chain: List<Pair<String, ArrayIndex?>> = combinedIdentifier.dropLast(1).map { it to null } + (combinedIdentifier.last() to right.chain.last().second)
                         val deref = ArrayIndexedPtrDereference(chain,true, right.position)
-                        return listOf(IAstModification.ReplaceNode(parent, deref, parent.parent))
+                        return listOf(AstReplaceNode(parent, deref, parent.parent))
                     }
                 }
                 //val dt = parent.inferType(program).getOrUndef()
@@ -807,7 +1099,7 @@ _after:
                     val (pokeFunc, cast) = pokeFunc(dt)
                     val indexer = deref.chain.last().second!!
                     val identifier = IdentifierReference(deref.chain.map { it.first }, deref.position)
-                    val indexed = ArrayIndexedExpression(identifier, null, indexer, deref.position)
+                    val indexed = ArrayIndexedExpression(identifier, null, null, indexer, deref.position)
                     val pokeIdent = IdentifierReference(listOf(pokeFunc), deref.position)
                     val assignment = parent.parent as Assignment
                     val pokeCall: FunctionCallStatement
@@ -823,7 +1115,7 @@ _after:
                         pokeCall =
                             FunctionCallStatement(pokeIdent, mutableListOf(indexed, casted), false, deref.position)
                     }
-                    return listOf(IAstModification.ReplaceNode(assignment, pokeCall, assignment.parent))
+                    return listOf(AstReplaceNode(assignment, pokeCall, assignment.parent))
                 }
             }
             else {
@@ -842,17 +1134,17 @@ _after:
                 TODO("support multiple array indexed dereferencings  ${deref.position}")
             } else if (parent !is AssignTarget) {
                 val pointer = IdentifierReference(listOf(index.first), deref.position)
-                val left = ArrayIndexedExpression(pointer, null, index.second!!, deref.position)
+                val left = ArrayIndexedExpression(pointer, null, null, index.second!!, deref.position)
                 val right = PtrDereference(tail.map { it.first }, deref.derefLast, deref.position)
                 val derefExpr = BinaryExpression(left, ".", right, deref.position)
-                return listOf(IAstModification.ReplaceNode(deref, derefExpr, parent))
+                return listOf(AstReplaceNode(deref, derefExpr, parent))
             }
         }
 
         return noModifications
     }
 
-    override fun after(assignment: Assignment, parent: Node): Iterable<IAstModification> {
+    override fun after(assignment: Assignment, parent: Node): Iterable<AstModification> {
         val targetDt = assignment.target.inferType(program)
         val sourceDt = assignment.value.inferType(program)
         if(targetDt.isStructInstance && sourceDt.isStructInstance) {
@@ -870,7 +1162,7 @@ _after:
                         val memcopy = FunctionCallStatement(IdentifierReference(listOf("sys", "memcopy"), assignment.position),
                             mutableListOf(sourcePtr, targetPtr, structSizeNum),
                             false, assignment.position)
-                        return listOf(IAstModification.ReplaceNode(assignment, memcopy, parent))
+                        return listOf(AstReplaceNode(assignment, memcopy, parent))
                     }
                     val targetIdx = assignment.target.arrayindexed
                     if(targetIdx!=null) {
@@ -881,7 +1173,7 @@ _after:
                             val memcopy = FunctionCallStatement(IdentifierReference(listOf("sys", "memcopy"), assignment.position),
                                 mutableListOf(sourcePtr, target, structSizeNum),
                                 false, assignment.position)
-                            return listOf(IAstModification.ReplaceNode(assignment, memcopy, parent))
+                            return listOf(AstReplaceNode(assignment, memcopy, parent))
                         }
                     }
                     val indexedDeref = assignment.target.arrayIndexedDereference
@@ -895,7 +1187,7 @@ _after:
                             val memcopy = FunctionCallStatement(IdentifierReference(listOf("sys", "memcopy"), assignment.position),
                                 mutableListOf(sourcePtr, target, structSizeNum),
                                 false, assignment.position)
-                            return listOf(IAstModification.ReplaceNode(assignment, memcopy, parent))
+                            return listOf(AstReplaceNode(assignment, memcopy, parent))
                         }
                     }
                 }
@@ -912,7 +1204,7 @@ _after:
                             val memcopy = FunctionCallStatement(IdentifierReference(listOf("sys", "memcopy"), assignment.position),
                                 mutableListOf(source, targetPtr, structSizeNum),
                                 false, assignment.position)
-                            return listOf(IAstModification.ReplaceNode(assignment, memcopy, parent))
+                            return listOf(AstReplaceNode(assignment, memcopy, parent))
                         }
                     }
                 }
@@ -933,34 +1225,9 @@ _after:
                                 mutableListOf(source, targetPtr, structSizeNum),
                                 false, assignment.position
                             )
-                            return listOf(IAstModification.ReplaceNode(assignment, memcopy, parent))
+                            return listOf(AstReplaceNode(assignment, memcopy, parent))
                         }
                     }
-                }
-
-                // TODO support other forms of struct instance assignments
-            }
-        }
-
-
-        // consolidates simple assignment followed by augmented assignment into a single combined assignment.
-        // a = simplevalue  |  a += expression  -->   a = simplevalue + expression  (for all augmented operators)
-        // NOTE: this is NOT SAFE to do when dealing with pointer arithmetic because the semantics of the combined expression is different!
-        if(!assignment.isAugmentable && assignment.value.isSimple) {
-            val next = assignment.nextSibling() as? Assignment
-            if(next?.isAugmentable==true && next.value is BinaryExpression && next.target.isSameAs(assignment.target, program)) {
-                val combined = next.value as BinaryExpression
-                if(combined.left isSameAs assignment.target) {
-                    if(!assignment.target.inferType(program).isPointer && (assignment.value.inferType(program).isPointer || combined.right.inferType(program).isPointer)) {
-                        // avoid pointer arithmetic:  a = (simplevalue as uword) + expression
-                        combined.left = TypecastExpression(assignment.value, DataType.UWORD, true, combined.left.position)
-                    } else {
-                        // no pointer arithmetic done, just transform it into   a = simplevalue + expression
-                        combined.left = assignment.value
-                    }
-                    assignment.value = combined
-                    combined.linkParents(assignment)
-                    return listOf(IAstModification.Remove(next, parent as IStatementContainer))
                 }
             }
         }
@@ -970,9 +1237,18 @@ _after:
             val sourcePtr = assignment.value as PtrDereference
             val targetDt = targetPtr.inferType(program)
             if (targetDt == sourcePtr.inferType(program)) {
-                val sourceAddress = IdentifierReference(sourcePtr.chain, assignment.position)
-                val targetAddress = IdentifierReference(targetPtr.chain, assignment.position)
-
+                val sourceAddress: Expression
+                val targetAddress: Expression
+                if(!targetPtr.derefLast) {
+                    val targetIdentifier = IdentifierReference(targetPtr.chain, assignment.position)
+                    targetAddress = AddressOf(targetIdentifier, null, null, false, false, assignment.position)
+                } else
+                    targetAddress = IdentifierReference(targetPtr.chain, assignment.position)
+                if(!sourcePtr.derefLast) {
+                    val sourceIdentifier = IdentifierReference(sourcePtr.chain, assignment.position)
+                    sourceAddress = AddressOf(sourceIdentifier, null, null, false, false, assignment.position)
+                } else
+                    sourceAddress = IdentifierReference(sourcePtr.chain, assignment.position)
                 val copy = when {
                     targetDt.isLong -> FunctionCallStatement(
                         IdentifierReference(listOf("prog8_lib_copylong"), assignment.position),
@@ -986,28 +1262,28 @@ _after:
                 }
 
                 if(copy!=null)
-                    return listOf(IAstModification.ReplaceNode(assignment, copy, parent))
+                    return listOf(AstReplaceNode(assignment, copy, parent))
             }
         }
 
         return noModifications
     }
 
-    override fun after(ifElse: IfElse, parent: Node): Iterable<IAstModification> {
+    override fun after(ifElse: IfElse, parent: Node): Iterable<AstModification> {
         val error = checkCondition(ifElse.condition)
         if(error!=null)
             errors.err(error, ifElse.condition.position)
         return noModifications
     }
 
-    override fun after(ifExpr: IfExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(ifExpr: IfExpression, parent: Node): Iterable<AstModification> {
         val error = checkCondition(ifExpr.condition)
         if(error!=null)
             errors.err(error, ifExpr.condition.position)
         return noModifications
     }
 
-    override fun after(array: ArrayLiteral, parent: Node): Iterable<IAstModification> {
+    override fun after(array: ArrayLiteral, parent: Node): Iterable<AstModification> {
 
         fun convertArrayIntoStructInitializer(array: ArrayLiteral, struct: ISubType): StaticStructInitializer {
             val structname = IdentifierReference(struct.scopedNameString.split("."), array.position)
@@ -1053,7 +1329,7 @@ _after:
 
                 if(changes && noErrors) {
                     array.linkParents(parent)
-                    return allremovals.map { IAstModification.Remove(it, it.parent as IStatementContainer) }
+                    return allremovals.map { AstRemove(it, it.parent as IStatementContainer) }
                 }
             }
         }
@@ -1063,7 +1339,7 @@ _after:
                 val struct = targetDt.subType as StructDecl
                 if(checkNumberOfElements(struct, array)) {
                     val initializser = convertArrayIntoStructInitializer(array, struct)
-                    return listOf(IAstModification.ReplaceNode(array, initializser, parent))
+                    return listOf(AstReplaceNode(array, initializser, parent))
                 }
             }
         }

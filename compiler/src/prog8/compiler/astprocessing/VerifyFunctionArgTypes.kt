@@ -21,6 +21,14 @@ internal class VerifyFunctionArgTypes(val program: Program, val options: Compila
             }
         }
 
+        // check for missing reservations
+        val slabNames = memorySlabs.map { it.name }.toSet()
+        for (ref in memorySlabRefs) {
+            if (ref.slabName !in slabNames) {
+                errors.err("missing memory reservation with name '${ref.slabName}'", ref.position)
+            }
+        }
+
         // remove unused strings from interned strings block
         val internedBlock = program.allBlocks.singleOrNull { it.name == INTERNED_STRINGS_MODULENAME }
         internedBlock?.statements?.withIndex()?.reversed()?.forEach { (index, st) ->
@@ -40,24 +48,20 @@ internal class VerifyFunctionArgTypes(val program: Program, val options: Compila
 
     private class Slab(val name: String, val size: Int, val align: Int, val position: Position)
     private val memorySlabs = mutableListOf<Slab>()
+    private val memorySlabRefs = mutableListOf<MemorySlabRef>()
+
+    override fun visit(reservation: MemorySlabReservation) {
+        memorySlabs.add(Slab(reservation.slabName, reservation.size.toInt(), reservation.align.toInt(), reservation.position))
+    }
+
+    override fun visit(ref: MemorySlabRef) {
+        memorySlabRefs.add(ref)
+    }
 
     override fun visit(functionCallExpr: FunctionCallExpression) {
         val error = checkTypes(functionCallExpr as IFunctionCall, program)
         if(error!=null)
             errors.err(error.first, error.second)
-        else {
-            if(functionCallExpr.target.nameInSource==listOf("memory")) {
-                val name = (functionCallExpr.args[0] as StringLiteral).value
-                val size = (functionCallExpr.args[1] as? NumericLiteral)?.number?.toInt()
-                val align = (functionCallExpr.args[2] as? NumericLiteral)?.number?.toInt()
-                if(size==null)
-                    errors.err("argument must be a constant", functionCallExpr.args[1].position)
-                if(align==null)
-                    errors.err("argument must be a constant", functionCallExpr.args[2].position)
-                if(size!=null && align!=null)
-                    memorySlabs.add(Slab(name, size, align, functionCallExpr.position))
-            }
-        }
 
         super.visit(functionCallExpr)
     }

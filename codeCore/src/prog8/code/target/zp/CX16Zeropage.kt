@@ -22,41 +22,47 @@ class CX16Zeropage(options: CompilationOptions) : Zeropage(options) {
 
         // the addresses 0x02 to 0x21 (inclusive) are taken for sixteen virtual 16-bit api registers.
 
-        synchronized(this) {
-            when (options.zeropage) {
-                ZeropageType.FULL -> {
-                    free.addAll(0x22u..0xffu)
-                }
-                ZeropageType.KERNALSAFE -> {
-                    free.addAll(0x22u..0x7fu)
-                    free.addAll(0xa9u..0xffu)
-                }
-                ZeropageType.FLOATSAFE -> {
-                    free.addAll(0x22u..0x7fu)
-                    free.addAll(0xd4u..0xffu)
-                }
-                ZeropageType.BASICSAFE -> {
-                    free.addAll(0x22u..0x7fu)
-                }
-                ZeropageType.DONTUSE -> {
-                    free.clear() // don't use zeropage at all
-                }
+        // Initialize free list - no synchronization needed during construction
+        // (object reference doesn't escape until fully constructed)
+        when (options.zeropage) {
+            ZeropageType.FULL -> {
+                free.addAll(0x22u..0xffu)
             }
-
-            val distinctFree = free.distinct()
-            free.clear()
-            free.addAll(distinctFree)
-
-            removeReservedFromFreePool()
-            allocateCx16VirtualRegisters()
-            retainAllowed()
+            ZeropageType.KERNALSAFE -> {
+                free.addAll(0x22u..0x7fu)
+                free.addAll(0xa9u..0xffu)
+            }
+            ZeropageType.FLOATSAFE -> {
+                free.addAll(0x22u..0x7fu)
+                free.addAll(0xd4u..0xffu)
+            }
+            ZeropageType.BASICSAFE -> {
+                free.addAll(0x22u..0x7fu)
+            }
+            ZeropageType.DONTUSE -> {
+                free.clear() // don't use zeropage at all
+            }
         }
+
+        val distinctFree = free.distinct()
+        free.clear()
+        free.addAll(distinctFree)
+
+        removeReservedFromFreePool()
+        allocateCx16VirtualRegisters()
+        retainAllowed()
     }
 
     private fun allocateCx16VirtualRegisters() {
-        // Note: the 16 virtual registers R0-R15 are not regular allocated variables, they're *memory mapped* elsewhere to fixed addresses.
-        // However, to be able for the compiler to "see" them as zeropage variables, we have to register them here as well.
-        // This is important because the compiler sometimes treats ZP variables more efficiently (for example if it's a pointer)
+        // CX16 DESIGN: Virtual registers are ALWAYS allocated in zeropage for all ZeropageType modes.
+        // The Commander X16 has ample zeropage space (0x22-0x7F in BASICSAFE, up to 0x22-0xFF in FULL),
+        // so virtual registers can always fit. This ensures consistent behavior across all modes.
+        // Virtual registers occupy addresses 0x02-0x21 (32 bytes for r0-r15 variants).
+        //
+        // Note: the 16 virtual registers R0-R15 are not regular allocated variables, they're *memory mapped*
+        // elsewhere to fixed addresses. However, to be able for the compiler to "see" them as zeropage
+        // variables, we have to register them here as well. This is important because the compiler
+        // sometimes treats ZP variables more efficiently (for example if it's a pointer).
         for(reg in 0..15) {
             allocatedVariables["cx16.r${reg}"]   = VarAllocation((2+reg*2).toUInt(), DataType.UWORD, 2)       // cx16.r0 .. cx16.r15
             allocatedVariables["cx16.r${reg}s"]  = VarAllocation((2+reg*2).toUInt(), DataType.WORD, 2)        // cx16.r0s .. cx16.r15s

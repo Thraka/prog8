@@ -23,7 +23,7 @@ Then you can choose a few ways to get a compiler:
 
 Arch Linux:
     Currently, it's available on `AUR <https://wiki.archlinux.org/title/Arch_User_Repository>`_ for Arch Linux and derivative systems.
-    The package is called `"prog8" <https://aur.archlinux.org/packages/prog8>`_. There should be no need to install aything else as
+    The package is called `"prog8" <https://aur.archlinux.org/packages/prog8>`_. There should be no need to install anything else as
     it can automatically pull in the required dependencies.
 
     This package, alongside the compiler itself, also globally installs syntax highlighting for ``vim`` and ``nano``.
@@ -65,12 +65,12 @@ The most interesting gradle commands to run are probably the ones listed below.
     ``./gradlew installShadowDist``
         Creates a 'fat-jar' that contains the compiler and all dependencies, in a single
         executable .jar file, and includes few start scripts to run it.
-        The output can be found in ``.compiler/build/install/prog8c-shadow/``
+        The output can be found in ``./compiler/build/install/prog8c-shadow/``
     ``./gradlew shadowDistZip``
         Creates a zipfile with the above in it, for easy distribution.
         This file can be found in ``./compiler/build/distributions/``
 
-For normal use, the ``installDist`` task should suffice and after succesful completion, you can start the compiler with:
+For normal use, the ``installDist`` task should suffice and after successful completion, you can start the compiler with:
 
     ``./compiler/build/install/prog8c/bin/prog8c <options> <sourcefile>``
 
@@ -78,7 +78,7 @@ For normal use, the ``installDist`` task should suffice and after succesful comp
 
 .. hint::
     Development and testing is done on Linux using the IntelliJ IDEA IDE,
-    but the actual prog8 compiler should run on all operating systems that provide a Java runtime (version 11 or newer).
+    but the actual prog8 compiler should run on all operating systems that provide a Java runtime (version 17 or newer).
     If you do have trouble building or running the compiler on your operating system, please let me know!
 
     To successfully build and debug in IDEA, you have to do two things manually first:
@@ -111,8 +111,7 @@ It's easy to compile yourself, but a recent precompiled .exe (only for Windows) 
 *You need at least version 1.58.0 of this assembler.*
 If you are on Linux, there's probably a "64tass" package in the repositories, but check if it is a recent enough version.
 
-A **Java runtime (jre or jdk), version 11 or newer**  is required to run the prog8 compiler itself. Version 17 or higher if you want to
-build the compiler from source.
+A **Java runtime (jre or jdk), version 17 or newer** is required to run the prog8 compiler itself.
 If you're scared of Oracle's licensing terms, get one of the versions of another vendor. Even Microsoft provides their own version.
 Other OpenJDK builds can be found at `Adoptium <https://adoptium.net/temurin/releases>`_ .
 For MacOS you can also use the Homebrew system to install a recent version of OpenJDK.
@@ -164,7 +163,7 @@ One or more .p8 module files
     This can be useful on emulators/systems that don't parse the breakpoint information in the list file,
     such as the X16Emu emulator for the Commander X16.
     Useful instructions to consider are ``brk`` and ``stp``.
-    For example for the Commander X16 emulator, ``stp`` is useful because it can actually tyrigger
+    For example for the Commander X16 emulator, ``stp`` is useful because it can actually trigger
     a breakpoint halt in the debugger when this is enabled by running the emulator with -debug.
 
 ``-bytes2float <bytes>``
@@ -174,9 +173,25 @@ One or more .p8 module files
 ``-check``
     Quickly check the program for errors. No actual compilation will be performed.
 
+``-compareir <baseline.p8ir>``
+    Compare the generated IR file with a baseline IR file.
+    Shows a summary of differences including instruction count, chunk count, register usage, and file size.
+    Also displays the first 10 instruction differences to help identify what changed.
+    Useful for comparing optimized vs non-optimized builds, or tracking changes between compiler versions.
+
 ``-D SYMBOLNAME=VALUE``
     Add this user-defined symbol directly to the beginning of the generated assembly file.
     Can be repeated to define multiple symbols.
+
+``-daemon``
+    Use the prog8c compilation daemon (auto-starts it if not running).
+    This keeps the compiler running as a background server process, which greatly speeds up
+    subsequent compilations by eliminating JVM startup overhead and allowing reuse of cached data.
+    The daemon listens on a Unix domain socket and automatically shuts down after a period of inactivity.
+    Unlike ``-watch``, the daemon does not monitor files for changes: you still invoke ``prog8c -daemon``
+    each time you want to compile. The speedup comes from the warm JVM, not from automatic recompilation.
+    Because each invocation is an individual compiler run, you can compile different source files or
+    pass different options on each call — the daemon does not lock you into a single project or set of flags.
 
 ``-dumpsymbols``
     print a dump of the variable declarations and subroutine signatures
@@ -204,7 +219,9 @@ One or more .p8 module files
     With this option you're basically saying: "Yes, I know I am treading on mighty thin ice here, but I don't want to be reminded about that".
 
 ``-libsearch pattern``
-    Search in the embedded library files for occurences of the given regex pattern.
+    Search in the embedded library files for occurrences of the given regex pattern.
+    If no exact matches are found, the compiler automatically attempts a "fuzzy" search
+    by inserting wildcards between the characters of the search pattern.
 
 ``-libdump path``
     Extract all embedded library files into the given output directory.
@@ -218,8 +235,15 @@ One or more .p8 module files
     Don't perform any code optimizations.
     Useful for debugging or faster compilation cycles.
 
+``-nostdlib``
+    Disable loading of builtin standard library files from internal resources.
+    This prevents the compiler from searching its embedded library files when resolving ``%import`` directives.
+    Only user-specified library paths (via ``-srcdirs``) and the target's library path will be searched.
+    The core library modules (``syslib``, ``prog8_math``, ``prog8_lib``) are always loaded regardless of this option.
+    So you have to make sure these are provided somewhere in the alternate source path.
+
 ``-out <directory>``
-    sets directory location for output files instead of current directory
+    Sets directory location for output files instead of current directory. Creates it if it doesn't exist yet.
 
 ``-plaintext``
     Prints output messages in plain text: no colors or fancy symbols.
@@ -247,7 +271,7 @@ One or more .p8 module files
 
 ``-nosourcelines``
     Do not include the original prog8 source code lines as comments in the generated assembly code file,
-    mixed in between the actual generated assembly code. The default behavior is to include the sourcel lines.
+    mixed in between the actual generated assembly code. The default behavior is to include the source lines.
 
 ``-srcdirs <pathlist>``
     Specify a list of extra paths (separated with ':'), to search in for imported modules.
@@ -258,7 +282,7 @@ One or more .p8 module files
     Sets the target output of the compiler. This option is required.
     ``c64`` = Commodore 64, ``c128`` = Commodore 128, ``cx16`` = Commander X16, ``pet32`` - Commodore PET model 4032,
     ``virtual`` = builtin virtual machine.
-    You can also specify a file name as target, prog8 will when try to read the target
+    You can also specify a file name as target, prog8 will then try to read the target
     machine's configuration and properties from that configuration file instead of using one of the built-in targets.
     See :ref:`customizable_target` for details about this.
 
@@ -266,9 +290,9 @@ One or more .p8 module files
     Show a more detailed breakdown of the time taken in various compiler phases, for performance analysis of the compiler itself.
 
 ``-varsgolden``
-    Like ``-varshigh``, but places the variables in the $0400-$07FF "golden ram" area instead.
+    Like ``-varshigh``, but places the variables in the "golden ram" area instead (e.g. $0400-$07FF on CX16, $1300-$1BDF on C128).
     Because this is in normal system memory, there are no bank switching issues.
-    This mode is only available on the Commander X16, and possibly on custom configured targets.
+    This mode is only available on the Commander X16 and the Commodore 128, and possibly on custom configured targets.
 
 ``-varshigh <rambank>``
     Places uninitialized non-zeropage variables in a separate memory area, instead of inside the program itself.
@@ -281,7 +305,7 @@ One or more .p8 module files
     cx16: $A000 - $BFFF  ; 8 kB in the specified HIRAM bank (note: no auto bank switching is done, you must make sure yourself that this HIRAM bank is active when accessing these variables!)
 
     If you use this option, you can no longer use the part of the above memory area that is
-    alotted to the variables, for your own purposes. The output of the 64tass assembler step at the
+    allotted to the variables, for your own purposes. The output of the 64tass assembler step at the
     end of compilation shows precise details of where and how much memory is used by the variables
     (it's called 'BSS' section or Gap at the address mentioned above).
     Assembling the program will fail if there are too many variables to fit in a single high ram bank.
@@ -291,6 +315,11 @@ One or more .p8 module files
 
 ``-vm``
     load and run a 'p8ir' intermediate representation file in the internal VirtualMachine instead of compiling a prog8 program file.
+
+``-vmtrace``
+    Enable instruction-by-instruction tracing when running the virtual machine (use with ``-vm`` or ``-emu`` on the virtual target).
+    Prints each executed IR instruction with its location (chunk name and instruction index).
+    Useful for debugging program behavior and understanding control flow in the IR code.
 
 ``-warnimplicitcasts``
     Give warnings for lines where a silent (implicit) type cast is done from a smaller to a larger type.
@@ -321,6 +350,9 @@ One or more .p8 module files
     edit prog8 source files with an editor on the X16 itself (such as XVI, XEdit). When saving the source file,
     the compiler can sit in the background in watch mode, and recompile it for you immediately on save.
     Then you can directly run the new resulting PRG file in the X16!
+    Unlike ``-daemon``, the watch mode keeps the process in the foreground and automatically
+    recompiles on file changes, whereas ``-daemon`` is a background server that you invoke explicitly
+    each time you want to compile.
 
 
 Module source code files
@@ -385,13 +417,36 @@ Troubleshooting
 
 .. index:: single: Usage; Troubleshooting
 
+Compilation errors or warnings
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+When there are warnings or errors during compilation of your program, no output files will be produced,
+and the error messages will be printed on the screen like this::
+
+    ERROR file:///home/user/code/test.p8:13:9: undefined symbol: zzz
+
+The severity is followed by the file and location in that source file where the error occurred
+(editors and IDEs that show the compiler output usually make these links clickable).
+The two numbers are the line number and column in the file.
+There are a couple of message severities:
+
+INFO
+    informational messages that can be ignored if you want
+
+WARNING
+    things that may be a problem depending on circumstances. If there are no errors,
+    a compiled program is still produced,  but it is a good idea to investigate the warnings that are printed.
+
+ERROR
+    unrecoverable problem that prevented successful compilation
+
+
 Compiler doesn't run, complains about "UnsupportedClassVersionError"
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-You need to install and use JDK version 11 or newer to run the prog8 compiler. Check this with "java -version".
+You need to install and use JDK version 17 or newer to run the prog8 compiler. Check this with "java -version".
 See :ref:`requirements`.
 
-The computer just resets (at the end of the program)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The computer resets after running my program
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 In the default compiler configuration, it is not safely possible to return back to the BASIC prompt when
 your program exits. The only reliable thing to do is to reboot the system.
 This is due to the fact that in this mode, prog8 will overwrite important BASIC and Kernal variables in zero page memory.
@@ -422,8 +477,7 @@ Gradle error when building the compiler yourself
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 If you get a gradle build error containing the line "No matching toolchains found for requested specification"
 or "Gradle requires JVM 17 or later to run", it means that the Gradle build tool can't locate the correct version of the JDK to use.
-You will need a Java JDK version 17 or higher to build the compiler.
-(the compiler itself only needs Java 11 or higher to run though.)
+You will need a Java JDK version 17 or higher to build and run the compiler.
 
 Strange assembler errors
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -434,7 +488,7 @@ you don't use symbols named just a single letter (especially 'a', 'x' and 'y').
 Sometimes these are interpreted as the CPU register of that name. To avoid such confusions,
 always use 2 or more letters for symbols in your assembly code.
 
-'shadowing' warnings form the assembler
+'shadowing' warnings from the assembler
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Avoid using 'a', 'x' or 'y' as symbols in your inlined assembly code.
 Also avoid using 64tass' built-in function or type names as symbols in your inlined assembly code.
@@ -461,7 +515,9 @@ Examples
 
 .. index:: single: Examples; Examples in source tree
 
-A bunch of example programs can be found in the 'examples' directory of the source tree.
+A bunch of example programs can be found in the :source:`examples` directory of the source tree on Github.
+(Or download the source archive from there to get all the files at once).
+
 There are cross-platform examples that can be compiled for various systems unaltered,
 and there are also examples specific to certain computers (C64, X16, etcetera).
 So for instance, to compile and run the Commodore 64 rasterbars example program, use this command::

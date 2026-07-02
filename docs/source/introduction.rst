@@ -10,17 +10,17 @@ while still being low level enough to create high performance programs.
 The targeted CPUs are the `6502 <https://en.wikipedia.org/wiki/MOS_Technology_6502>`_ /
 `6510 <https://en.wikipedia.org/wiki/MOS_Technology_6510>`_ /
 `65c02 <https://en.wikipedia.org/wiki/MOS_Technology_65C02>`_ microprocessors.
-They are from the late 1970's and early 1980's and was used in many home computers from that era,
+They are from the late 1970's and early 1980's and were used in many home computers from that era,
 such as the `Commodore 64 <https://en.wikipedia.org/wiki/Commodore_64>`_.
 
-You can compile programs for various machines that are built in into the compiler:
+You can compile programs for various machines that are built into the compiler:
 
 * Commander X16  (with 65c02 cpu, 65816 cpu specifics are currently not supported by prog8 itself)
 * Commodore 64
 * Commodore 128 (limited support)
 * Commodore PET (limited support)
 * any other 65(C)02 target machine or setup can be configured to a great extent in a user written configuration file.
-  There are some examples included for the Atari 800 XL, NEO6502, Foenix F256, and such.
+  There are some for the Atari 800 XL, NEO6502, Foenix F256, and such.
 * some users have been experimenting with a NES and a C64 OS target as well.
 
 Some language features are mentioned below, and you can also read :ref:`comparingprog8` if you
@@ -37,6 +37,7 @@ However, the other compiler targets are also still worked on,  most notably the 
 
 The X16 `Discord server <https://discord.gg/nS2PqEC>`_ contains a small channel
 dedicated to Prog8. Besides that, you can use the issue tracker on github for questions or problems or contributions.
+
 
 Want to buy me a coffee or a pizza perhaps?
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -78,12 +79,14 @@ Language :index:`Features`
   the compiled program in an emulator and provide debugging information to this emulator.
 - the language looks like a mix of Python and C so should be quite easy to learn
 - Modular programming, scoping via module source files, code blocks, and subroutines. No need for forward declarations.
+- Can make vars and routines private, as a simple way to restrict access and hide implementation details
 - Provides high level programming constructs but at the same time stay close to the metal;
   still able to directly use memory addresses and ROM subroutines,
   and inline assembly to have full control when every register, cycle or byte matters
 - Variables are all allocated statically, no memory allocation overhead
 - Variable data types include signed and unsigned bytes and words, long integers, floats, arrays, and strings.
 - Structs and typed pointers
+- 2D arrays (``matrix[row][col]`` syntax)
 - Tight control over Zeropage usage
 - Programs can be restarted after exiting (i.e. run them multiple times without having to reload everything), due to automatic variable (re)initializations.
 - Programs can be configured to execute in ROM
@@ -214,9 +217,36 @@ If multiple options are listed above, you can select which one you want to launc
 **Syntax highlighting:** for a few different editors, syntax highlighting definition files are provided.
 Look in the :source:`syntax-files <syntax-files>` directory in the github repository to find them.
 
+.. index:: pair: Tools; Language Server Protocol
+
+**Language Server Protocol (LSP):** Prog8 has a dedicated language server that provides IDE-like features
+for editors that support LSP (such as Kate, Vim, VS Code, and many others).
+The language server currently supports a few limited things such as document symbol overview and go to definition.
+Other features will be added in the future.
+The language server is located in the :source:`languageServer <languageServer>` directory.
+To use it, configure your editor to launch ``prog8-language-server`` as the LSP server for ``.p8`` files.
+
 .. index:: pair: Tools; CTags
 
-**CTags:** for editors that support them, such as Vim, there is an effort by a member of the cummunity to provide "ctags" files for Prog8.
+**CTags:** for editors that support them, such as Vim, there is an effort by a member of the community to provide "ctags" files for Prog8.
 The basic purpose of ctags is to index the definitions from your source code and let you find them easily.
 It is not really to find each use of print for example, but to find where print is defined.
 Visit `the Github repository <https://github.com/gillham/prog8ctags>`_ for the files and detailed usage information.
+
+
+.. _aiassist:
+
+.. index:: pair: AI; Coding Agents
+
+AI Assisted Development
+^^^^^^^^^^^^^^^^^^^^^^^
+
+If you want to use an AI coding agent to help write Prog8 programs,
+load the ``prog8-coder`` skill (located in ``.agents/skills/prog8-coder/``).
+It contains the full language reference -- syntax rules, data types, standard library
+guidance, and common pitfalls.
+
+If you need to write inline assembly (``%asm {{ }}`` blocks or ``asmsub`` routines),
+also load the ``asm6502-coder`` skill (``.agents/skills/asm6502-coder/``) for
+64tass assembler syntax, register conventions, and symbol prefixing rules.  
+

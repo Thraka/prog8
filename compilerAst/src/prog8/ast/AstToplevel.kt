@@ -33,6 +33,12 @@ interface IFunctionCall {
     var parent: Node             // will be linked correctly later (late init)
 }
 
+val IFunctionCall.isMemoryCall: Boolean
+    get() = target.nameInSource == listOf("memory")
+
+val IFunctionCall.isMemoryRefCall: Boolean
+    get() = target.nameInSource == listOf("memory__ref")
+
 interface IStatementContainer {
     val statements: MutableList<Statement>
 
@@ -96,6 +102,11 @@ interface IStatementContainer {
                     if(found!=null)
                         return found
                 }
+                is Defer -> {
+                    val found = stmt.scope.searchSymbol(name)
+                    if(found!=null)
+                        return found
+                }
                 is IfElse -> {
                     val found = stmt.truepart.searchSymbol(name) ?: stmt.elsepart.searchSymbol(name)
                     if(found!=null)
@@ -148,11 +159,30 @@ interface IStatementContainer {
             is When -> stmt.choices.any { it.statements.hasReturnStatement() }
             is ConditionalBranch -> stmt.truepart.hasReturnStatement() || stmt.elsepart.hasReturnStatement()
             is UnrollLoop -> stmt.body.hasReturnStatement()
+            is Defer -> stmt.scope.hasReturnStatement()
             is Return -> true
             else -> false
         }
 
         return statements.any { hasReturnStatement(it) }
+    }
+
+    fun hasDeferStatement(): Boolean {
+        fun hasDeferStatement(stmt: Statement): Boolean = when(stmt) {
+            is AnonymousScope -> stmt.statements.any { hasDeferStatement(it) }
+            is ForLoop -> stmt.body.hasDeferStatement()
+            is IfElse -> stmt.truepart.hasDeferStatement() || stmt.elsepart.hasDeferStatement()
+            is WhileLoop -> stmt.body.hasDeferStatement()
+            is RepeatLoop -> stmt.body.hasDeferStatement()
+            is UntilLoop -> stmt.body.hasDeferStatement()
+            is When -> stmt.choices.any { it.statements.hasDeferStatement() }
+            is ConditionalBranch -> stmt.truepart.hasDeferStatement() || stmt.elsepart.hasDeferStatement()
+            is UnrollLoop -> stmt.body.hasDeferStatement()
+            is Defer -> true
+            else -> false
+        }
+
+        return statements.any { hasDeferStatement(it) }
     }
 
     val allDefinedSymbols: Sequence<Pair<String, Statement>>
@@ -164,6 +194,8 @@ interface IStatementContainer {
 interface INameScope: IStatementContainer, INamedStatement {
     fun subScope(name: String): INameScope?  = statements.firstOrNull { it is INameScope && it.name==name } as? INameScope
 
+    fun lookup(name: String): Statement? = lookupUnqualified(name)
+
     fun lookup(scopedName: List<String>) : Statement? {
         return if(scopedName.size>1)
             lookupQualified(scopedName)
@@ -173,7 +205,25 @@ interface INameScope: IStatementContainer, INamedStatement {
     }
 
     private fun lookupQualified(scopedName: List<String>): Statement? {
+        return lookupQualified(scopedName, mutableSetOf<String>())
+    }
+
+    private fun lookupQualified(scopedName: List<String>, visitedAliases: MutableSet<String>): Statement? {
         val localSymbol = this.searchSymbol(scopedName[0]) ?: this.lookupUnqualified(scopedName[0])
+
+        // Resolve alias by combining its target with remaining path parts
+        if(localSymbol is Alias) {
+            // Detect alias loops
+            val aliasKey = localSymbol.alias + "->" + localSymbol.target.nameInSource.joinToString(".")
+            if(aliasKey in visitedAliases) {
+                return null  // alias loop detected
+            }
+            visitedAliases.add(aliasKey)
+
+            val combinedName = localSymbol.target.nameInSource + scopedName.drop(1)
+            return lookupQualified(combinedName, visitedAliases)
+        }
+
         val fieldRef = searchStructFieldRef(localSymbol, scopedName.drop(1))
         if(fieldRef!=null)
             return fieldRef
@@ -208,11 +258,11 @@ interface INameScope: IStatementContainer, INamedStatement {
             if(struct!=null) {
                 for ((idx, field) in scopedName.withIndex()) {
                     val fieldDt = struct!!.getFieldType(field)  ?:
-                        return null
+                    return null
                     if (idx == scopedName.size - 1) {
                         // was last path element
-                        val pointer = IdentifierReference(scopedName, Position.DUMMY)
-                        val ref = StructFieldRef(pointer, struct as StructDecl, fieldDt, field, Position.DUMMY)
+                        val pointer = IdentifierReference(scopedName, localSymbol.position)
+                        val ref = StructFieldRef(pointer, struct as StructDecl, fieldDt, field, localSymbol.position)
                         ref.linkParents(this as Node)
                         return ref
                     }
@@ -336,9 +386,9 @@ open class Module(final override val statements: MutableList<Statement>,
     lateinit var program: Program
 
     override val name = source.origin
-            .substringBeforeLast(".")
-            .substringAfterLast("/")
-            .substringAfterLast("\\")
+        .substringBeforeLast(".")
+        .substringAfterLast("/")
+        .substringAfterLast("\\")
 
     val loadAddress: Pair<UInt, Position>? by lazy {
         val address = (statements.singleOrNull { it is Directive && it.directive == "%address" } as? Directive)
@@ -375,7 +425,7 @@ open class Module(final override val statements: MutableList<Statement>,
 
     override fun toString() = "Module(name=$name, pos=$position, lib=${isLibrary})"
     override fun referencesIdentifier(nameInSource: List<String>): Boolean = statements.any { it.referencesIdentifier(nameInSource) }
-    fun options() = statements.filter { it is Directive && it.directive == "%option" }.flatMap { (it as Directive).args }.map {it.string!!}.toSet()
+    fun options() = statements.filter { it is Directive && it.directive == "%option" }.flatMap { (it as Directive).args }.mapTo(mutableSetOf()) { it.string!! }
 
     fun accept(visitor: IAstVisitor) = visitor.visit(this)
     fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)

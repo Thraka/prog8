@@ -27,10 +27,28 @@ sys {
 
 
     sub  reset_system()  {
-        ; Soft-reset the system back to initial power-on Basic prompt.
+        ; exit the vm
         %ir {{
             syscall 0 ()
         }}
+    }
+
+    sub poweroff_system() {
+        exit(0)          ; exit the vm
+    }
+
+    sub die(ubyte code, str message) {
+        ; -- kill the program by jumping into the debugger/monitor (if available). Status code is in register A, a pointer to the death message is in X,Y.
+        str @shared warning = iso:"\n\nPROGRAM DIED: "
+        %ir {{
+            load.w r99000,sys.die.warning
+            syscall 3 (r99000.w)
+            loadm.w r99000,sys.die.message
+            syscall 3 (r99000.w)
+            load.b r99100,10
+            syscall 2 (r99100.b)
+        }}
+        exit(code)
     }
 
     sub wait(uword jiffies) {
@@ -45,16 +63,6 @@ sys {
         ; --- busy wait till the next vsync has occurred (approximately), without depending on custom irq handling.
         %ir {{
             syscall 14()
-        }}
-    }
-
-    sub internal_stringcopy(str source, str tgt) {
-        ; Called when the compiler wants to assign a string value to another string.
-        %ir {{
-            loadm.w r99000,sys.internal_stringcopy.source
-            loadm.w r99001,sys.internal_stringcopy.tgt
-            load.b r99100,#255
-            syscall 39 (r99000.w, r99001.w, r99100.b): r99100.b
         }}
     }
 
@@ -177,34 +185,21 @@ sys {
         }}
     }
 
-    sub push(ubyte b) {
-        ; note: this *should* be inlined, however since the VM has separate program counter and value stacks, this also works
+    sub gfx_text(uword xx, uword yy, str textptr, ubyte color) {
         %ir {{
-            loadm.b r99100,sys.push.b
-            push.b r99100
+            loadm.w r99000,sys.gfx_text.xx
+            loadm.w r99001,sys.gfx_text.yy
+            loadm.w r99002,sys.gfx_text.textptr
+            loadm.b r99100,sys.gfx_text.color
+            syscall 66 (r99000.w, r99001.w, r99002.w, r99100.b)
         }}
     }
 
-    sub pushw(uword w) {
-        ; note: this *should* be inlined, however since the VM has separate program counter and value stacks, this also works
-        %ir {{
-            loadm.w r99000,sys.pushw.w
-            push.w r99000
-        }}
-    }
-
-    sub pushl(long l) {
-        ; note: this *should* be inlined, however since the VM has separate program counter and value stacks, this also works
-        %ir {{
-            loadm.l r99200,sys.pushl.l
-            push.l r99200
-        }}
-    }
 
     sub push_returnaddress(uword w) {
         ; note: this actually doesn't do anything useful on the VM because the code execution doesn't use the simulated cpu stack
         %ir {{
-            loadm.w r99000,sys.pushw.w
+            loadm.w r99000,sys.push_returnaddress.w
             push.w r99000
         }}
     }
@@ -213,30 +208,6 @@ sys {
         ; return the address like JSR would push onto the stack:  address-1,  MSB first then LSB
         address--
         return mkword(lsb(address), msb(address))
-    }
-
-    sub pop() -> ubyte {
-        ; note: this *should* be inlined, however since the VM has separate program counter and value stacks, this also works
-        %ir {{
-            pop.b r99100
-            returnr.b r99100
-        }}
-    }
-
-    sub popw() -> uword {
-        ; note: this *should* be inlined, however since the VM has separate program counter and value stacks, this also works
-        %ir {{
-            pop.w r99000
-            returnr.w r99000
-        }}
-    }
-
-    sub popl() -> long {
-        ; note: this *should* be inlined, however since the VM has separate program counter and value stacks, this also works
-        %ir {{
-            pop.l r99200
-            returnr.l r99200
-        }}
     }
 
     sub read_flags() -> ubyte {
@@ -468,5 +439,41 @@ cx16 {
         r13 = cx16.save_virtual_registers.storage[13]
         r14 = cx16.save_virtual_registers.storage[14]
         r15 = cx16.save_virtual_registers.storage[15]
+    }
+
+
+    private sub print_error (str message) {
+        %ir {{
+            loadm.w r99000,cx16.print_error.message
+            syscall 3 (r99000.w)
+        }}
+    }
+
+    sub rombank(ubyte bank) {
+        if bank==0
+            return
+
+        print_error("\nerror: rombank() only accepts 0 - aborting")
+        sys.exit(1)
+    }
+
+    sub rambank(ubyte bank) {
+        if bank==0
+            return
+
+        print_error("\nerror: rambank() only accepts 0 - aborting")
+        sys.exit(1)
+    }
+
+    inline sub getrombank() -> ubyte {
+        return 0
+    }
+
+    inline sub getrambank() -> ubyte {
+        return 0
+    }
+
+    sub numbanks() -> uword  {
+        return 1
     }
 }

@@ -1,17 +1,13 @@
 package prog8.optimizer
 
 import prog8.ast.FatalAstException
+import prog8.ast.IStatementContainer
 import prog8.ast.Node
 import prog8.ast.Program
 import prog8.ast.expressions.*
-import prog8.ast.maySwapOperandOrder
 import prog8.ast.statements.*
-import prog8.ast.walk.AstWalker
-import prog8.ast.walk.IAstModification
-import prog8.code.core.AssociativeOperators
-import prog8.code.core.BaseDataType
-import prog8.code.core.IErrorReporter
-import prog8.code.core.isInteger
+import prog8.ast.walk.*
+import prog8.code.core.*
 import kotlin.math.floor
 
 
@@ -19,22 +15,22 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
 
     private val evaluator = ConstExprEvaluator()
 
-    override fun after(addressOf: AddressOf, parent: Node): Iterable<IAstModification> {
+    override fun after(addressOf: AddressOf, parent: Node): Iterable<AstModification> {
         val constAddr = addressOf.constValue(program) ?: return noModifications
-        return listOf(IAstModification.ReplaceNode(addressOf, constAddr, parent))
+        return listOf(AstReplaceNode(addressOf, constAddr, parent))
     }
 
-    override fun before(memread: DirectMemoryRead, parent: Node): Iterable<IAstModification> {
+    override fun before(memread: DirectMemoryRead, parent: Node): Iterable<AstModification> {
         // @( &thing )  -->  thing  (but only if thing is a byte type!)
         val addrOf = memread.addressExpression as? AddressOf
         if(addrOf!=null) {
             if(addrOf.identifier?.inferType(program)?.isBytes==true)
-                return listOf(IAstModification.ReplaceNode(memread, addrOf.identifier!!, parent))
+                return listOf(AstReplaceNode(memread, addrOf.identifier!!, parent))
         }
         return noModifications
     }
 
-    override fun after(numLiteral: NumericLiteral, parent: Node): Iterable<IAstModification> {
+    override fun after(numLiteral: NumericLiteral, parent: Node): Iterable<AstModification> {
 
         if(numLiteral.type==BaseDataType.LONG) {
             // see if LONG values may be reduced to something smaller
@@ -42,7 +38,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
             if(smaller.type!=BaseDataType.LONG) {
                 if(parent !is Assignment || !parent.target.inferType(program).isLong) {
                     // do NOT reduce the type if the target of the assignment is a long
-                    return listOf(IAstModification.ReplaceNode(numLiteral, smaller, parent))
+                    return listOf(AstReplaceNode(numLiteral, smaller, parent))
                 }
             }
         }
@@ -52,23 +48,35 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
             if(iDt.isKnown && !iDt.isBool && !(iDt issimpletype numLiteral.type)) {
                 val casted = numLiteral.cast(iDt.getOrUndef().base, true)
                 if(casted.isValid) {
-                    return listOf(IAstModification.ReplaceNode(numLiteral, casted.valueOrZero(), parent))
+                    return listOf(AstReplaceNode(numLiteral, casted.valueOrZero(), parent))
                 }
             }
         }
         return noModifications
     }
 
-    override fun after(containment: ContainmentCheck, parent: Node): Iterable<IAstModification> {
+    override fun after(containment: ContainmentCheck, parent: Node): Iterable<AstModification> {
         val result = containment.constValue(program)
         if(result!=null)
-            return listOf(IAstModification.ReplaceNode(containment, result, parent))
+            return listOf(AstReplaceNode(containment, result, parent))
         return noModifications
     }
 
-    override fun after(expr: PrefixExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(expr: PrefixExpression, parent: Node): Iterable<AstModification> {
         val constValue = expr.constValue(program) ?: return noModifications
-        return listOf(IAstModification.ReplaceNode(expr, constValue, parent))
+        return listOf(AstReplaceNode(expr, constValue, parent))
+    }
+
+    private fun getPointerConstValue(expr: Expression): NumericLiteral? {
+        if (expr.inferType(program).isPointer) {
+            if (expr is IdentifierReference) {
+                val target = expr.definingScope.lookup(expr.nameInSource) as? VarDecl
+                if (target?.type == VarDeclType.CONST) {
+                    return target.value?.constValue(program)
+                }
+            }
+        }
+        return expr.constValue(program)
     }
 
     /*
@@ -88,10 +96,41 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
      *        (X / c1) * c2  ->  X / (c2/c1)
      *        (X + c1) - c2  ->  X + (c1-c2)
      */
-    override fun after(expr: BinaryExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(expr: BinaryExpression, parent: Node): Iterable<AstModification> {
         if(expr.operator==".")
             return noModifications
-        val modifications = mutableListOf<IAstModification>()
+
+        val leftDt = expr.left.inferType(program)
+        val rightDt = expr.right.inferType(program)
+
+        // pointer arithmetic: ptr + offset, ptr - offset
+        if (leftDt.isPointer && (expr.operator == "+" || expr.operator == "-") && !rightDt.isPointer) {
+            val leftPtrConst = getPointerConstValue(expr.left)
+            val rightOffsetConst = expr.right.constValue(program)
+            if (leftPtrConst != null && rightOffsetConst != null) {
+                val ptrDt = leftDt.getOrUndef()
+                val subDt = ptrDt.sub
+                val scale = if(subDt is BaseDataType) program.memsizer.memorySize(subDt) else ptrDt.size(program.memsizer)
+                val offset = rightOffsetConst.number.toInt() * scale
+                val result = if (expr.operator == "+") leftPtrConst.number + offset else leftPtrConst.number - offset
+                return listOf(AstReplaceNode(expr, NumericLiteral(BaseDataType.UWORD, result, expr.position), parent))
+            }
+        }
+        // commutative pointer arithmetic: offset + ptr
+        if (rightDt.isPointer && expr.operator == "+" && !leftDt.isPointer) {
+            val rightPtrConst = getPointerConstValue(expr.right)
+            val leftOffsetConst = expr.left.constValue(program)
+            if (rightPtrConst != null && leftOffsetConst != null) {
+                val ptrDt = rightDt.getOrUndef()
+                val subDt = ptrDt.sub
+                val scale = if(subDt is BaseDataType) program.memsizer.memorySize(subDt) else ptrDt.size(program.memsizer)
+                val offset = leftOffsetConst.number.toInt() * scale
+                val result = rightPtrConst.number + offset
+                return listOf(AstReplaceNode(expr, NumericLiteral(BaseDataType.UWORD, result, expr.position), parent))
+            }
+        }
+
+        val modifications = mutableListOf<AstModification>()
         val leftconst = expr.left.constValue(program)
         val rightconst = expr.right.constValue(program)
 
@@ -108,7 +147,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                         leftString.encoding)
                 }
                 val concatStr = StringLiteral.create(concatenated, leftString.encoding, expr.position)
-                return listOf(IAstModification.ReplaceNode(expr, concatStr, parent))
+                return listOf(AstReplaceNode(expr, concatStr, parent))
             }
             else if (expr.operator=="*" && expr.left is StringLiteral) {
                 if (rightconst != null) {
@@ -122,7 +161,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                         errors.err("can only multiply string by integer constant", rightconst.position)
                     else {
                         val newStr = StringLiteral.create(part.value.repeat(rightconst.number.toInt()), part.encoding, expr.position)
-                        return listOf(IAstModification.ReplaceNode(expr, newStr, parent))
+                        return listOf(AstReplaceNode(expr, newStr, parent))
                     }
                 }
                 // other errors are reported later
@@ -148,7 +187,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                                 part.value.forEach { tmp += it.copy() }
                             }
                             val newArray = ArrayLiteral(part.type, tmp.toTypedArray(), part.position)
-                            return listOf(IAstModification.ReplaceNode(expr, newArray, parent))
+                            return listOf(AstReplaceNode(expr, newArray, parent))
                         }
                     } else {
                         val leftTarget = (expr.left as? IdentifierReference)?.targetVarDecl()
@@ -173,16 +212,16 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                             // X + С1 == C2  -->  X == C2 - C1
                             val newRightConst = NumericLiteral(rightconst.type, rightconst.number - leftRightConst.number, rightconst.position)
                             return listOf(
-                                IAstModification.ReplaceNode(leftExpr, leftExpr.left, expr),
-                                IAstModification.ReplaceNode(expr.right, newRightConst, expr)
+                                AstReplaceNode(leftExpr, leftExpr.left, expr),
+                                AstReplaceNode(expr.right, newRightConst, expr)
                             )
                         }
                         "-" -> {
                             // X - С1 == C2  -->  X == C2 + C1
                             val newRightConst = NumericLiteral(rightconst.type, rightconst.number + leftRightConst.number, rightconst.position)
                             return listOf(
-                                IAstModification.ReplaceNode(leftExpr, leftExpr.left, expr),
-                                IAstModification.ReplaceNode(expr.right, newRightConst, expr)
+                                AstReplaceNode(leftExpr, leftExpr.left, expr),
+                                AstReplaceNode(expr.right, newRightConst, expr)
                             )
                         }
                     }
@@ -216,7 +255,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
         // if in a chained comparison, that one has to be desugared first though.
         if(leftconst != null && rightconst != null) {
             val result = evaluator.evaluate(leftconst, expr.operator, rightconst)
-            modifications += IAstModification.ReplaceNode(expr, result, parent)
+            modifications += AstReplaceNode(expr, result, parent)
         }
 
         if(leftconst==null && rightconst!=null && rightconst.number<0.0) {
@@ -224,13 +263,13 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                 // X - -1 ---> X + 1
                 val posNumber = NumericLiteral.optimalNumeric(rightconst.type, null, -rightconst.number, rightconst.position)
                 val plusExpr = BinaryExpression(expr.left, "+", posNumber, expr.position)
-                return listOf(IAstModification.ReplaceNode(expr, plusExpr, parent))
+                return listOf(AstReplaceNode(expr, plusExpr, parent))
             }
             else if (expr.operator == "+") {
                 // X + -1 ---> X - 1
                 val posNumber = NumericLiteral.optimalNumeric(rightconst.type, null, -rightconst.number, rightconst.position)
                 val plusExpr = BinaryExpression(expr.left, "-", posNumber, expr.position)
-                return listOf(IAstModification.ReplaceNode(expr, plusExpr, parent))
+                return listOf(AstReplaceNode(expr, plusExpr, parent))
             }
         }
 
@@ -248,7 +287,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                         val operator = if(leftBinExpr.operator=="+") expr.operator else if(expr.operator=="-") "+" else "-"
                         val constants = BinaryExpression(c2, operator, rightconst, c2.position)
                         val newExpr = BinaryExpression(leftBinExpr.left, leftBinExpr.operator, constants, expr.position)
-                        return listOf(IAstModification.ReplaceNode(expr, newExpr, parent))
+                        return listOf(AstReplaceNode(expr, newExpr, parent))
                     }
                 }
             }
@@ -259,13 +298,13 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                         // (X * C2) * rightConst  -->  X * (rightConst*C2)
                         val constants = BinaryExpression(rightconst, "*", c2, c2.position)
                         val newExpr = BinaryExpression(leftBinExpr.left, "*", constants, expr.position)
-                        return listOf(IAstModification.ReplaceNode(expr, newExpr, parent))
+                        return listOf(AstReplaceNode(expr, newExpr, parent))
                     } else if (leftBinExpr.operator=="/") {
                         if(expr.inferType(program) issimpletype BaseDataType.FLOAT) {
                             //  (X / C2) * rightConst   -->  X * (rightConst/C2)    only valid for floating point
                             val constants = BinaryExpression(rightconst, "/", c2, c2.position)
                             val newExpr = BinaryExpression(leftBinExpr.left, "*", constants, expr.position)
-                            return listOf(IAstModification.ReplaceNode(expr, newExpr, parent))
+                            return listOf(AstReplaceNode(expr, newExpr, parent))
                         }
                     }
                 }
@@ -277,7 +316,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                     // NOTE: do not optimize  (X * C1) / C2  for integers,  -->  X * (C1/C2)  because this causes precision loss on integers
                     val constants = BinaryExpression(c2, "*", rightconst, c2.position)
                     val newExpr = BinaryExpression(leftBinExpr.left, "/", constants, expr.position)
-                    return listOf(IAstModification.ReplaceNode(expr, newExpr, parent))
+                    return listOf(AstReplaceNode(expr, newExpr, parent))
                 }
             }
         }
@@ -292,7 +331,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                         val c3 = evaluator.evaluate(c1, expr.operator, c2)
                         val xwithy = BinaryExpression(leftBinExpr.left, expr.operator, rightBinExpr.left, expr.position)
                         val newExpr = BinaryExpression(xwithy, "+", c3, expr.position)
-                        modifications += IAstModification.ReplaceNode(expr, newExpr, parent)
+                        modifications += AstReplaceNode(expr, newExpr, parent)
                     }
                 }
                 else if(leftBinExpr.operator=="-" && rightBinExpr.operator=="-") {
@@ -301,7 +340,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                         val c3 = evaluator.evaluate(c1, expr.operator, c2)
                         val xwithy = BinaryExpression(leftBinExpr.left, expr.operator, rightBinExpr.left, expr.position)
                         val newExpr = BinaryExpression(xwithy, "-", c3, expr.position)
-                        modifications += IAstModification.ReplaceNode(expr, newExpr, parent)
+                        modifications += AstReplaceNode(expr, newExpr, parent)
                     }
                 }
                 else if(leftBinExpr.operator=="*" && rightBinExpr.operator=="*"){
@@ -312,7 +351,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                         if(xDt==yDt) {
                             val xwithy = BinaryExpression(leftBinExpr.left, expr.operator, rightBinExpr.left, expr.position)
                             val newExpr = BinaryExpression(xwithy, "*", c1, expr.position)
-                            modifications += IAstModification.ReplaceNode(expr, newExpr, parent)
+                            modifications += AstReplaceNode(expr, newExpr, parent)
                         }
                     }
                 }
@@ -322,7 +361,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
         return modifications
     }
 
-    override fun after(array: ArrayLiteral, parent: Node): Iterable<IAstModification> {
+    override fun after(array: ArrayLiteral, parent: Node): Iterable<AstModification> {
         // because constant folding can result in arrays that are now suddenly capable
         // of telling the type of all their elements (for instance, when they contained -2 which
         // was a prefix expression earlier), we recalculate the array's datatype.
@@ -335,26 +374,26 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
         if(vardeclType!=null) {
             val newArray = array.cast(vardeclType)
             if (newArray != null && newArray != array)
-                return listOf(IAstModification.ReplaceNode(array, newArray, parent))
+                return listOf(AstReplaceNode(array, newArray, parent))
         } else {
             val arrayDt = array.guessDatatype(program)
             if (arrayDt.isKnown) {
                 val newArray = array.cast(arrayDt.getOrUndef())
                 if (newArray != null && newArray != array)
-                    return listOf(IAstModification.ReplaceNode(array, newArray, parent))
+                    return listOf(AstReplaceNode(array, newArray, parent))
             }
         }
 
         return noModifications
     }
 
-    override fun after(arrayIndexedExpression: ArrayIndexedExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(arrayIndexedExpression: ArrayIndexedExpression, parent: Node): Iterable<AstModification> {
         if(parent is VarDecl && parent.parent is Block) {
             // only block level (global) initializers are considered here, because they're run just once at program startup
 
             val const = arrayIndexedExpression.constValue(program)
             if (const != null)
-                return listOf(IAstModification.ReplaceNode(arrayIndexedExpression, const, parent))
+                return listOf(AstReplaceNode(arrayIndexedExpression, const, parent))
 
             val constIndex = arrayIndexedExpression.indexer.constIndex()
             if (constIndex != null) {
@@ -365,7 +404,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                         if(array!=null) {
                             val value = array.value[constIndex].constValue(program)
                             if(value!=null) {
-                                return listOf(IAstModification.ReplaceNode(arrayIndexedExpression, value, parent))
+                                return listOf(AstReplaceNode(arrayIndexedExpression, value, parent))
                             }
                         }
                     }
@@ -377,20 +416,54 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
         return noModifications
     }
 
-    override fun after(functionCallExpr: FunctionCallExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(functionCallExpr: FunctionCallExpression, parent: Node): Iterable<AstModification> {
+        val constValues = functionCallExpr.constValues(program)
+        if (constValues != null) {
+            if (constValues.size == 1) {
+                return listOf(AstReplaceNode(functionCallExpr, constValues[0], parent))
+            } else {
+                // Multi-value return
+                val container = parent.parent as? IStatementContainer ?: return noModifications
+                if (parent is Assignment && parent.target.multi?.size == constValues.size) {
+                    val mods = mutableListOf<AstModification>()
+                    for (i in constValues.indices.reversed()) {
+                        val assign = Assignment(parent.target.multi!![i], constValues[i], AssignmentOrigin.USERCODE, parent.position)
+                        mods.add(AstInsert.after(parent, assign, container))
+                    }
+                    mods.add(AstRemove(parent, container))
+                    return mods
+                } else if (parent is VarDecl && parent.names.size == constValues.size) {
+                    val mods = mutableListOf<AstModification>()
+                    for (i in constValues.indices.reversed()) {
+                        val newDecl = VarDecl.builder(DataType.forDt(constValues[i].type), parent.position)
+                            .copyFrom(parent)
+                            .names(parent.names[i])
+                            .type(VarDeclType.CONST)
+                            .value(constValues[i])
+                            .hasExplicitInitializer(true)
+                            .build()
+                        newDecl.allowInitializeWithZero = false
+                        mods.add(AstInsert.after(parent, newDecl, container))
+                    }
+                    mods.add(AstRemove(parent, container))
+                    return mods
+                }
+            }
+        }
+
         val constvalue = functionCallExpr.constValue(program)
         return if(constvalue!=null)
-            listOf(IAstModification.ReplaceNode(functionCallExpr, constvalue, parent))
+            listOf(AstReplaceNode(functionCallExpr, constvalue, parent))
         else {
             val const2 = evaluator.evaluate(functionCallExpr, program)
             if(const2!=null)
-                listOf(IAstModification.ReplaceNode(functionCallExpr, const2, parent))
+                listOf(AstReplaceNode(functionCallExpr, const2, parent))
             else
                 noModifications
         }
     }
 
-    override fun after(forLoop: ForLoop, parent: Node): Iterable<IAstModification> {
+    override fun after(forLoop: ForLoop, parent: Node): Iterable<AstModification> {
         fun adjustRangeDt(rangeFrom: NumericLiteral, targetDt: BaseDataType, rangeTo: NumericLiteral, stepLiteral: NumericLiteral?, range: RangeExpression): RangeExpression? {
             val fromCast = rangeFrom.cast(targetDt, true)
             val toCast = rangeTo.cast(targetDt, true)
@@ -427,7 +500,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                     // attempt to translate the iterable into ubyte values
                     val newIter = adjustRangeDt(rangeFrom, loopvarSimpleDt, rangeTo, stepLiteral, iterableRange)
                     if(newIter!=null)
-                        return listOf(IAstModification.ReplaceNode(forLoop.iterable, newIter, forLoop))
+                        return listOf(AstReplaceNode(forLoop.iterable, newIter, forLoop))
                 }
             }
             BaseDataType.BYTE -> {
@@ -435,7 +508,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                     // attempt to translate the iterable into byte values
                     val newIter = adjustRangeDt(rangeFrom, loopvarSimpleDt, rangeTo, stepLiteral, iterableRange)
                     if(newIter!=null)
-                        return listOf(IAstModification.ReplaceNode(forLoop.iterable, newIter, forLoop))
+                        return listOf(AstReplaceNode(forLoop.iterable, newIter, forLoop))
                 }
             }
             BaseDataType.UWORD -> {
@@ -443,7 +516,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                     // attempt to translate the iterable into uword values
                     val newIter = adjustRangeDt(rangeFrom, loopvarSimpleDt, rangeTo, stepLiteral, iterableRange)
                     if(newIter!=null)
-                        return listOf(IAstModification.ReplaceNode(forLoop.iterable, newIter, forLoop))
+                        return listOf(AstReplaceNode(forLoop.iterable, newIter, forLoop))
                 }
             }
             BaseDataType.WORD -> {
@@ -451,7 +524,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                     // attempt to translate the iterable into word values
                     val newIter = adjustRangeDt(rangeFrom, loopvarSimpleDt, rangeTo, stepLiteral, iterableRange)
                     if(newIter!=null)
-                        return listOf(IAstModification.ReplaceNode(forLoop.iterable, newIter, forLoop))
+                        return listOf(AstReplaceNode(forLoop.iterable, newIter, forLoop))
                 }
             }
             else -> { /* nothing for floats, these are not allowed in for loops and will give an error elsewhere */ }
@@ -460,7 +533,14 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
         return noModifications
     }
 
-    override fun after(decl: VarDecl, parent: Node): Iterable<IAstModification> {
+    override fun after(decl: VarDecl, parent: Node): Iterable<AstModification> {
+        if (decl.type == VarDeclType.CONST && decl.datatype.isPointer) {
+            val sizer = program.memsizer
+            if (decl.datatype.size(sizer) > 1) {
+                errors.err("due to internal compiler complexity, currently pointer variables with data type size > 1 cannot be const", decl.position)
+            }
+        }
+
         val numval = decl.value as? NumericLiteral
         if(decl.type== VarDeclType.CONST && numval!=null) {
             val valueDt = numval.inferType(program)
@@ -470,14 +550,14 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
             if(!(valueDt istype decl.datatype)) {
                 val cast = numval.cast(decl.datatype.base, true)
                 if (cast.isValid) {
-                    return listOf(IAstModification.ReplaceNode(numval, cast.valueOrZero(), decl))
+                    return listOf(AstReplaceNode(numval, cast.valueOrZero(), decl))
                 }
             }
         }
         return noModifications
     }
 
-    override fun after(repeatLoop: RepeatLoop, parent: Node): Iterable<IAstModification> {
+    override fun after(repeatLoop: RepeatLoop, parent: Node): Iterable<AstModification> {
         val count = (repeatLoop.iterations as? NumericLiteral)?.number
         if(count!=null && floor(count)!=count) {
             val integer = NumericLiteral.optimalInteger(count.toInt(), repeatLoop.position)
@@ -487,12 +567,12 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
         return noModifications
     }
 
-    override fun after(typecast: TypecastExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(typecast: TypecastExpression, parent: Node): Iterable<AstModification> {
         val constValue = typecast.constValue(program) ?: return noModifications
-        return listOf(IAstModification.ReplaceNode(typecast, constValue, parent))
+        return listOf(AstReplaceNode(typecast, constValue, parent))
     }
 
-    override fun after(subroutine: Subroutine, parent: Node): Iterable<IAstModification> {
+    override fun after(subroutine: Subroutine, parent: Node): Iterable<AstModification> {
         val address = subroutine.asmAddress?.address
         if(address!=null) {
             val constAddress = address.constValue(program)
@@ -504,47 +584,30 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
         return noModifications
     }
 
-    private class ShuffleOperands(val expr: BinaryExpression,
-                                  val exprOperator: String?,
-                                  val subExpr: BinaryExpression,
-                                  val newExprLeft: Expression?,
-                                  val newExprRight: Expression?,
-                                  val newSubexprLeft: Expression?,
-                                  val newSubexprRight: Expression?
-                                  ): IAstModification {
-        override fun perform() {
-            if(exprOperator!=null) expr.operator = exprOperator
-            if(newExprLeft!=null) expr.left = newExprLeft
-            if(newExprRight!=null) expr.right = newExprRight
-            if(newSubexprLeft!=null) subExpr.left = newSubexprLeft
-            if(newSubexprRight!=null) subExpr.right = newSubexprRight
-        }
-    }
-
     private fun groupTwoFloatConstsTogether(expr: BinaryExpression,
        subExpr: BinaryExpression,
        leftIsConst: Boolean,
        rightIsConst: Boolean,
        subleftIsConst: Boolean,
-       subrightIsConst: Boolean): IAstModification?
+       subrightIsConst: Boolean): AstModification?
     {
         // NOTE: THESE REORDERINGS ARE ONLY VALID FOR FLOATING POINT CONSTANTS
 
         if(expr.operator==subExpr.operator) {
             // both operators are the same.
 
-            // If associative,  we can simply shuffle the const operands around to optimize.
-            if(expr.operator in AssociativeOperators && maySwapOperandOrder(expr)) {
+            // If commutative,  we can simply shuffle the const operands around to optimize.
+            if(expr.operator in CommutativeOperators && expr.maySwapOperandOrder()) {
                 return if(leftIsConst) {
                     if(subleftIsConst)
-                        ShuffleOperands(expr, null, subExpr, subExpr.right, null, null, expr.left)
+                        AstShuffleOperands(expr, null, subExpr, subExpr.right, null, null, expr.left)
                     else
-                        ShuffleOperands(expr, null, subExpr, subExpr.left, null, expr.left, null)
+                        AstShuffleOperands(expr, null, subExpr, subExpr.left, null, expr.left, null)
                 } else {
                     if(subleftIsConst)
-                        ShuffleOperands(expr, null, subExpr, null, subExpr.right, null, expr.right)
+                        AstShuffleOperands(expr, null, subExpr, null, subExpr.right, null, expr.right)
                     else
-                        ShuffleOperands(expr, null, subExpr, null, subExpr.left, expr.right, null)
+                        AstShuffleOperands(expr, null, subExpr, null, subExpr.left, expr.right, null)
                 }
             }
 
@@ -552,9 +615,9 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
             if(expr.operator=="-" || expr.operator=="/") {
                 if(leftIsConst) {
                     return if (subleftIsConst) {
-                        ShuffleOperands(expr, if (expr.operator == "-") "+" else "*", subExpr, subExpr.right, null, expr.left, subExpr.left)
+                        AstShuffleOperands(expr, if (expr.operator == "-") "+" else "*", subExpr, subExpr.right, null, expr.left, subExpr.left)
                     } else {
-                        IAstModification.ReplaceNode(expr,
+                        AstReplaceNode(expr,
                                 BinaryExpression(
                                         BinaryExpression(expr.left, if (expr.operator == "-") "+" else "*", subExpr.right, subExpr.position),
                                         expr.operator, subExpr.left, expr.position),
@@ -562,9 +625,9 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                     }
                 } else {
                     return if(subleftIsConst) {
-                        ShuffleOperands(expr, null, subExpr, null, subExpr.right, null, expr.right)
+                        AstShuffleOperands(expr, null, subExpr, null, subExpr.right, null, expr.right)
                     } else {
-                        IAstModification.ReplaceNode(expr,
+                        AstReplaceNode(expr,
                                 BinaryExpression(
                                         subExpr.left, expr.operator,
                                         BinaryExpression(expr.right, if (expr.operator == "-") "+" else "*", subExpr.right, subExpr.position),
@@ -594,7 +657,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                                 "/",
                                 subExpr.left, expr.position)
                     }
-                    return IAstModification.ReplaceNode(expr, change, expr.parent)
+                    return AstReplaceNode(expr, change, expr.parent)
                 } else {
                     val change = if(subleftIsConst) {
                         // (C1*V)/C2 -> (C1/C2)*V
@@ -609,7 +672,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                                 "*",
                                 subExpr.left, expr.position)
                     }
-                    return IAstModification.ReplaceNode(expr, change, expr.parent)
+                    return AstReplaceNode(expr, change, expr.parent)
                 }
             }
             else if(expr.operator=="*" && subExpr.operator=="/" && subExpr.inferType(program) issimpletype BaseDataType.FLOAT) {
@@ -628,7 +691,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                                 "*",
                                 subExpr.left, expr.position)
                     }
-                    return IAstModification.ReplaceNode(expr, change, expr.parent)
+                    return AstReplaceNode(expr, change, expr.parent)
                 } else {
                     val change = if(subleftIsConst) {
                         // (C1/V)*C2 -> (C1*C2)/V
@@ -643,7 +706,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                                 "*",
                                 subExpr.left, expr.position)
                     }
-                    return IAstModification.ReplaceNode(expr, change, expr.parent)
+                    return AstReplaceNode(expr, change, expr.parent)
                 }
             }
             else if(expr.operator=="+" && subExpr.operator=="-") {
@@ -661,7 +724,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                                 "+",
                                 subExpr.left, expr.position)
                     }
-                    return IAstModification.ReplaceNode(expr, change, expr.parent)
+                    return AstReplaceNode(expr, change, expr.parent)
                 } else {
                     val change = if(subleftIsConst) {
                         // (c1-v)+c2  ->  (c1+c2)-v
@@ -676,7 +739,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                                 "+",
                                 subExpr.left, expr.position)
                     }
-                    return IAstModification.ReplaceNode(expr, change, expr.parent)
+                    return AstReplaceNode(expr, change, expr.parent)
                 }
             }
             else if(expr.operator=="-" && subExpr.operator=="+") {
@@ -694,7 +757,7 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                                 "-",
                                 subExpr.left, expr.position)
                     }
-                    return IAstModification.ReplaceNode(expr, change, expr.parent)
+                    return AstReplaceNode(expr, change, expr.parent)
                 } else {
                     val change = if(subleftIsConst) {
                         // (c1+v)-c2  ->  v+(c1-c2)
@@ -709,11 +772,35 @@ class ConstantFoldingOptimizer(private val program: Program, private val errors:
                                 "+",
                                 subExpr.left, expr.position)
                     }
-                    return IAstModification.ReplaceNode(expr, change, expr.parent)
+                    return AstReplaceNode(expr, change, expr.parent)
                 }
             }
 
             return null
         }
+    }
+}
+
+/**
+ * Custom modification to shuffle operands in binary expressions.
+ * This is specific to constant folding optimization.
+ */
+private class AstShuffleOperands(
+    val expr: BinaryExpression,
+    val exprOperator: String?,
+    val subExpr: BinaryExpression,
+    val newExprLeft: Expression?,
+    val newExprRight: Expression?,
+    val newSubexprLeft: Expression?,
+    val newSubexprRight: Expression?
+) : AstModification() {
+    override val affectedNodes = listOf(expr, subExpr)
+
+    override fun perform() {
+        if(exprOperator!=null) expr.operator = exprOperator
+        if(newExprLeft!=null) expr.left = newExprLeft
+        if(newExprRight!=null) expr.right = newExprRight
+        if(newSubexprLeft!=null) subExpr.left = newSubexprLeft
+        if(newSubexprRight!=null) subExpr.right = newSubexprRight
     }
 }

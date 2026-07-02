@@ -38,9 +38,12 @@ fun printAst(root: PtNode, skipLibraries: Boolean, output: (text: String) -> Uni
                             else
                                 "& ${txt(it.dereference!!)}"
                         }
-                        is PtBuiltinFunctionCall -> {
-                            require(it.name=="prog8_lib_structalloc")
-                            txt(it)
+                        is PtFunctionCall -> txt(it)
+                        is PtConstant -> {
+                            if(it.memorySlab!=null)
+                                "memory(${it.memorySlab.name})"
+                            else
+                                "#${it.value}"
                         }
                         else -> "invalid array element $it"
                     }
@@ -49,8 +52,8 @@ fun printAst(root: PtNode, skipLibraries: Boolean, output: (text: String) -> Uni
             }
             is PtArrayIndexer -> "<arrayindexer> ${type(node.type)} ${if(node.splitWords) "[splitwords]" else ""}"
             is PtBinaryExpression -> "<expr> ${node.operator} ${type(node.type)}"
-            is PtBuiltinFunctionCall -> {
-                if(node.name=="prog8_lib_structalloc") {
+            is PtFunctionCall -> {
+                if(node.builtin && node.name=="prog8_lib_structalloc") {
                     node.type.subType!!.scopedNameString+"()  <structalloc>"
                 } else {
                     val str = if (node.void) "void " else ""
@@ -58,10 +61,6 @@ fun printAst(root: PtNode, skipLibraries: Boolean, output: (text: String) -> Uni
                 }
             }
             is PtContainmentCheck -> "in"
-            is PtFunctionCall -> {
-                val str = if(node.void) "void " else ""
-                str + node.name + "()"
-            }
             is PtIdentifier -> "${node.name} ${type(node.type)}"
             is PtIrRegister -> "IRREG#${node.register} ${type(node.type)}"
             is PtMemoryByte -> "@()"
@@ -116,7 +115,14 @@ fun printAst(root: PtNode, skipLibraries: Boolean, output: (text: String) -> Uni
             is PtConstant -> {
                 val value = when {
                     node.type.isBool -> if(node.value==0.0) "false" else "true"
-                    node.type.isInteger -> node.value.toInt().toString()
+                    node.type.isInteger -> {
+                        if(node.value!=null)
+                            node.value.toInt().toString()
+                        else if(node.memorySlab!=null)
+                            "memory(\"${node.memorySlab.name}\", ${node.memorySlab.size}, ${node.memorySlab.align})"
+                        else
+                            throw IllegalArgumentException("constant without value or memory slab")
+                    }
                     else -> node.value.toString()
                 }
                 "const ${node.type} ${node.name} = $value"
@@ -190,6 +196,7 @@ fun printAst(root: PtNode, skipLibraries: Boolean, output: (text: String) -> Uni
             is PtIfExpression -> "<ifexpr>"
             is PtBranchCondExpression -> "<branchexpr> if_${node.condition.name.lowercase()}"
             is PtJmpTable -> "<jmptable>"
+            is PtMemorySlabReservation -> "mem_slab ${node.slabName} (size=${node.size}, align=${node.align})"
             is PtStructDecl -> {
                 "struct ${node.name} { " + node.fields.joinToString("  ") { "${it.first} ${it.second}" } + " }"
             }
@@ -197,6 +204,9 @@ fun printAst(root: PtNode, skipLibraries: Boolean, output: (text: String) -> Uni
                 val chain = if(node.chain.isEmpty()) "" else "${node.chain}"
                 val deref = if(node.derefLast) "^^" else ""
                 "deref  $chain $deref  ${type(node.type)}"
+            }
+            is PtSwap -> {
+                "swap"
             }
         }
     }
@@ -214,6 +224,7 @@ fun printAst(root: PtNode, skipLibraries: Boolean, output: (text: String) -> Uni
                         output("    ".repeat(depth) + txt(node))
                     }
                 }
+                true  // Continue traversal
             }
         }
         println()
@@ -225,14 +236,7 @@ fun printAst(root: PtNode, skipLibraries: Boolean, output: (text: String) -> Uni
                 if (txt.isNotEmpty())
                     output("    ".repeat(depth) + txt(node))
             }
+            true  // Continue traversal
         }
     }
-}
-
-fun walkAst(root: PtNode, act: (node: PtNode, depth: Int) -> Unit) {
-    fun recurse(node: PtNode, depth: Int) {
-        act(node, depth)
-        node.children.forEach { recurse(it, depth+1) }
-    }
-    recurse(root, 0)
 }

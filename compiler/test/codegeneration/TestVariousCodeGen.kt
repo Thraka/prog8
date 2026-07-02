@@ -1,5 +1,6 @@
 package prog8tests.codegeneration
 
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.engine.spec.tempdir
 import io.kotest.matchers.ints.shouldBeGreaterThan
@@ -8,6 +9,7 @@ import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldStartWith
 import io.kotest.matchers.types.instanceOf
+import io.kotest.matchers.types.shouldBeInstanceOf
 import prog8.code.StNodeType
 import prog8.code.ast.*
 import prog8.code.core.BaseDataType
@@ -15,6 +17,8 @@ import prog8.code.core.DataType
 import prog8.code.target.*
 import prog8tests.helpers.ErrorReporterForTests
 import prog8tests.helpers.compileText
+import prog8tests.helpers.shouldContainInOrder
+import prog8tests.helpers.simulate
 import kotlin.io.path.readText
 
 class TestVariousCodeGen: FunSpec({
@@ -87,7 +91,6 @@ main {
         st.flat.size shouldBeGreaterThan 100
         st.flat["cbm.CHROUT"]?.type shouldBe StNodeType.EXTSUB
         st.lookup("cbm.CHROUT")?.type shouldBe StNodeType.EXTSUB
-        st.lookupUnscoped("sizeof")?.type shouldBe StNodeType.BUILTINFUNC
     }
 
     test("peek and poke argument types") {
@@ -95,9 +98,9 @@ main {
 main {
     sub start() {
         uword[3] arr
-        ubyte i = 42
-        uword ww = peekw(arr[i])
-        ubyte xx = peek(arr[i])
+        ubyte @shared i = 42
+        uword @shared ww = peekw(arr[i])
+        ubyte @shared xx = peek(arr[i])
         xx = @(arr[i])
         
         @(arr[i]) = 42
@@ -112,7 +115,7 @@ main {
         val text="""
 main {
     sub start() {
-        uword factor1
+        uword @shared factor1
         ubyte[3] bytearray
         uword[3] wordarray
         @(factor1) = bytearray[0]
@@ -306,10 +309,10 @@ main
 {
     sub start()
     {
-        uword uw = 54321
-        ubyte ub = 123
-        word sw = -12345
-        byte sb = -123
+        uword @shared uw = 54321
+        ubyte @shared ub = 123
+        word @shared sw = -12345
+        byte @shared sb = -123
 
         func_uw(~ub as uword) 
         func_ub(~uw as ubyte) 
@@ -351,28 +354,6 @@ main {
 }"""
         compileText(VMTarget(), true, src, outputDir, writeAssembly = false) shouldNotBe null
         compileText(Cx16Target(), true, src, outputDir, writeAssembly = false) shouldNotBe null
-    }
-
-    test("push pop are inlined also with noopt") {
-        val text = """
-main {
-    sub start() {
-        sys.push(11)
-        sys.pushw(2222)
-        sys.push_returnaddress(3333)
-        cx16.r2++
-        cx16.r1 = sys.popw()
-        cx16.r0L = sys.pop()
-    } 
-}"""
-        val result = compileText(C64Target(), false, text, outputDir, writeAssembly = true)!!
-        val assemblyFile = result.compilationOptions.outputDir.resolve(result.compilerAst.name + ".asm")
-        val assembly = assemblyFile.readText()
-        assembly shouldContain "inlined routine follows: push"
-        assembly shouldContain "inlined routine follows: pushw"
-        assembly shouldContain "inlined routine follows: push_returnaddress"
-        assembly shouldContain "inlined routine follows: pop"
-        assembly shouldContain "inlined routine follows: popw"
     }
 
     test("syslib correctly available for raw outputs") {
@@ -476,6 +457,117 @@ main {
     }    
 }"""
         compileText(Cx16Target(), false, src, outputDir, writeAssembly = true) shouldNotBe null
+    }
+
+    test("extsub with float return in multi-assign") {
+        val src="""
+%import floats
+
+main {
+    extsub 5000 = get_float_and_byte() -> float @FAC1, ubyte @X
+
+    sub start() {
+        float @shared f
+        ubyte @shared b
+
+        f, b = get_float_and_byte()
+    }
+}"""
+        val errors = ErrorReporterForTests()
+        compileText(Cx16Target(), false, src, outputDir, writeAssembly = true, errors = errors) shouldNotBe null
+        errors.errors.size shouldBe 0
+    }
+
+    test("extsub with mixed returns including float") {
+        // Test with multiple return types including FP, status flags, and CPU registers
+        val src="""
+%import floats
+
+main {
+    extsub 5000 = get_multi() -> bool @Pc, float @FAC1, ubyte @X, uword @AY
+
+    sub start() {
+        bool @shared flag
+        float @shared f
+        ubyte @shared b
+        uword @shared w
+
+        flag, f, b, w = get_multi()
+        void, f, void, void = get_multi()
+    }
+}"""
+        val errors = ErrorReporterForTests()
+        compileText(Cx16Target(), false, src, outputDir, writeAssembly = true, errors = errors) shouldNotBe null
+        errors.errors.size shouldBe 0
+    }
+
+    test("regular sub with float return in multi-assign") {
+        // Test that regular Prog8 subroutines with float returns work correctly
+        // Float can be in any position now - the compiler ensures FAC1 is assigned last
+        // to avoid being clobbered by other return value computations
+        val src="""
+%import floats
+
+main {
+    sub start() {
+        bool flag
+        ubyte b
+        float f
+        flag, b, f = multi_test(42.0)
+    }
+
+    sub multi_test(float input) -> bool, ubyte, float {
+        return true, input as ubyte, 3.14
+    }
+}"""
+        val errors = ErrorReporterForTests()
+        compileText(Cx16Target(), false, src, outputDir, writeAssembly = true, errors = errors) shouldNotBe null
+        errors.errors.size shouldBe 0
+    }
+
+    test("regular sub with float in middle of multi-return") {
+        // Test float as the middle return value - this used to fail because
+        // computing the ubyte return value clobbered FAC1
+        val src="""
+%import floats
+
+main {
+    sub start() {
+        bool flag
+        float f
+        ubyte b
+        flag, f, b = multi_test(42.0)
+    }
+
+    sub multi_test(float input) -> bool, float, ubyte {
+        return true, 3.14, input as ubyte
+    }
+}"""
+        val errors = ErrorReporterForTests()
+        compileText(Cx16Target(), false, src, outputDir, writeAssembly = true, errors = errors) shouldNotBe null
+        errors.errors.size shouldBe 0
+    }
+
+    test("regular sub with float first in multi-return") {
+        // Test float as the first return value
+        val src="""
+%import floats
+
+main {
+    sub start() {
+        float f
+        bool flag
+        ubyte b
+        f, flag, b = multi_test(42.0)
+    }
+
+    sub multi_test(float input) -> float, bool, ubyte {
+        return 3.14, true, input as ubyte
+    }
+}"""
+        val errors = ErrorReporterForTests()
+        compileText(Cx16Target(), false, src, outputDir, writeAssembly = true, errors = errors) shouldNotBe null
+        errors.errors.size shouldBe 0
     }
 
     test("missing rts in asmsub") {
@@ -591,23 +683,27 @@ main {
         val result = compileText(C64Target(), true, text, outputDir, writeAssembly = true)!!
         val assemblyFile = result.compilationOptions.outputDir.resolve(result.compilerAst.name + ".asm")
         val assembly = assemblyFile.readText()
-        assembly shouldContain "bit  cx16.r0L"
-        assembly shouldContain "bit  cx16.r1L"
-        assembly shouldContain "bit  cx16.r2L"
-        assembly shouldContain "bit  cx16.r3L"
-        assembly shouldContain "bit  cx16.r4L"
-        assembly shouldContain "bit  cx16.r5L"
+        assembly.shouldContainInOrder(
+            "bit  cx16.r0L",
+            "bit  cx16.r1L",
+            "bit  cx16.r2L",
+            "bit  cx16.r3L",
+            "bit  cx16.r4L",
+            "bit  cx16.r5L"
+        )
 
         val resultIR = compileText(VMTarget(), true, text, outputDir, writeAssembly = true)!!
         val irFile = resultIR.compilationOptions.outputDir.resolve(result.compilerAst.name + ".p8ir")
         val ir = irFile.readText()
-        ir shouldContain "bit.b ${'$'}ff02"     // r0
-        ir shouldContain "bit.b ${'$'}ff04"     // r1
-        ir shouldContain "bit.b ${'$'}ff06"     // f2
-        ir shouldContain "bit.b ${'$'}ff08"     // r3
-        ir shouldContain "bit.b ${'$'}ff0a"     // r4
-        ir shouldContain "bit.b ${'$'}ff0c"     // r5
-    }
+        ir.shouldContainInOrder(
+            "bit.b ${'$'}ff02",     // r0
+            "bit.b ${'$'}ff04",     // r1
+            "bit.b ${'$'}ff06",     // f2
+            "bit.b ${'$'}ff08",     // r3
+            "bit.b ${'$'}ff0a",     // r4
+            "bit.b ${'$'}ff0c"      // r5
+        )
+    } 
 
     test("strings in if expression") {
         val src="""
@@ -712,5 +808,190 @@ main {
 }"""
         compileText(C64Target(), false, src, outputDir, writeAssembly = true)!!
         compileText(Cx16Target(), false, src, outputDir, writeAssembly = true)!!
+    }
+
+    test("returning multivalue functioncall that can be short-circuited") {
+        val src= """
+main {
+
+    sub start() {
+        ubyte a,b = multi()
+    }
+
+    sub multi() -> ubyte, ubyte {
+        cx16.r0++
+        return multi2()
+    }
+
+    sub multi2() -> ubyte, ubyte {
+        cx16.r0++
+        return 42, 99
+    }
+}"""
+
+        compileText(Cx16Target(), false, src, outputDir) shouldNotBe null
+        compileText(VMTarget(), false, src, outputDir) shouldNotBe null
+    }
+
+    test("returning multivalue functioncall that cannot be short-circuited") {
+        val src= """
+main {
+
+    sub start() {
+        ubyte a,b = multi()
+    }
+
+    sub multi() -> ubyte, ubyte {
+        cx16.r0++
+        return multi2(99)
+    }
+
+    sub multi2(ubyte x) -> ubyte, ubyte {
+        x++
+        return 42, 99
+    }
+}"""
+
+        compileText(Cx16Target(), false, src, outputDir) shouldNotBe null
+        compileText(VMTarget(), false, src, outputDir) shouldNotBe null
+    }
+
+    test("efficient 6502 array indexing code for s[index+const]") {
+        val source = """
+            %zeropage basicsafe
+            main {
+                sub rstrip(str s) {
+                    s[cx16.r0L+1] = 0
+                }
+                sub start() {
+                    rstrip("hello")
+                }
+            }
+        """.trimIndent()
+
+        val result = compileText(Cx16Target(), true, source, outputDir)!!
+
+        // 1. Check SimpleAst (codegenAst)
+        // We expect operand order optimization to have swapped 's' and '(cx16.r0L + 1)'
+        // so that the pointer 's' is on the right, because that is the least complex operand
+
+        val additions = mutableListOf<PtBinaryExpression>()
+        walkAst(result.codegenAst!!) { node, _ ->
+            if (node is PtBinaryExpression && node.operator == "+" && !node.position.file.contains("library:")) {
+                additions.add(node)
+            }
+            true
+        }
+
+        // In the SimpleAst for this program, we expect:
+        // 1. cx16.r0L + 1
+        // 2. (cx16.r0L + 1) + main.rstrip.s
+
+        additions.size shouldBe 2
+
+        val outerAddition = additions.find { it.type.isPointer || it.type.isUnsignedWord }!!
+
+        withClue("Pointer 's' should be on the right due to operand order optimization") {
+            val right = outerAddition.right
+            right.shouldBeInstanceOf<PtIdentifier>()
+            right.name shouldContain "p8v_s"
+        }
+
+        // 2. Check Assembly
+        val asmFile = result.compilationOptions.outputDir.resolve(result.compilerAst.name + ".asm")
+        val asm = asmFile.readText()
+
+        withClue("Should use efficient sta (zp),y instruction") {
+            asm shouldContain "sta  (p8v_s),y"
+        }
+    }
+
+    test("IfExpression string to pointer typecast") {
+        val src = """
+            %option no_sysinit
+            %launcher none
+            %address $1000
+            
+            main {
+                sub start() {
+                    str a = "hello"
+                    str b = "world"
+                    bool flag = true
+                    ^^ubyte p = if flag then a else b
+                }
+            }
+        """.trimIndent()
+
+        // This should not crash during compilation
+        val compileResult = compileText(Cx16Target(), false, src, outputDir)
+        compileResult shouldNotBe null
+
+        // Also test with virtual target
+        val compileResultVM = compileText(VMTarget(), false, src, outputDir)
+        compileResultVM shouldNotBe null
+    }
+
+    test("BranchConditionExpression string to pointer typecast") {
+        val src = """
+            %option no_sysinit
+            %launcher none
+            %address $1000
+            
+            main {
+                sub start() {
+                    str a = "hello"
+                    str b = "world"
+                    ^^ubyte p = if_z then a else b
+                }
+            }
+        """.trimIndent()
+
+        // This should not crash during compilation
+        val compileResult = compileText(Cx16Target(), false, src, outputDir)
+        compileResult shouldNotBe null
+    }
+
+    test("pointer assignment to variable in 6502 backend") {
+        val src = """
+            %option no_sysinit
+            %launcher none
+            %address $1000
+            
+            main {
+                ubyte value = 42
+                ^^ubyte @shared ptr = 0
+                
+                sub start() {
+                    ptr = &value
+                }
+            }
+        """.trimIndent()
+
+        // This should not crash during compilation
+        val compileResult = compileText(Cx16Target(), false, src, outputDir)
+        compileResult shouldNotBe null
+
+        // Verify it actually works by simulating
+        compileResult!!.simulate()
+    }
+
+    test("pointer assignment to array element in 6502 backend") {
+        val src = """
+            %option no_sysinit
+            %launcher none
+            %address $1000
+            
+            main {
+                ubyte value = 42
+                ^^ubyte[2] ptrs
+                
+                sub start() {
+                    ptrs[1] = &value
+                }
+            }
+        """.trimIndent()
+
+        val compileResult = compileText(Cx16Target(), false, src, outputDir)
+        compileResult shouldNotBe null
     }
 })

@@ -29,11 +29,13 @@ ON: 'on';
 GOTO: 'goto';
 CALL: 'call';
 INLINE: 'inline';
+PRIVATE: 'private';
 STEP: 'step';
 ELSE: 'else';
 THEN: 'then';
+ENUM: 'enum';
 
-UNICODEDNAME :  [\p{Letter}][\p{Letter}\p{Mark}\p{Digit}_]* ;           // match unicode properties
+UNICODEDNAME :  [\p{Letter}]([\p{Letter}\p{Mark}\p{Digit}_] | '::')* ;           // match unicode properties
 UNDERSCORENAME :  '_' UNICODEDNAME ;           // match unicode properties
 DEC_INTEGER :  DEC_DIGIT (DEC_DIGIT | '_')* ;
 HEX_INTEGER :  '$' HEX_DIGIT (HEX_DIGIT | '_')* ;
@@ -48,10 +50,9 @@ fragment HEX_DIGIT: ('a'..'f') | ('A'..'F') | ('0'..'9') ;
 fragment BIN_DIGIT: ('0' | '1') ;
 fragment DEC_DIGIT: ('0'..'9') ;
 
-FLOAT_NUMBER :  FNUMBER (('E'|'e') ('+' | '-')? DEC_INTEGER)? ;    // sign comes later from unary expression
-FNUMBER : FDOTNUMBER |  FNUMDOTNUMBER ;
-FDOTNUMBER : '.' (DEC_DIGIT | '_')+ ;
-FNUMDOTNUMBER : DEC_DIGIT (DEC_DIGIT | '_')* FDOTNUMBER? ;
+FLOAT_NUMBER : DEC_DIGIT (DEC_DIGIT | '_')* ('.' (DEC_DIGIT | '_')*)? (('E'|'e') ('+'|'-')? DEC_INTEGER)?
+             | '.' (DEC_DIGIT | '_')+ (('E'|'e') ('+'|'-')? DEC_INTEGER)?
+             ;
 
 STRING_ESCAPE_SEQ :  '\\' [\u0021-\u007E] | '\\x' HEX_DIGIT HEX_DIGIT | '\\u' HEX_DIGIT HEX_DIGIT HEX_DIGIT HEX_DIGIT;
 STRING :
@@ -84,6 +85,9 @@ module_element:
 
 block: identifier integerliteral? EOL? '{' EOL? (block_statement | EOL)* '}';
 
+// Note: enum and alias appear in both block_statement and statement rules.
+// This is intentional - they are declaration statements like variabledeclaration,
+// and can appear at block level or inside subroutines (local enums/aliases).
 block_statement:
     directive
     | variabledeclaration
@@ -92,6 +96,7 @@ block_statement:
     | inlineasm
     | labeldef
     | alias
+    | enum
     ;
 
 
@@ -121,7 +126,37 @@ statement :
     | labeldef
     | defer
     | alias
+    | enum
+    | swap
+    // Error recovery: match tokens that can NEVER start a valid expression
+    | 'if' '{'
+      { notifyErrorListeners("Missing condition: expected expression after 'if'"); }
+    | 'while' '{'
+      { notifyErrorListeners("Missing condition: expected expression after 'while'"); }
+    | 'for' identifier 'in' '}'
+      { notifyErrorListeners("Missing range: expected expression after 'in'"); }
+    | 'for' identifier 'in' ('else' | 'return' | 'break' | 'continue' | 'defer' | '}')
+      { notifyErrorListeners("Missing range: expected expression after 'in'"); }
+    | 'return' ('}' | 'else' | 'while' | 'for' | 'if' | 'defer')
+      { notifyErrorListeners("Invalid token after 'return'"); }
+    | 'defer' ('}' | 'else' | 'while' | 'for' | 'if' | 'return' | 'break' | 'continue')
+      { notifyErrorListeners("Expected statement after 'defer'"); }
+    | 'when' '{'
+      { notifyErrorListeners("Missing expression: expected condition after 'when'"); }
+    | ENUM '{'
+      { notifyErrorListeners("Expected enum name after 'enum'"); }
+    | STRUCT '{'
+      { notifyErrorListeners("Expected struct name after 'struct'"); }
+    | ON (GOTO | CALL)
+      { notifyErrorListeners("Missing expression: expected index after 'on'"); }
     ;
+
+
+enum :  PRIVATE? ENUM identifier '{' EOL? enum_member? (',' EOL? enum_member)* ','? EOL? '}' ;       // you can split the values over several lines, trailing comma allowed
+
+enum_member :  identifier ('=' integerliteral)?  ;
+
+swap: 'swap' '(' assign_target ',' assign_target ')' ;
 
 
 variabledeclaration :
@@ -133,7 +168,7 @@ variabledeclaration :
 
 
 structdeclaration:
-    STRUCT identifier '{' EOL? (structfielddecl | EOL)+ '}'
+    PRIVATE? STRUCT identifier '{' EOL? (structfielddecl | EOL)+ '}'
     ;
 
 structfielddecl: datatype identifierlist;
@@ -145,7 +180,7 @@ subroutinedeclaration :
     | extsubroutine
     ;
 
-alias: 'alias' identifier '=' scoped_identifier ;
+alias: PRIVATE? 'alias' identifier '=' scoped_identifier ;
 
 defer: 'defer' (statement | statement_block) ;
 
@@ -161,13 +196,16 @@ directivenamelist: '(' EOL? scoped_identifier (',' EOL? scoped_identifier)* ','?
 
 directivearg : stringliteral | identifier | integerliteral ;
 
-vardecl: datatype (arrayindex | EMPTYARRAYSIG)? TAG* identifierlist ;
+vardecl: PRIVATE? datatype (arrayindex arrayindex? | EMPTYARRAYSIG)? TAG* identifierlist ;
 
 identifierlist: identifier (',' identifier)* ;
 
-varinitializer : vardecl '=' expression ;
+varinitializer :
+    vardecl '=' expression
+    | vardecl '=' tuple_expression
+    ;
 
-constdecl: 'const' datatype? identifierlist '=' expression ;
+constdecl: PRIVATE? 'const' datatype? identifierlist '=' expression ;
 
 memoryvardecl: ADDRESS_OF varinitializer;
 
@@ -179,12 +217,18 @@ pointertype: POINTER (scoped_identifier | basedatatype);
 
 arrayindex:  '[' expression ']' ;
 
-assignment :  (assign_target '=' expression) | (assign_target '=' assignment) | (multi_assign_target '=' expression);
+assignment :
+    assign_target '=' expression
+    | assign_target '=' assignment
+    | multi_assign_target '=' expression
+    | multi_assign_target '=' tuple_expression
+    ;
 
 augassignment :
     assign_target operator=('+=' | '-=' | '/=' | '*=' | '&=' | '|=' | '^=' | '%=' | '<<=' | '>>=' ) expression
     ;
 
+// Note: VOID can be used in multiple ways but a semantic AST check takes care of any mistakes there later.
 assign_target:
     scoped_identifier               #IdentifierTarget
     | arrayindexed                  #ArrayindexedTarget
@@ -232,12 +276,13 @@ expression :
     | staticstructinitializer
     ;
 
+tuple_expression: expression (',' EOL? expression)+  ;
 
-sizeof_argument: basedatatype | expression | pointertype ;
+sizeof_argument: basedatatype | scoped_identifier | pointertype | addressof ;
 
 
 arrayindexed:
-    scoped_identifier arrayindex
+    scoped_identifier arrayindex+
     ;
 
 
@@ -263,7 +308,7 @@ breakstmt : 'break';
 
 continuestmt: 'continue';
 
-identifier :  UNICODEDNAME | UNDERSCORENAME | ON | CALL | INLINE | STEP ;              // due to the way antlr creates tokens, need to list the tokens here explicitly that we want to allow as identifiers too
+identifier :  UNICODEDNAME | UNDERSCORENAME | ON | CALL | INLINE | PRIVATE | STEP ;              // due to the way antlr creates tokens, need to list the tokens here explicitly that we want to allow as identifiers too
 
 scoped_identifier :  identifier ('.' identifier)* ;
 
@@ -292,7 +337,7 @@ literalvalue :
 inlineasm :  directivename EOL? INLINEASMBLOCK;         // directive name should be '%asm' or '%ir'
 
 subroutine :
-    'sub' identifier '(' sub_params? ')' sub_return_part? EOL? (statement_block EOL?)
+    PRIVATE? INLINE? 'sub' identifier '(' sub_params? ')' sub_return_part? EOL? (statement_block EOL?)
     ;
 
 sub_return_part : '->' datatype (',' datatype)*  ;
@@ -309,14 +354,16 @@ sub_params :  sub_param (',' EOL? sub_param)* ;
 sub_param: vardecl ('@' register=UNICODEDNAME)? ;
 
 asmsubroutine :
-    INLINE? 'asmsub' asmsub_decl EOL? (statement_block EOL?)
+    PRIVATE? INLINE? 'asmsub' asmsub_decl EOL? (statement_block EOL?)
     ;
 
 extsubroutine :
-    'extsub' (TAG (constbank=integerliteral | varbank=scoped_identifier))? address=expression '=' asmsub_decl
+    PRIVATE? 'extsub' (TAG (constbank=integerliteral | varbank=scoped_identifier))? address=expression '=' asmsub_decl
     ;
 
-asmsub_decl : identifier '(' asmsub_params? ')' asmsub_clobbers? asmsub_returns? ;
+asmsub_signature : '(' asmsub_params? ')' asmsub_clobbers? asmsub_returns? ;
+
+asmsub_decl : identifier asmsub_signature ;
 
 asmsub_params :  asmsub_param (',' EOL? asmsub_param)* ;
 
@@ -369,6 +416,10 @@ whenstmt: 'when' expression EOL? '{' EOL? (when_choice | EOL) * '}' EOL? ;
 
 when_choice:  (expression_list | ELSE ) '->' (statement | statement_block ) ;
 
+// ON...GOTO/ON...CALL with optional else clause - classic BASIC-style multi-way branch.
+// This is intentional retro syntax appropriate for 6502/BASIC target audience.
+// The else_part handles out-of-range indices (useful for menu dispatch with error handling).
+// Compiles efficiently to 6502 jump tables. NOT a design flaw - fits the retro platform.
 ongoto: ON expression kind=(GOTO | CALL) directivenamelist EOL? else_part? ;
 
 staticstructinitializer: POINTER? scoped_identifier ':' arrayliteral ;

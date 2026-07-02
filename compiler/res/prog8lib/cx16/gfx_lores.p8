@@ -1,6 +1,6 @@
 ; optimized graphics routines for just the single screen mode: lores 320*240, 256c  (8bpp)
-; bitmap image needs to start at VRAM addres $00000.
-; This is compatible with the CX16's screen mode 128.  (void cx16.set_screen_mode(128))
+; bitmap image needs to start at VRAM address $00000.
+; This is compatible with the CX16's screen mode 128.
 
 
 %import syslib
@@ -14,23 +14,14 @@ gfx_lores {
     const ubyte HEIGHT = 240
 
     sub graphics_mode() {
-        ; enable 320x240 256c bitmap graphics mode
-        cx16.VERA_CTRL=0
-        cx16.VERA_DC_VIDEO = (cx16.VERA_DC_VIDEO & %11001111) | %00100000      ; enable only layer 1
-        cx16.VERA_DC_HSCALE = 64
-        cx16.VERA_DC_VSCALE = 64
-        cx16.VERA_L1_CONFIG = %00000111
-        cx16.VERA_L1_MAPBASE = 0
-        cx16.VERA_L1_TILEBASE = 0
+        ; enable 320x240 256c bitmap graphics mode. Just make use the kernal's mode 128, but clear it to black.
+        cx16.set_screen_mode(128)
         clear_screen(0)
         drawmode_eor(false)
     }
 
     sub text_mode() {
-        ; back to normal text mode
-        cx16.r15L = cx16.VERA_DC_VIDEO & %00000111 ; retain chroma + output mode
-        cbm.CINT()
-        cx16.VERA_DC_VIDEO = (cx16.VERA_DC_VIDEO & %11111000) | cx16.r15L
+        cx16.set_screen_mode(0)
     }
 
     sub drawmode_eor(bool enabled) {
@@ -42,7 +33,7 @@ gfx_lores {
 
     sub clear_screen(ubyte color) {
         if verafx.available() {
-            ; use verafx cache writes to quicly clear the screen
+            ; use verafx cache writes to quickly clear the screen
             const ubyte vbank = 0
             const uword vaddr = 0
             cx16.VERA_CTRL = 0
@@ -275,6 +266,7 @@ gfx_lores {
         ;
         ; NOTE:  is currently still a regular 6502 routine, could likely be made much faster with the VeraFX line helper.
 
+        cx16.r4L = color   ; cache color in r4L for internal_line_plot
         cx16.r3L = y2    ; ensure zeropage
         cx16.r1L = y1    ; ensure zeropage
 
@@ -303,7 +295,6 @@ gfx_lores {
             return
         }
 
-        word @zp d = 0
         bool positive_ix = true
         if dx < 0 {
             dx = -dx
@@ -311,15 +302,17 @@ gfx_lores {
         }
         word @zp dx2 = dx*2
         word @zp dy2 = dy*2
+        word @zp d        ; error term (initialized below based on shallow/steep)
 
         cx16.r0  = x1    ; ensure zeropage
         cx16.r2  = x2    ; ensure zeropage
 
         cx16.VERA_CTRL = 0
         if dx >= dy {
+            d = dx >> 1   ; Initialize error to DX/2 for shallow lines
             if positive_ix {
                 repeat {
-                    plot()
+                    internal_line_plot()
                     if cx16.r0==cx16.r2
                         return
                     cx16.r0++
@@ -331,7 +324,7 @@ gfx_lores {
                 }
             } else {
                 repeat {
-                    plot()
+                    internal_line_plot()
                     if cx16.r0==cx16.r2
                         return
                     cx16.r0--
@@ -344,9 +337,10 @@ gfx_lores {
             }
         }
         else {
+            d = dy >> 1   ; Initialize error to DY/2 for steep lines
             if positive_ix {
                 repeat {
-                    plot()
+                    internal_line_plot()
                     if cx16.r1L == cx16.r3L
                         return
                     cx16.r1L++
@@ -358,7 +352,7 @@ gfx_lores {
                 }
             } else {
                 repeat {
-                    plot()
+                    internal_line_plot()
                     if cx16.r1L == cx16.r3L
                         return
                     cx16.r1L++
@@ -370,33 +364,35 @@ gfx_lores {
                 }
             }
         }
+    }
 
-        asmsub plot() {
-            ; internal plot routine for the line algorithm: x in r0,  y in r1,  color in variable.
-            %asm {{
-                ldy  cx16.r1L
-                clc
-                lda  times320_lo,y
-                adc  cx16.r0L
-                sta  cx16.VERA_ADDR_L
-                lda  times320_mid,y
-                adc  cx16.r0H
-                sta  cx16.VERA_ADDR_M
-                lda  #0
-                adc  times320_hi,y
-                sta  cx16.VERA_ADDR_H
+    private asmsub internal_line_plot() {
+        ; Internal plot routine for line algorithm.
+        ; Uses: x in cx16.r0, y in cx16.r1L, color in cx16.r4L
+        ; Checks eor_mode flag for XOR vs normal drawing.
+        %asm {{
+            ldy  cx16.r1L
+            clc
+            lda  times320_lo,y
+            adc  cx16.r0L
+            sta  cx16.VERA_ADDR_L
+            lda  times320_mid,y
+            adc  cx16.r0H
+            sta  cx16.VERA_ADDR_M
+            lda  #0
+            adc  times320_hi,y
+            sta  cx16.VERA_ADDR_H
 
-                lda  p8v_eor_mode
-                bne  +
-                lda  p8v_color
-                sta  cx16.VERA_DATA0
-                rts
-+               lda  p8v_color
-                eor  cx16.VERA_DATA0
-                sta  cx16.VERA_DATA0
-                rts
-            }}
-        }
+            lda  p8v_eor_mode
+            bne  +
+            lda  cx16.r4L
+            sta  cx16.VERA_DATA0
+            rts
++           lda  cx16.r4L
+            eor  cx16.VERA_DATA0
+            sta  cx16.VERA_DATA0
+            rts
+        }}
     }
 
     sub circle(uword @zp xcenter, ubyte @zp ycenter, ubyte radius, ubyte color) {
@@ -620,17 +616,17 @@ gfx_lores {
         sub push_stack(word sxl, word sxr, word sy, byte sdy) {
             cx16.r0s = sy+sdy
             if cx16.r0s>=0 and cx16.r0s<=HEIGHT-1 {
-                stack.pushw(sxl as uword)
-                stack.pushw(sxr as uword)
-                stack.pushw(sy as uword)
-                stack.push(sdy as ubyte)
+                stack.push_w(sxl as uword)
+                stack.push_w(sxr as uword)
+                stack.push_w(sy as uword)
+                stack.push_b(sdy as ubyte)
             }
         }
         sub pop_stack() {
-            dy = stack.pop() as byte
-            yy = stack.popw() as word
-            x2 = stack.popw() as word
-            x1 = stack.popw() as word
+            dy = stack.pop_b() as byte
+            yy = stack.pop_w() as word
+            x2 = stack.pop_w() as word
+            x1 = stack.pop_w() as word
             yy+=dy
         }
         cx16.r11L = pget(xx as uword, lsb(yy))        ; old_color

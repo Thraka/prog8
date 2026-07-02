@@ -25,7 +25,7 @@ class PETTarget: ICompilationTarget,
 
     override val FLOAT_MAX_POSITIVE = Mflpt5.FLOAT_MAX_POSITIVE
     override val FLOAT_MAX_NEGATIVE = Mflpt5.FLOAT_MAX_NEGATIVE
-    override val FLOAT_MEM_SIZE = Mflpt5.FLOAT_MEM_SIZE
+    override val FLOAT_MEM_SIZE = Mflpt5.FLOAT_MEM_SIZE.toUInt()
     override val STARTUP_CODE_RESERVED_SIZE = 20u
     override val PROGRAM_LOAD_ADDRESS = 0x0401u
     override val PROGRAM_MEMTOP_ADDRESS = 0x8000u
@@ -36,7 +36,6 @@ class PETTarget: ICompilationTarget,
     override val BSSGOLDENRAM_END = 0u
 
     override lateinit var zeropage: Zeropage
-    override lateinit var golden: GoldenRam
 
     override fun getFloatAsmBytes(num: Number) = Mflpt5.fromNumber(num).makeFloatFillAsm()
 
@@ -74,7 +73,6 @@ class PETTarget: ICompilationTarget,
 
     override fun initializeMemoryAreas(compilerOptions: CompilationOptions) {
         zeropage = PETZeropage(compilerOptions)
-        golden = GoldenRam(compilerOptions, UIntRange.EMPTY)
     }
 
 }

@@ -1,22 +1,22 @@
 package prog8.optimizer
 
 import prog8.ast.*
-import prog8.ast.expressions.BinaryExpression
-import prog8.ast.expressions.NumericLiteral
-import prog8.ast.expressions.PrefixExpression
-import prog8.ast.expressions.TypecastExpression
+import prog8.ast.expressions.*
 import prog8.ast.statements.*
+import prog8.ast.walk.AstModification
+import prog8.ast.walk.AstRemove
+import prog8.ast.walk.AstReplaceNode
 import prog8.ast.walk.AstWalker
-import prog8.ast.walk.IAstModification
 import prog8.code.PROG8_CONTAINER_MODULES
-import prog8.code.core.ICompilationTarget
+import prog8.code.core.CompilationOptions
 import prog8.code.core.IErrorReporter
+import prog8.code.core.InplaceModifyingBuiltinFunctions
 import prog8.compiler.CallGraph
 
 
 class UnusedCodeRemover(private val program: Program,
                         private val errors: IErrorReporter,
-                        private val compTarget: ICompilationTarget
+                        private val options: CompilationOptions
 ): AstWalker() {
 
     private lateinit var callgraph: CallGraph
@@ -25,59 +25,51 @@ class UnusedCodeRemover(private val program: Program,
     init {
         neverRemoveSubroutines.add(program.entrypoint)
 
-        program.allBlocks.singleOrNull { it.name=="sys" } ?.let {
-            val subroutines = it.statements.filterIsInstance<Subroutine>()
-            val push = subroutines.single { s -> s.name == "push" }
-            val pushw = subroutines.single { s -> s.name == "pushw" }
-            val pop = subroutines.single { s -> s.name == "pop" }
-            val popw = subroutines.single { s -> s.name == "popw" }
-            neverRemoveSubroutines.add(push)
-            neverRemoveSubroutines.add(pushw)
-            neverRemoveSubroutines.add(pop)
-            neverRemoveSubroutines.add(popw)
-        }
-
         program.allBlocks.singleOrNull { it.name=="floats" } ?.let {
             val subroutines = it.statements.filterIsInstance<Subroutine>()
-            val push = subroutines.single { s -> s.name == "push" }
-            val pop = subroutines.single { s -> s.name == "pop" }
-            neverRemoveSubroutines.add(push)
-            neverRemoveSubroutines.add(pop)
-
             subroutines
                 .filter { s -> s.name == "internal_long_R1_to_float_AY" || s.name=="internal_long_AY_to_FAC" }
                 .forEach { sub -> neverRemoveSubroutines.add(sub) }
         }
+
+        program.allBlocks.singleOrNull { it.name=="prog8_lib" } ?.let {
+            val subroutines = it.statements.filterIsInstance<Subroutine>()
+            val prog8LibModulesToKeep = mutableListOf("sqrt_long")
+            if(options.profilingInstrumentation)
+                prog8LibModulesToKeep.add("profile_sub_entry")
+            subroutines.filter { s -> s.name in prog8LibModulesToKeep }
+                .forEach { sub -> neverRemoveSubroutines.add(sub) }
+        }
     }
 
-    override fun before(program: Program): Iterable<IAstModification> {
+    override fun before(program: Program): Iterable<AstModification> {
         callgraph = CallGraph(program)
         return noModifications
     }
 
-    override fun before(module: Module, parent: Node): Iterable<IAstModification> {
+    override fun before(module: Module, parent: Node): Iterable<AstModification> {
         return if (!module.isLibrary && (module.containsNoCodeNorVars || callgraph.unused(module)))
-            listOf(IAstModification.Remove(module, parent as IStatementContainer))
+            listOf(AstRemove(module, parent as IStatementContainer))
         else
             noModifications
     }
 
-    override fun before(breakStmt: Break, parent: Node): Iterable<IAstModification> {
+    override fun before(breakStmt: Break, parent: Node): Iterable<AstModification> {
         reportUnreachable(breakStmt)
         return noModifications
     }
 
-    override fun before(jump: Jump, parent: Node): Iterable<IAstModification> {
+    override fun before(jump: Jump, parent: Node): Iterable<AstModification> {
         reportUnreachable(jump)
         return noModifications
     }
 
-    override fun before(returnStmt: Return, parent: Node): Iterable<IAstModification> {
+    override fun before(returnStmt: Return, parent: Node): Iterable<AstModification> {
         reportUnreachable(returnStmt)
         return noModifications
     }
 
-    override fun before(functionCallStatement: FunctionCallStatement, parent: Node): Iterable<IAstModification> {
+    override fun before(functionCallStatement: FunctionCallStatement, parent: Node): Iterable<AstModification> {
         if(functionCallStatement.target.nameInSource.last() == "exit")
             reportUnreachable(functionCallStatement)
         return noModifications
@@ -90,18 +82,18 @@ class UnusedCodeRemover(private val program: Program,
         }
     }
 
-    override fun after(scope: AnonymousScope, parent: Node): Iterable<IAstModification> {
+    override fun after(scope: AnonymousScope, parent: Node): Iterable<AstModification> {
         return deduplicateAssignments(scope.statements, scope)
     }
 
-    override fun after(block: Block, parent: Node): Iterable<IAstModification> {
+    override fun after(block: Block, parent: Node): Iterable<AstModification> {
         if("force_output" !in block.options()) {
             if (block.containsNoCodeNorVars) {
                 if (block.name !in PROG8_CONTAINER_MODULES && "ignore_unused" !in block.options()) {
                     if (!block.statements.any { it is Subroutine && it.hasBeenInlined })
                         errors.info("removing unused block '${block.name}'", block.position)
                 }
-                return listOf(IAstModification.Remove(block, parent as IStatementContainer))
+                return listOf(AstRemove(block, parent as IStatementContainer))
             }
             if (callgraph.unused(block)) {
                 if (block.statements.any { it !is VarDecl || it.type == VarDeclType.VAR } && "ignore_unused" !in block.options()) {
@@ -111,24 +103,24 @@ class UnusedCodeRemover(private val program: Program,
                 if (!block.statements.any { it is Subroutine && it.hasBeenInlined }) {
                     program.removeInternedStringsFromRemovedBlock(block)
                 }
-                return listOf(IAstModification.Remove(block, parent as IStatementContainer))
+                return listOf(AstRemove(block, parent as IStatementContainer))
             }
         }
 
         return deduplicateAssignments(block.statements, block)
     }
 
-    override fun after(subroutine: Subroutine, parent: Node): Iterable<IAstModification> {
+    override fun after(subroutine: Subroutine, parent: Node): Iterable<AstModification> {
         val forceOutput = "force_output" in subroutine.definingBlock.options()
         if (subroutine !in neverRemoveSubroutines && !forceOutput && !subroutine.isAsmSubroutine) {
             if(callgraph.unused(subroutine)) {
                 if(subroutine.containsNoCodeNorVars) {
                     if("ignore_unused" !in subroutine.definingBlock.options())
                         errors.info("removing empty subroutine '${subroutine.name}'", subroutine.position)
-                    val removals = mutableListOf(IAstModification.Remove(subroutine, parent as IStatementContainer))
+                    val removals = mutableListOf(AstRemove(subroutine, parent as IStatementContainer))
                     callgraph.calledBy[subroutine]?.let {
                         for(node in it)
-                            removals.add(IAstModification.Remove(node, node.parent as IStatementContainer))
+                            removals.add(AstRemove(node, node.parent as IStatementContainer))
                     }
                     return removals
                 }
@@ -138,26 +130,74 @@ class UnusedCodeRemover(private val program: Program,
                 if(!subroutine.inline) {
                     program.removeInternedStringsFromRemovedSubroutine(subroutine)
                 }
-                return listOf(IAstModification.Remove(subroutine, parent as IStatementContainer))
+                return listOf(AstRemove(subroutine, parent as IStatementContainer))
             }
         }
 
         return deduplicateAssignments(subroutine.statements, subroutine)
     }
 
-    override fun after(decl: VarDecl, parent: Node): Iterable<IAstModification> {
+    override fun after(decl: VarDecl, parent: Node): Iterable<AstModification> {
         if(decl.type==VarDeclType.VAR) {
             val block = decl.definingBlock
             val forceOutput = "force_output" in block.options()
             if (!forceOutput && decl.origin==VarDeclOrigin.USERCODE && !decl.sharedWithAsm) {
                 val usages = callgraph.usages(decl)
+                val (writes, reads) = usages
+                    .partition {
+                        it is InlineAssembly
+                                || it.parent is AssignTarget
+                                || it.parent is ForLoop
+                                || (it.parent as? IFunctionCall)?.target?.nameInSource?.singleOrNull() in InplaceModifyingBuiltinFunctions
+                    }
+
+                // Check if the first assignment (VARINIT) is immediately overwritten by a constant (USERCODE)
+                // without any intermediate reads or complex control flow.
+                if(decl.definingSubroutine != null && writes.size >= 2) {
+                    val w1 = writes[0]
+                    val w2 = writes[1]
+                    val firstAssignment = findParentNode<Assignment>(w1)
+                    val secondAssignment = findParentNode<Assignment>(w2)
+                    if(firstAssignment?.origin==AssignmentOrigin.VARINIT && secondAssignment?.origin==AssignmentOrigin.USERCODE 
+                        && secondAssignment.target.identifier?.targetStatement(program.builtinFunctions) == decl
+                        && secondAssignment.value.constValue(program)!=null) {
+                        val i1 = usages.indexOf(w1)
+                        val i2 = usages.indexOf(w2)
+                        if (i1 != -1 && i2 != -1 && i1 < i2) {
+                            val inBetween = usages.subList(i1 + 1, i2)
+                            val readsBetween = inBetween.any { it in reads }
+                            if (!readsBetween) {
+                                if (firstAssignment.parent === secondAssignment.parent && firstAssignment.parent is IStatementContainer) {
+                                    val stmts = (firstAssignment.parent as IStatementContainer).statements
+                                    val si1 = stmts.indexOf(firstAssignment)
+                                    val si2 = stmts.indexOf(secondAssignment)
+                                    if (si1 != -1 && si2 != -1 && si1 < si2) {
+                                        val inBetween = stmts.subList(si1 + 1, si2)
+                                        val addressTaken = usages.any { findParentNode<AddressOf>(it) != null }
+                                        val safe = inBetween.all { stmt ->
+                                            isStatementSafe(stmt, decl, addressTaken)
+                                        }
+                                        if (safe) {
+                                            if (decl.hasExplicitInitializer) {
+                                                val onlyOnce = if (writes.size == 2) "only " else ""
+                                                errors.warn("variable '${decl.name}' (declared at line ${decl.position.line}) is ${onlyOnce}assigned here, consider using this as the initialization value in the declaration instead", secondAssignment.position)
+                                            }
+                                            return listOf(AstRemove(firstAssignment, firstAssignment.parent as IStatementContainer))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (usages.isEmpty()) {
                     if(decl.names.size>1) {
                         errors.info("unused variable '${decl.name}'", decl.position)
                     } else {
                         if ("ignore_unused" !in decl.definingBlock.options())
                             errors.info("removing unused variable '${decl.name}'", decl.position)
-                        return listOf(IAstModification.Remove(decl, parent as IStatementContainer))
+                        return listOf(AstRemove(decl, parent as IStatementContainer))
                     }
                 }
                 else {
@@ -174,8 +214,8 @@ class UnusedCodeRemover(private val program: Program,
                                         if("ignore_unused" !in decl.definingBlock.options())
                                             errors.info("removing unused variable '${decl.name}'", decl.position)
                                         return listOf(
-                                            IAstModification.Remove(decl, parent as IStatementContainer),
-                                            IAstModification.Remove(assignment, assignment.parent as IStatementContainer)
+                                            AstRemove(decl, parent as IStatementContainer),
+                                            AstRemove(assignment, assignment.parent as IStatementContainer)
                                         )
                                     }
                                 } else if(assignment.value is IFunctionCall) {
@@ -183,20 +223,20 @@ class UnusedCodeRemover(private val program: Program,
                                     // but only if the vardecl immediately precedes it!
                                     if(singleUse.parent.parent === parent) {
                                         val declIndex = (parent as IStatementContainer).statements.indexOf(decl)
-                                        val singleUseIndex = (parent as IStatementContainer).statements.indexOf(singleUse.parent)
+                                        val singleUseIndex = (parent as IStatementContainer).statements.indexOf(singleUse.parent as Statement)
                                         if(declIndex==singleUseIndex-1) {
                                             val callStruct = (assignment.value as IFunctionCall).target.targetStructDecl()
                                             if(callStruct!=null) {
                                                 // don't turn a struct instance allocation call to a void call, instead, remove everything
-                                                return listOf(IAstModification.Remove(assignment, assignment.parent as IStatementContainer))
+                                                return listOf(AstRemove(assignment, assignment.parent as IStatementContainer))
                                             } else {
                                                 if("ignore_unused" !in decl.definingBlock.options())
                                                     errors.info("replaced unused variable '${decl.name}' with void call, maybe this can be removed altogether", decl.position)
                                                 val fcall = assignment.value as IFunctionCall
                                                 val voidCall = FunctionCallStatement(fcall.target, fcall.args, true, fcall.position)
                                                 return listOf(
-                                                    IAstModification.ReplaceNode(decl, voidCall, parent),
-                                                    IAstModification.Remove(assignment, assignment.parent as IStatementContainer)
+                                                    AstReplaceNode(decl, voidCall, parent),
+                                                    AstRemove(assignment, assignment.parent as IStatementContainer)
                                                 )
                                             }
                                         }
@@ -214,29 +254,29 @@ class UnusedCodeRemover(private val program: Program,
         return noModifications
     }
 
-    override fun after(assignment: Assignment, parent: Node): Iterable<IAstModification> {
-        if(assignment.target isSameAs assignment.value)
-            return listOf(IAstModification.Remove(assignment, parent as IStatementContainer))
+    override fun after(assignment: Assignment, parent: Node): Iterable<AstModification> {
+        if(assignment.target isSameAs assignment.value && !assignment.target.hasSideEffects(options.compTarget) && !assignment.value.hasSideEffects(options.compTarget))
+            return listOf(AstRemove(assignment, parent as IStatementContainer))
         return noModifications
     }
 
-    private fun deduplicateAssignments(statements: List<Statement>, scope: IStatementContainer): List<IAstModification> {
+    private fun deduplicateAssignments(statements: List<Statement>, scope: IStatementContainer): List<AstModification> {
         // removes 'duplicate' assignments that assign the same target directly after another, unless it is a function call
         val linesToRemove = mutableListOf<Assignment>()
-        val modifications = mutableListOf<IAstModification>()
+        val modifications = mutableListOf<AstModification>()
 
         fun substituteZeroInBinexpr(expr: BinaryExpression, zero: NumericLiteral, assign1: Assignment, assign2: Assignment) {
             if(expr.left isSameAs assign2.target) {
                 // X = X <oper> Right
                 linesToRemove.add(assign1)
-                modifications.add(IAstModification.ReplaceNode(
+                modifications.add(AstReplaceNode(
                     expr.left, zero, expr
                 ))
             }
             if(expr.right isSameAs assign2.target) {
                 // X = Left <oper> X
                 linesToRemove.add(assign1)
-                modifications.add(IAstModification.ReplaceNode(
+                modifications.add(AstReplaceNode(
                     expr.right, zero, expr
                 ))
             }
@@ -246,14 +286,14 @@ class UnusedCodeRemover(private val program: Program,
                 if(leftBinExpr.left isSameAs assign2.target) {
                     // X = (X <oper> Right) <oper> Something
                     linesToRemove.add(assign1)
-                    modifications.add(IAstModification.ReplaceNode(
+                    modifications.add(AstReplaceNode(
                         leftBinExpr.left, zero, leftBinExpr
                     ))
                 }
                 if(leftBinExpr.right isSameAs assign2.target) {
                     // X = (Left <oper> X) <oper> Something
                     linesToRemove.add(assign1)
-                    modifications.add(IAstModification.ReplaceNode(
+                    modifications.add(AstReplaceNode(
                         leftBinExpr.right, zero, leftBinExpr
                     ))
                 }
@@ -262,14 +302,14 @@ class UnusedCodeRemover(private val program: Program,
                 if(rightBinExpr.left isSameAs assign2.target) {
                     // X = Something <oper> (X <oper> Right)
                     linesToRemove.add(assign1)
-                    modifications.add(IAstModification.ReplaceNode(
+                    modifications.add(AstReplaceNode(
                         rightBinExpr.left, zero, rightBinExpr
                     ))
                 }
                 if(rightBinExpr.right isSameAs assign2.target) {
                     // X = Something <oper> (Left <oper> X)
                     linesToRemove.add(assign1)
-                    modifications.add(IAstModification.ReplaceNode(
+                    modifications.add(AstReplaceNode(
                         rightBinExpr.right, zero, rightBinExpr
                     ))
                 }
@@ -279,7 +319,7 @@ class UnusedCodeRemover(private val program: Program,
         fun substituteZeroInPrefixexpr(expr: PrefixExpression, zero: NumericLiteral, assign1: Assignment, assign2: Assignment) {
             if(expr.expression isSameAs assign2.target) {
                 linesToRemove.add(assign1)
-                modifications.add(IAstModification.ReplaceNode(
+                modifications.add(AstReplaceNode(
                     expr.expression, zero, expr
                 ))
             }
@@ -288,14 +328,14 @@ class UnusedCodeRemover(private val program: Program,
         fun substituteZeroInTypecast(expr: TypecastExpression, zero: NumericLiteral, assign1: Assignment, assign2: Assignment) {
             if(expr.expression isSameAs assign2.target) {
                 linesToRemove.add(assign1)
-                modifications.add(IAstModification.ReplaceNode(
+                modifications.add(AstReplaceNode(
                     expr.expression, zero, expr
                 ))
             }
             val subCast = expr.expression as? TypecastExpression
             if(subCast!=null && subCast.expression isSameAs assign2.target) {
                 linesToRemove.add(assign1)
-                modifications.add(IAstModification.ReplaceNode(
+                modifications.add(AstReplaceNode(
                     subCast.expression, zero, subCast
                 ))
             }
@@ -316,7 +356,7 @@ class UnusedCodeRemover(private val program: Program,
                         else -> {}
                     }
                 } else {
-                    if (assign1.target.isSameAs(assign2.target, program) && !assign1.target.isIOAddress(compTarget))  {
+                    if (assign1.target.isSameAs(assign2.target, program) && !assign1.target.isIOAddress(options.compTarget) && !assign1.value.isIORead(options.compTarget))  {
                         if(assign2.target.identifier==null || !assign2.value.referencesIdentifier(assign2.target.identifier!!.nameInSource))
                             // only remove the second assignment if its value is a simple expression!
                             when(assign2.value) {
@@ -334,6 +374,60 @@ class UnusedCodeRemover(private val program: Program,
             }
         }
 
-        return modifications + linesToRemove.map { IAstModification.Remove(it, scope) }
+        return modifications + linesToRemove.map { AstRemove(it, scope) }
+    }
+
+    private fun isStatementSafe(stmt: Statement, decl: VarDecl, addressTaken: Boolean): Boolean {
+        return when (stmt) {
+            is Label, is Jump, is IfElse, is ConditionalBranch,
+            is ForLoop, is WhileLoop, is RepeatLoop, is UntilLoop,
+            is UnrollLoop, is Return, is Subroutine, is Block,
+            is AnonymousScope, is When, is InlineAssembly,
+            is Break, is Continue, is OnGoto -> false
+
+            is FunctionCallStatement -> {
+                if (addressTaken) return false
+                val definingSub = decl.definingSubroutine
+                if (definingSub == null) false // global: unsafe
+                else {
+                    val target = stmt.target.targetStatement(program.builtinFunctions)
+                    if (target is Subroutine) {
+                        !isNestedWithin(target, definingSub)
+                    } else if (target is BuiltinFunctionPlaceholder) {
+                        target.name !in setOf("call", "callfar", "callfar2")
+                    } else {
+                        true
+                    }
+                }
+            }
+
+            is Assignment -> {
+                (stmt.target.identifier != null || stmt.target.arrayindexed?.isSimple == true)
+                && isSafeExpression(stmt.value)
+            }
+
+            else -> true
+        }
+    }
+
+    private fun isNestedWithin(sub: Subroutine, parentSub: Subroutine): Boolean {
+        var p = sub.definingSubroutine
+        while (p != null) {
+            if (p === parentSub) return true
+            p = p.definingSubroutine
+        }
+        return false
+    }
+
+    private fun isSafeExpression(expr: Expression): Boolean {
+        return when (expr) {
+            is NumericLiteral -> true
+            is IdentifierReference -> true
+            is BinaryExpression -> isSafeExpression(expr.left) && isSafeExpression(expr.right)
+            is PrefixExpression -> isSafeExpression(expr.expression)
+            is ArrayIndexedExpression -> expr.isSimple
+            is TypecastExpression -> isSafeExpression(expr.expression)
+            else -> expr.isSimple
+        }
     }
 }

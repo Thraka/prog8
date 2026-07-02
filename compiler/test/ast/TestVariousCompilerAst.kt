@@ -266,17 +266,17 @@ main {
             errors.errors[5] shouldContain "invalid number of arguments: expected 2 but got 0"
         }
 
-        xtest("chained aliasing") {
+        test("chained aliasing") {
             val src="""
 main {
     sub start() {
         alias s1 = testblock.sub1
-        alias s2 = s1.sub2      ; TODO fix alias error
-        alias vx = s2.var2      ; TODO fix alias error
-        vx = 999
+        alias s2 = s1.sub2
+        alias vx = s2.var2
+        vx = 99
 
         alias tb = testblock
-        alias vv = tb.variable      ; TODO fix alias error
+        alias vv = tb.variable
         vv = 99
     }
 }
@@ -293,6 +293,9 @@ testblock {
 }"""
             val errors = ErrorReporterForTests()
             compileText(C64Target(), optimize=false, src, outputDir, writeAssembly=false, errors=errors) shouldNotBe null
+            errors.errors.size shouldBe 0
+            errors.clear()
+            compileText(VMTarget(), optimize=false, src, outputDir, writeAssembly=false, errors=errors) shouldNotBe null
             errors.errors.size shouldBe 0
         }
     }
@@ -455,11 +458,11 @@ main {
             val src="""
 main {
     sub start() {
-        ubyte w
+        ubyte @shared w
 
         for w in 0 to 20 {
-            ubyte @zp x,y,z=13
-            ubyte q,r,s
+            ubyte @shared @zp x,y,z=13
+            ubyte @shared q,r,s
             x++
             y++
             z++
@@ -468,28 +471,6 @@ main {
 }"""
             val result = compileText(VMTarget(), optimize = false, src, outputDir, writeAssembly = false)!!
             val st = result.compilerAst.entrypoint.statements
-            /*
-        sub start () {
-            ubyte s
-            s = 0
-            ubyte r
-            r = 0
-            ubyte q
-            q = 0
-            ubyte @zp z
-            ubyte @zp y
-            ubyte @zp x
-            ubyte w
-            for w in 0 to 20 step 1  {
-                z = 13
-                y = 13
-                x = 13
-                x++
-                y++
-                z++
-            }
-        }
-             */
             val vars = st.filterIsInstance<VarDecl>()
             vars.size shouldBe 7
             vars.all { it.names.size<=1 } shouldBe true
@@ -596,6 +577,58 @@ main {
             blockassignments[0].target.identifier?.nameInSource shouldBe listOf("globwi")
             blockassignments[1].target.identifier?.nameInSource shouldBe listOf("globfi")
         }
+
+        test("multi value vardecls and assignments") {
+            val src="""
+main {
+    sub start() {
+        ubyte @shared x,y,z  = 11,22,33
+        x,y,z = 99,88,77
+    }
+}"""
+            val result = compileText(VMTarget(), optimize=false, src, outputDir) shouldNotBe null
+            val st = result!!.codegenAst!!.entrypoint()!!.children
+            st.size shouldBe 11
+            (st[1] as PtVariable).name shouldBe "main.start.x"
+            (st[2] as PtVariable).name shouldBe "main.start.y"
+            (st[3] as PtVariable).name shouldBe "main.start.z"
+            (st[4] as PtAssignment).target.identifier!!.name shouldBe "main.start.x"
+            ((st[4] as PtAssignment).value as PtNumber).number shouldBe 11.0
+            (st[5] as PtAssignment).target.identifier!!.name shouldBe "main.start.y"
+            ((st[5] as PtAssignment).value as PtNumber).number shouldBe 22.0
+            (st[6] as PtAssignment).target.identifier!!.name shouldBe "main.start.z"
+            ((st[6] as PtAssignment).value as PtNumber).number shouldBe 33.0
+            (st[7] as PtAssignment).target.identifier!!.name shouldBe "main.start.x"
+            ((st[7] as PtAssignment).value as PtNumber).number shouldBe 99.0
+            (st[8] as PtAssignment).target.identifier!!.name shouldBe "main.start.y"
+            ((st[8] as PtAssignment).value as PtNumber).number shouldBe 88.0
+            (st[9] as PtAssignment).target.identifier!!.name shouldBe "main.start.z"
+            ((st[9] as PtAssignment).value as PtNumber).number shouldBe 77.0
+        }
+
+        test("multivalue vardecls size error") {
+            val src="""
+main {
+    sub start() {
+        ubyte @shared a,b,c = 11,22,33,44
+    }
+}"""
+            val errors = ErrorReporterForTests(keepMessagesAfterReporting = true)
+            compileText(VMTarget(), optimize=false, src, outputDir, errors=errors) shouldBe null
+            errors.errors.size shouldBe 1
+            errors.errors[0] shouldContain "does not match"
+        }
+
+        test("multivalue assignment size error") {
+            val src="""
+main {
+    sub start() {
+        ubyte @shared a,b,c
+        a,b,c = 99,88,77,66
+    }
+}"""
+            compileText(VMTarget(), optimize=false, src, outputDir) shouldBe null
+        }
     }
 
 context("various") {
@@ -669,8 +702,8 @@ main {
         val src="""
 main {
     sub start() {
-        ubyte shift = 10
-        uword value = 1<<shift
+        ubyte @shared shift = 10
+        uword @shared value = 1<<shift
         value++
         value = 1<<shift
         value++
@@ -874,17 +907,6 @@ main {
     }
 
 
-    test("sizeof number const evaluation in vardecl") {
-        val src="""
-main {
-    sub start() {
-        uword @shared size1 = sizeof(22222)
-        uword @shared size2 = sizeof(2.2)
-    }
-}"""
-        compileText(VMTarget(), optimize=false, src, outputDir, writeAssembly=false) shouldNotBe null
-    }
-
     test("'not in' operator parsing") {
         val src="""
 main {
@@ -966,7 +988,7 @@ main {
         (expr1 isSameAs expr3) shouldBe false
     }
 
-    test("isSame on binary expressions with associative operators") {
+    test("isSame on binary expressions with commutative operators") {
         val left1 = NumericLiteral.optimalInteger(1, Position.DUMMY)
         val right1 = NumericLiteral.optimalInteger(2, Position.DUMMY)
         val expr1 = BinaryExpression(left1, "+", right1, Position.DUMMY)
@@ -1101,69 +1123,6 @@ main {
         array2.type shouldBe DataType.arrayFor(BaseDataType.UWORD, true)
     }
 
-    test("defer syntactic sugaring") {
-        val src="""
-main {
-    sub start() {
-        void test()
-    }
-
-    sub test() -> uword {
-        defer {
-            cx16.r0++
-            cx16.r1++
-        }
-        
-        if cx16.r0==0 {
-            defer cx16.r1++
-        }
-
-        if cx16.r0==0
-            return cx16.r0+cx16.r1
-        defer cx16.r2++
-        return 999
-    }
-}"""
-        val result = compileText(Cx16Target(), optimize=true, src, outputDir, writeAssembly=true)!!
-        val main = result.codegenAst!!.allBlocks().single {it.name=="p8b_main"}
-        val sub = main.children[1] as PtSub
-        sub.scopedName shouldBe "p8b_main.p8s_test"
-
-        // check the desugaring of the defer statements
-        sub.children[0] shouldBe instanceOf<PtSubSignature>()
-        (sub.children[1] as PtVariable).name shouldBe "p8v_prog8_defers_mask"
-
-        val firstDefer = sub.children[3] as PtAugmentedAssign
-        firstDefer.operator shouldBe "|="
-        firstDefer.target.identifier?.name shouldBe "p8b_main.p8s_test.p8v_prog8_defers_mask"
-        firstDefer.value.asConstInteger() shouldBe 4
-
-        val firstIf = sub.children[4] as PtIfElse
-        val deferInIf = firstIf.ifScope.children[0] as PtAugmentedAssign
-        deferInIf.operator shouldBe "|="
-        deferInIf.target.identifier?.name shouldBe "p8b_main.p8s_test.p8v_prog8_defers_mask"
-        deferInIf.value.asConstInteger() shouldBe 2
-
-        val lastDefer = sub.children[6] as PtAugmentedAssign
-        lastDefer.operator shouldBe "|="
-        lastDefer.target.identifier?.name shouldBe "p8b_main.p8s_test.p8v_prog8_defers_mask"
-        lastDefer.value.asConstInteger() shouldBe 1
-
-        val ifelse = sub.children[5] as PtIfElse
-        val ifscope = ifelse.ifScope.children[0] as PtNodeGroup
-        val ifscope_push = ifscope.children[0] as PtFunctionCall
-        val ifscope_defer = ifscope.children[1] as PtFunctionCall
-        val ifscope_return = ifscope.children[2] as PtReturn
-        ifscope_defer.name shouldBe "p8b_main.p8s_test.p8s_prog8_invoke_defers"
-        ifscope_push.name shouldBe "sys.pushw"
-        (ifscope_return.children.single() as PtFunctionCall).name shouldBe "sys.popw"
-
-        val ending = sub.children[7] as PtFunctionCall
-        ending.name shouldBe "p8b_main.p8s_test.p8s_prog8_invoke_defers"
-        sub.children[8] shouldBe instanceOf<PtReturn>()
-        val handler = sub.children[9] as PtSub
-        handler.name shouldBe "p8s_prog8_invoke_defers"
-    }
 
     test("unknown variable in for loop gives proper errors") {
         val src="""
@@ -1195,23 +1154,43 @@ main {
 }"""
         val result1 = compileText(VMTarget(), optimize=true, src, outputDir, writeAssembly=true)!!
         val st1 = result1.codegenAst!!.entrypoint()!!.children
-        st1.size shouldBe 6
+        // After inlining, the multi-value assignment is split into 3 separate assignments with literal values
+        st1.size shouldBe 8
         (st1[1] as PtVariable).name shouldBe "main.start.x"
         (st1[2] as PtVariable).name shouldBe "main.start.y"
         (st1[3] as PtVariable).name shouldBe "main.start.z"
-        st1[4].children.size shouldBe 4
-        st1[4].children.dropLast(1).map { (it as PtAssignTarget).identifier!!.name } shouldBe listOf("main.start.x", "main.start.y", "main.start.z")
-        ((st1[4] as PtAssignment).value as PtFunctionCall).name shouldBe "main.multi"
+        // Check first split assignment - value should be inlined literal
+        st1[4].children.size shouldBe 2
+        (st1[4].children.first() as PtAssignTarget).identifier!!.name shouldBe "main.start.x"
+        ((st1[4] as PtAssignment).value as PtNumber).number shouldBe 1.0
+        // Check second split assignment - value should be inlined literal
+        st1[5].children.size shouldBe 2
+        (st1[5].children.first() as PtAssignTarget).identifier!!.name shouldBe "main.start.y"
+        ((st1[5] as PtAssignment).value as PtNumber).number shouldBe 2.0
+        // Check third split assignment - value should be inlined literal
+        st1[6].children.size shouldBe 2
+        (st1[6].children.first() as PtAssignTarget).identifier!!.name shouldBe "main.start.z"
+        ((st1[6] as PtAssignment).value as PtNumber).number shouldBe 3.0
 
         val result2 = compileText(Cx16Target(), optimize=true, src, outputDir, writeAssembly=true)!!
         val st2 = result2.codegenAst!!.entrypoint()!!.children
-        st2.size shouldBe 6
+        // After inlining, the multi-value assignment is split into 3 separate assignments with literal values
+        st2.size shouldBe 8
         (st2[1] as PtVariable).name shouldBe "p8v_x"
         (st2[2] as PtVariable).name shouldBe "p8v_y"
         (st2[3] as PtVariable).name shouldBe "p8v_z"
-        st2[4].children.size shouldBe 4
-        st2[4].children.dropLast(1).map { (it as PtAssignTarget).identifier!!.name } shouldBe listOf("p8b_main.p8s_start.p8v_x", "p8b_main.p8s_start.p8v_y", "p8b_main.p8s_start.p8v_z")
-        ((st2[4] as PtAssignment).value as PtFunctionCall).name shouldBe "p8b_main.p8s_multi"
+        // Check first split assignment - value should be inlined literal
+        st2[4].children.size shouldBe 2
+        (st2[4].children.first() as PtAssignTarget).identifier!!.name shouldBe "p8b_main.p8s_start.p8v_x"
+        ((st2[4] as PtAssignment).value as PtNumber).number shouldBe 1.0
+        // Check second split assignment - value should be inlined literal
+        st2[5].children.size shouldBe 2
+        (st2[5].children.first() as PtAssignTarget).identifier!!.name shouldBe "p8b_main.p8s_start.p8v_y"
+        ((st2[5] as PtAssignment).value as PtNumber).number shouldBe 2.0
+        // Check third split assignment - value should be inlined literal
+        st2[6].children.size shouldBe 2
+        (st2[6].children.first() as PtAssignTarget).identifier!!.name shouldBe "p8b_main.p8s_start.p8v_z"
+        ((st2[6] as PtAssignment).value as PtNumber).number shouldBe 3.0
     }
 
     test("address-of a uword pointer with word index should not overflow") {

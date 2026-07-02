@@ -6,9 +6,7 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.types.instanceOf
-import prog8.ast.expressions.BinaryExpression
-import prog8.ast.expressions.IdentifierReference
-import prog8.ast.expressions.NumericLiteral
+import prog8.ast.expressions.*
 import prog8.ast.statements.Assignment
 import prog8.ast.statements.Return
 import prog8.ast.statements.VarDecl
@@ -500,6 +498,21 @@ main {
         compileText(Cx16Target(), true, src, outputDir, writeAssembly = false) shouldNotBe null
     }
 
+    test("const string to pointer type compiles") {
+        val src = """
+main {
+    sub start() {
+        const ^^ubyte name = "irmen"
+        thing(name)
+    }
+    
+    sub thing(str x) {
+        cx16.r0L++
+    }
+}"""
+        compileText(VMTarget(), true, src, outputDir, writeAssembly = false) shouldNotBe null
+    }
+
     test("const long with large unsigned long values should be converted to signed longs") {
         val src = $$"""
 main {
@@ -572,5 +585,225 @@ main {
         compileText(Cx16Target(), false, src, outputDir, writeAssembly = true) shouldNotBe null
     }
 
+    test("enum") {
+        val src = """
+main {
+
+    enum Priority {
+        LOW = 1,
+        NORMAL,
+        HIGH,
+        EXTREME=255
+    }
+
+    sub start() {
+    }
+}"""
+
+        val result = compileText(Cx16Target(), false, src, outputDir, writeAssembly = false)!!
+        val st = result.compilerAst.allBlocks.first { it.name=="main" }.statements
+        st.size shouldBe 5
+        val c1 = st[0] as VarDecl
+        val c2 = st[1] as VarDecl
+        val c3 = st[2] as VarDecl
+        val c4 = st[3] as VarDecl
+        c1.name shouldBe "Priority::LOW"
+        c2.name shouldBe "Priority::NORMAL"
+        c3.name shouldBe "Priority::HIGH"
+        c4.name shouldBe "Priority::EXTREME"
+        c1.type shouldBe VarDeclType.CONST
+        c2.type shouldBe VarDeclType.CONST
+        c3.type shouldBe VarDeclType.CONST
+        c4.type shouldBe VarDeclType.CONST
+        (c1.value as NumericLiteral).number shouldBe 1.0
+        (c2.value as NumericLiteral).number shouldBe 2.0
+        (c3.value as NumericLiteral).number shouldBe 3.0
+        (c4.value as NumericLiteral).number shouldBe 255.0
+    }
+
+    test("enum with invalid numbering") {
+        val src = """
+main {
+
+    enum Priority {
+        LOW = 1,
+        NORMAL,
+        HIGH,
+        EXTREME=1
+    }
+
+    sub start() {
+    }
+}"""
+
+        val errors = ErrorReporterForTests()
+        compileText(Cx16Target(), false, src, outputDir, writeAssembly = false, errors = errors) shouldBe null
+        errors.errors.size shouldBe 1
+        errors.errors[0] shouldContain ("invalid enum sequence member value EXTREME")
+    }
+
+    test("double colon in name only allowed in desugared enum members") {
+        val src = """
+main {
+
+    enum Priority::zzzz {
+        LOW,
+        NORMAL,
+        HIGH,
+        EXTREME
+    }
+
+    sub start() {
+    }
+}"""
+
+        val errors = ErrorReporterForTests()
+        compileText(Cx16Target(), false, src, outputDir, writeAssembly = false, errors = errors) shouldBe null
+        errors.errors.size shouldBe 1
+        errors.errors[0] shouldContain ("only enum members")
+    }
+
+
+    test("double colon in name only allowed in desugared enum members 2") {
+        val src = """
+main {
+
+    enum Priority {
+        LOW,
+        NORMAL,
+        HIGH,
+        EXT::REME
+    }
+
+    sub start() {
+    }
+}"""
+
+        val errors = ErrorReporterForTests()
+        compileText(Cx16Target(), false, src, outputDir, writeAssembly = false, errors = errors) shouldBe null
+        errors.errors.size shouldBe 1
+        errors.errors[0] shouldContain ("invalid enum member name")
+    }
+
+    test("const memory() - in array initializer") {
+        val src = """
+main {
+    sub start() {
+        const uword mem1 = memory("mem1", 10, 0)
+        const uword mem2 = memory("mem2", 10, 0)
+        uword[2] arr = [mem1, mem2]
+        @(arr[0]) = 111
+        @(arr[1]) = 222
+    }
+}"""
+        compileText(VMTarget(), false, src, outputDir, writeAssembly = true) shouldNotBe null
+        compileText(C64Target(), false, src, outputDir, writeAssembly = true) shouldNotBe null
+    }
+
+    test("const memory() - mixed with regular constants in array") {
+        val src = """
+main {
+    sub start() {
+        const uword mem1 = memory("mem1", 10, 0)
+        const uword const1 = 1000
+        uword[3] arr = [mem1, const1, memory("mem2", 20, 0)]
+    }
+}"""
+        compileText(VMTarget(), false, src, outputDir, writeAssembly = true) shouldNotBe null
+        compileText(C64Target(), false, src, outputDir, writeAssembly = true) shouldNotBe null
+    }
+
+    test("const memory() - direct memory() calls in array") {
+        val src = """
+main {
+    sub start() {
+        uword[3] arr = [memory("m1", 10, 0), memory("m2", 20, 0), memory("m3", 30, 0)]
+    }
+}"""
+        compileText(VMTarget(), false, src, outputDir, writeAssembly = true) shouldNotBe null
+        compileText(C64Target(), false, src, outputDir, writeAssembly = true) shouldNotBe null
+    }
+
+    test("const memory() - mixed with regular values in struct initializer") {
+        val src = """
+main {
+    struct Mixed {
+        uword ptr
+        uword value
+    }
+    
+    sub start() {
+        const uword m = memory("struct_mem", 100, 0)
+        const uword v = 5000
+        ^^Mixed m1 = [m, v]
+        ^^Mixed m2 = [memory("mem2", 50, 0), 1234]
+    }
+}"""
+        compileText(VMTarget(), false, src, outputDir, writeAssembly = true) shouldNotBe null
+        compileText(C64Target(), false, src, outputDir, writeAssembly = true) shouldNotBe null
+    }
+
+    test("const pointer arithmetic folding (byte type)") {
+        val source = """
+            main {
+                const ^^ubyte bptr = $2000
+                sub start() {
+                    uword ptr2 = bptr + $10
+                    cx16.r2 = ptr2
+                }
+            }
+        """.trimIndent()
+        val result = compileText(Cx16Target(), true, source, outputDir, writeAssembly = false)!!
+        val startSub = result.compilerAst.entrypoint
+        val vardecl = startSub.statements.filterIsInstance<VarDecl>().find { it.name == "ptr2" }!!
+        val value = vardecl.value
+        value shouldNotBe null
+        value shouldBe instanceOf<NumericLiteral>()
+        (value as NumericLiteral).number.toInt() shouldBe 0x2010 
+    }
+
+    test("const pointer indexing folding (byte type)") {
+        val source = """
+            main {
+                const ^^ubyte byteptr = $2000
+                sub start() {
+                    cx16.r1L = byteptr[$1000]
+                }
+            }
+        """.trimIndent()
+        val result = compileText(Cx16Target(), true, source, outputDir, writeAssembly = false)!!
+        val startSub = result.compilerAst.entrypoint
+        val assignments = startSub.statements.filterIsInstance<Assignment>()
+
+        // cx16.r1L = byteptr[$1000] -> should be peek($3000)
+        val assign2 = assignments.find { (it.target.toExpression() as? IdentifierReference)?.nameInSource == listOf("cx16", "r1L") }!!
+        var value2 = assign2.value
+        if (value2 is TypecastExpression) value2 = value2.expression
+        if (value2 is FunctionCallExpression) {
+            value2.target.nameInSource shouldBe listOf("peek")
+            (value2.args[0] as NumericLiteral).number.toInt() shouldBe 0x3000
+        } else {
+            ((value2 as DirectMemoryRead).addressExpression as NumericLiteral).number.toInt() shouldBe 0x3000
+        }
+    }
+
+    test("const pointer address-of folding (byte type)") {
+        val source = """
+            main {
+                const ^^ubyte bptr = $2000
+                sub start() {
+                    uword addr = &bptr[$1000]
+                    cx16.r2 = addr
+                }
+            }
+        """.trimIndent()
+        val result = compileText(Cx16Target(), true, source, outputDir, writeAssembly = false)!!
+        val startSub = result.compilerAst.entrypoint
+        val vardecl = startSub.statements.filterIsInstance<VarDecl>().find { it.name == "addr" }!!
+        val value = vardecl.value
+        value shouldNotBe null
+        value shouldBe instanceOf<NumericLiteral>()
+        (value as NumericLiteral).number.toInt() shouldBe 0x3000
+    }
 })
 

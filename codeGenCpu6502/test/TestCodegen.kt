@@ -14,6 +14,9 @@ import prog8.code.source.SourceCode
 import prog8.code.target.C64Target
 import prog8.codegen.cpu6502.AsmGen6502
 import prog8.codegen.cpu6502.VariableAllocator
+import prog8tests.helpers.DummyMemsizer
+import prog8tests.helpers.DummyStringEncoder
+import prog8tests.helpers.ErrorReporterForTests
 import java.nio.file.Files
 import kotlin.io.path.Path
 
@@ -21,20 +24,13 @@ class TestCodegen: FunSpec({
 
     fun getTestOptions(): CompilationOptions {
         val target = C64Target()
-        return CompilationOptions(
-            OutputType.RAW,
-            CbmPrgLauncherType.NONE,
-            ZeropageType.DONTUSE,
-            zpReserved = emptyList(),
-            zpAllowed = CompilationOptions.AllZeropageAllowed,
-            floats = true,
-            noSysInit = false,
-            romable = false,
-            compTarget = target,
-            compilerVersion="99.99",
-            loadAddress = target.PROGRAM_LOAD_ADDRESS,
-            memtopAddress = 0xffffu
-        )
+        return CompilationOptions.builder(target)
+            .output(OutputType.RAW)
+            .zeropage(ZeropageType.DONTUSE)
+            .floats(true)
+            .compilerVersion("99.99")
+            .memtopAddress(0xffffu)
+            .build()
     }
 
     test("augmented assign on arrays") {

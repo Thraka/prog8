@@ -1,5 +1,6 @@
 package prog8.code.ast
 
+import prog8.code.StMemorySlab
 import prog8.code.core.*
 
 
@@ -13,114 +14,7 @@ sealed interface IPtSubroutine {
                 return returns
             }
             is PtSub -> {
-                // for non-asm subroutines, determine the return registers based on the type of the return values
-
-                fun cpuRegisterFor(returntype: DataType): RegisterOrStatusflag = when {
-                    returntype.isByteOrBool -> RegisterOrStatusflag(RegisterOrPair.A, null)
-                    returntype.isWord -> RegisterOrStatusflag(RegisterOrPair.AY, null)
-                    returntype.isLong -> RegisterOrStatusflag(RegisterOrPair.R14R15, null)
-                    returntype.isFloat -> RegisterOrStatusflag(RegisterOrPair.FAC1, null)
-                    else -> RegisterOrStatusflag(RegisterOrPair.AY, null)
-                }
-
-                val returns = signature.returns
-                when(returns.size) {
-                    0 -> return emptyList()
-                    1 -> {
-                        val returntype = returns.single()
-                        val register = cpuRegisterFor(returntype)
-                        return listOf(Pair(register, returntype))
-                    }
-                    else -> {
-                        // for multi-value results, put the first one in A or AY cpu register(s) and the rest in the virtual registers starting from R15 and counting down
-                        // a floating point return values is returned in FAC1. Only a single fp value is possible.
-                        // The reason FAC2 cannot be used as well to support 2 fp values is that working with both FACs interferes with another.
-                        val firstRegister = cpuRegisterFor(returns.first()) to returns.first()
-
-                        val availableIntegerRegisters = Cx16VirtualRegisters.toMutableList()
-                        val availableFloatRegisters = mutableListOf(RegisterOrPair.FAC1)        // just one value is possible
-                        val availableLongRegisters = CombinedLongRegisters.toMutableList()
-
-                        availableLongRegisters.remove(firstRegister.first.registerOrPair)
-
-                        fun getLongRegister(): RegisterOrPair {
-                            val reg = availableLongRegisters.removeLastOrNull()
-                            if(reg==null)
-                                throw AssemblyError("out of registers for long return type ${this.position}")
-                            else {
-                                // remove the pair from integer regs
-                                when(reg) {
-                                    RegisterOrPair.R0R1 -> {
-                                        availableIntegerRegisters.remove(RegisterOrPair.R0)
-                                        availableIntegerRegisters.remove(RegisterOrPair.R1)
-                                    }
-                                    RegisterOrPair.R2R3 -> {
-                                        availableIntegerRegisters.remove(RegisterOrPair.R2)
-                                        availableIntegerRegisters.remove(RegisterOrPair.R3)
-                                    }
-                                    RegisterOrPair.R4R5 -> {
-                                        availableIntegerRegisters.remove(RegisterOrPair.R4)
-                                        availableIntegerRegisters.remove(RegisterOrPair.R5)
-                                    }
-                                    RegisterOrPair.R6R7 -> {
-                                        availableIntegerRegisters.remove(RegisterOrPair.R6)
-                                        availableIntegerRegisters.remove(RegisterOrPair.R7)
-                                    }
-                                    RegisterOrPair.R8R9 -> {
-                                        availableIntegerRegisters.remove(RegisterOrPair.R8)
-                                        availableIntegerRegisters.remove(RegisterOrPair.R9)
-                                    }
-                                    RegisterOrPair.R10R11 -> {
-                                        availableIntegerRegisters.remove(RegisterOrPair.R10)
-                                        availableIntegerRegisters.remove(RegisterOrPair.R11)
-                                    }
-                                    RegisterOrPair.R12R13 -> {
-                                        availableIntegerRegisters.remove(RegisterOrPair.R12)
-                                        availableIntegerRegisters.remove(RegisterOrPair.R13)
-                                    }
-                                    RegisterOrPair.R14R15 -> {
-                                        availableIntegerRegisters.remove(RegisterOrPair.R14)
-                                        availableIntegerRegisters.remove(RegisterOrPair.R15)
-                                    }
-                                    else -> throw AssemblyError("weird long register $reg")
-                                }
-                                return reg
-                            }
-                        }
-
-                        fun getIntegerRegister(): RegisterOrPair {
-                            val reg = availableIntegerRegisters.removeLastOrNull()
-                            if(reg==null)
-                                throw AssemblyError("out of registers for byte/word return type ${this.position}")
-                            else {
-                                // remove it from long regs
-                                when(reg) {
-                                    RegisterOrPair.R0, RegisterOrPair.R1 -> availableLongRegisters.remove(RegisterOrPair.R0R1)
-                                    RegisterOrPair.R2, RegisterOrPair.R3 -> availableLongRegisters.remove(RegisterOrPair.R2R3)
-                                    RegisterOrPair.R4, RegisterOrPair.R5 -> availableLongRegisters.remove(RegisterOrPair.R4R5)
-                                    RegisterOrPair.R6, RegisterOrPair.R7 -> availableLongRegisters.remove(RegisterOrPair.R6R7)
-                                    RegisterOrPair.R8, RegisterOrPair.R9 -> availableLongRegisters.remove(RegisterOrPair.R8R9)
-                                    RegisterOrPair.R10, RegisterOrPair.R11 -> availableLongRegisters.remove(RegisterOrPair.R10R11)
-                                    RegisterOrPair.R12, RegisterOrPair.R13 -> availableLongRegisters.remove(RegisterOrPair.R12R13)
-                                    RegisterOrPair.R14, RegisterOrPair.R15 -> availableLongRegisters.remove(RegisterOrPair.R14R15)
-                                    else -> throw AssemblyError("weird byte/long register $reg")
-                                }
-                                return reg
-                            }
-                        }
-
-                        val others = returns.drop(1).map { type ->
-                            when {
-                                type.isFloat -> RegisterOrStatusflag(availableFloatRegisters.removeLastOrNull()!!, null) to type
-                                type.isLong -> RegisterOrStatusflag(getLongRegister(), null) to type
-                                type.isWordOrByteOrBool -> RegisterOrStatusflag(getIntegerRegister(), null) to type
-                                else -> throw AssemblyError("unsupported return type $type")
-                            }
-                        }
-
-                        return listOf(firstRegister) + others
-                    }
-                }
+                return this.signature.returnsWhatWhere()
             }
         }
     }
@@ -137,6 +31,30 @@ class PtAsmSub(
 ) : PtNamedNode(name, position), IPtSubroutine {
 
     class Address(val constbank: UByte?, var varbank: PtIdentifier?, val address: UInt)
+
+    companion object {
+        fun builder(name: String, position: Position) = Builder(name, position)
+    }
+
+    class Builder(val name: String, val position: Position) {
+        private var address: Address? = null
+        private var clobbers: Set<CpuRegister> = emptySet()
+        private var parameters: MutableList<Pair<RegisterOrStatusflag, PtSubroutineParameter>> = mutableListOf()
+        private var returns: MutableList<Pair<RegisterOrStatusflag, DataType>> = mutableListOf()
+        private var inline: Boolean = false
+
+        fun address(a: Address?) = apply { address = a }
+        fun clobbers(c: Set<CpuRegister>) = apply { clobbers = c }
+        fun parameters(p: Iterable<Pair<RegisterOrStatusflag, PtSubroutineParameter>>) = apply { parameters = p.toMutableList() }
+        fun parameters(vararg p: Pair<RegisterOrStatusflag, PtSubroutineParameter>) = apply { parameters = p.toMutableList() }
+        fun addParameter(reg: RegisterOrStatusflag, param: PtSubroutineParameter) = apply { parameters.add(reg to param) }
+        fun returns(r: Iterable<Pair<RegisterOrStatusflag, DataType>>) = apply { returns = r.toMutableList() }
+        fun returns(vararg r: Pair<RegisterOrStatusflag, DataType>) = apply { returns = r.toMutableList() }
+        fun addReturn(reg: RegisterOrStatusflag, type: DataType) = apply { returns.add(reg to type) }
+        fun inline(i: Boolean) = apply { inline = i }
+
+        fun build() = PtAsmSub(name, address, clobbers, parameters, returns, inline, position)
+    }
 }
 
 
@@ -150,6 +68,26 @@ class PtSub(name: String, position: Position) : PtNamedNode(name, position), IPt
 
     val signature: PtSubSignature
         get() = children[0] as PtSubSignature
+    
+    override fun copy(): PtNode = PtSub(name, position)
+
+    companion object {
+        fun builder(name: String, position: Position) = Builder(name, position)
+    }
+
+    class Builder(val name: String, val position: Position) {
+        private var parameters: MutableList<PtSubroutineParameter> = mutableListOf()
+        private var returntypes: MutableList<DataType> = mutableListOf()
+
+        fun parameters(p: Iterable<PtSubroutineParameter>) = apply { parameters = p.toMutableList() }
+        fun parameters(vararg p: PtSubroutineParameter) = apply { parameters = p.toMutableList() }
+        fun addParameter(p: PtSubroutineParameter) = apply { parameters.add(p) }
+        fun returntypes(r: Iterable<DataType>) = apply { returntypes = r.toMutableList() }
+        fun returntypes(vararg r: DataType) = apply { returntypes = r.toMutableList() }
+        fun addReturntype(t: DataType) = apply { returntypes.add(t) }
+
+        fun build() = PtSub(name, parameters, returntypes, position)
+    }
 }
 
 
@@ -157,7 +95,118 @@ class PtSubSignature(val returns: List<DataType>, position: Position): PtNode(po
     // has all parameters PtSubroutineParameter as children.
     init {
         if(returns.any { !it.isNumericOrBool && !it.isPointer })
-            throw AssemblyError("returntype is not a bool, number or pointer")
+            throw AssemblyError("returntype is not a bool, number or pointer  $position")
+    }
+
+    fun returnsWhatWhere(): List<Pair<RegisterOrStatusflag, DataType>> {
+        // for non-asm subroutines, determine the return registers based on the type of the return values
+
+        fun cpuRegisterFor(returntype: DataType): RegisterOrStatusflag = when {
+            returntype.isByteOrBool -> RegisterOrStatusflag(RegisterOrPair.A, null)
+            returntype.isWord -> RegisterOrStatusflag(RegisterOrPair.AY, null)
+            returntype.isLong -> RegisterOrStatusflag(RegisterOrPair.R14R15, null)
+            returntype.isFloat -> RegisterOrStatusflag(RegisterOrPair.FAC1, null)
+            else -> RegisterOrStatusflag(RegisterOrPair.AY, null)
+        }
+
+        when(returns.size) {
+            0 -> return emptyList()
+            1 -> {
+                val returntype = returns.single()
+                val register = cpuRegisterFor(returntype)
+                return listOf(Pair(register, returntype))
+            }
+            else -> {
+                // for multi-value results, put the first one in A or AY cpu register(s) and the rest in the virtual registers starting from R15 and counting down
+                // a floating point return values is returned in FAC1. Only a single fp value is possible.
+                // The reason FAC2 cannot be used as well to support 2 fp values is that working with both FACs interferes with another.
+                val firstRegister = cpuRegisterFor(returns.first()) to returns.first()
+
+                val availableIntegerRegisters = Cx16VirtualRegisters.toMutableList()
+                val availableFloatRegisters = mutableListOf(RegisterOrPair.FAC1)        // just one value is possible
+                val availableLongRegisters = CombinedLongRegisters.toMutableList()
+
+                availableLongRegisters.remove(firstRegister.first.registerOrPair)
+
+                fun getLongRegister(): RegisterOrPair {
+                    val reg = availableLongRegisters.removeLastOrNull()
+                    if(reg==null)
+                        throw AssemblyError("out of registers for long return type $position")
+                    else {
+                        // remove the pair from integer regs
+                        when(reg) {
+                            RegisterOrPair.R0R1 -> {
+                                availableIntegerRegisters.remove(RegisterOrPair.R0)
+                                availableIntegerRegisters.remove(RegisterOrPair.R1)
+                            }
+                            RegisterOrPair.R2R3 -> {
+                                availableIntegerRegisters.remove(RegisterOrPair.R2)
+                                availableIntegerRegisters.remove(RegisterOrPair.R3)
+                            }
+                            RegisterOrPair.R4R5 -> {
+                                availableIntegerRegisters.remove(RegisterOrPair.R4)
+                                availableIntegerRegisters.remove(RegisterOrPair.R5)
+                            }
+                            RegisterOrPair.R6R7 -> {
+                                availableIntegerRegisters.remove(RegisterOrPair.R6)
+                                availableIntegerRegisters.remove(RegisterOrPair.R7)
+                            }
+                            RegisterOrPair.R8R9 -> {
+                                availableIntegerRegisters.remove(RegisterOrPair.R8)
+                                availableIntegerRegisters.remove(RegisterOrPair.R9)
+                            }
+                            RegisterOrPair.R10R11 -> {
+                                availableIntegerRegisters.remove(RegisterOrPair.R10)
+                                availableIntegerRegisters.remove(RegisterOrPair.R11)
+                            }
+                            RegisterOrPair.R12R13 -> {
+                                availableIntegerRegisters.remove(RegisterOrPair.R12)
+                                availableIntegerRegisters.remove(RegisterOrPair.R13)
+                            }
+                            RegisterOrPair.R14R15 -> {
+                                availableIntegerRegisters.remove(RegisterOrPair.R14)
+                                availableIntegerRegisters.remove(RegisterOrPair.R15)
+                            }
+                            else -> throw AssemblyError("weird long register $reg  $position")
+                        }
+                        return reg
+                    }
+                }
+
+                fun getIntegerRegister(): RegisterOrPair {
+                    val reg = availableIntegerRegisters.removeLastOrNull()
+                    if(reg==null)
+                        throw AssemblyError("out of registers for byte/word return type $position")
+                    else {
+                        // remove it from long regs
+                        when(reg) {
+                            RegisterOrPair.R0, RegisterOrPair.R1 -> availableLongRegisters.remove(RegisterOrPair.R0R1)
+                            RegisterOrPair.R2, RegisterOrPair.R3 -> availableLongRegisters.remove(RegisterOrPair.R2R3)
+                            RegisterOrPair.R4, RegisterOrPair.R5 -> availableLongRegisters.remove(RegisterOrPair.R4R5)
+                            RegisterOrPair.R6, RegisterOrPair.R7 -> availableLongRegisters.remove(RegisterOrPair.R6R7)
+                            RegisterOrPair.R8, RegisterOrPair.R9 -> availableLongRegisters.remove(RegisterOrPair.R8R9)
+                            RegisterOrPair.R10, RegisterOrPair.R11 -> availableLongRegisters.remove(RegisterOrPair.R10R11)
+                            RegisterOrPair.R12, RegisterOrPair.R13 -> availableLongRegisters.remove(RegisterOrPair.R12R13)
+                            RegisterOrPair.R14, RegisterOrPair.R15 -> availableLongRegisters.remove(RegisterOrPair.R14R15)
+                            else -> throw AssemblyError("weird byte/long register $reg $position")
+                        }
+                        return reg
+                    }
+                }
+
+                val others = returns.drop(1).map { type ->
+                    when {
+                        type.isFloat -> RegisterOrStatusflag(availableFloatRegisters.removeLastOrNull()!!, null) to type
+                        type.isLong -> RegisterOrStatusflag(getLongRegister(), null) to type
+                        type.isWordOrByteOrBool -> RegisterOrStatusflag(getIntegerRegister(), null) to type
+                        type.isPointer -> RegisterOrStatusflag(getIntegerRegister(), null) to type
+                        else -> throw AssemblyError("unsupported return type $type $position")
+                    }
+                }
+
+                return listOf(firstRegister) + others
+            }
+        }
     }
 }
 
@@ -166,7 +215,7 @@ class PtSubroutineParameter(name: String, val type: DataType, val register: Regi
 
 
 sealed interface IPtAssignment {
-    val children: MutableList<PtNode>
+    val children: List<PtNode>
     val target: PtAssignTarget
         get() {
             if(children.size==2)
@@ -182,9 +231,13 @@ sealed interface IPtAssignment {
         get() = children.size>2
 }
 
-class PtAssignment(position: Position, val isVarInitializer: Boolean=false) : PtNode(position), IPtAssignment
+class PtAssignment(position: Position, val isVarInitializer: Boolean=false) : PtNode(position), IPtAssignment {
+    override fun copy(): PtNode = PtAssignment(position, isVarInitializer)
+}
 
-class PtAugmentedAssign(val operator: String, position: Position) : PtNode(position), IPtAssignment
+class PtAugmentedAssign(val operator: String, position: Position) : PtNode(position), IPtAssignment {
+    override fun copy(): PtNode = PtAugmentedAssign(operator, position)
+}
 
 
 class PtAssignTarget(val void: Boolean, position: Position) : PtNode(position) {
@@ -230,6 +283,8 @@ class PtForLoop(position: Position) : PtNode(position) {
         get() = children[1] as PtExpression
     val statements: PtNodeGroup
         get() = children[2] as PtNodeGroup
+    
+    override fun copy(): PtNode = PtForLoop(position)
 }
 
 
@@ -242,6 +297,8 @@ class PtIfElse(position: Position) : PtNode(position) {
         get() = children[2] as PtNodeGroup
 
     fun hasElse(): Boolean = children.size==3 && elseScope.children.isNotEmpty()
+    
+    override fun copy(): PtNode = PtIfElse(position)
 }
 
 
@@ -256,10 +313,19 @@ class PtRepeatLoop(position: Position) : PtNode(position) {
         get() = children[0] as PtExpression
     val statements: PtNodeGroup
         get() = children[1] as PtNodeGroup
+    
+    override fun copy(): PtNode = PtRepeatLoop(position)
 }
 
 
-class PtReturn(position: Position) : PtNode(position)  // children are all expressions
+class PtReturn(position: Position) : PtNode(position) {
+    fun numReturnValues(): Int {
+        fun countNumberOfValues(expr: PtExpression): Int =
+            if (expr is PtFunctionCall) expr.returntypes.size else 1   // Count how many return values an expression contributes. A function call that returns multiple values contributes multiple
+
+        return children.sumOf { countNumberOfValues(it as PtExpression) }
+    }
+}
 
 
 sealed interface IPtVariable {
@@ -297,21 +363,93 @@ class PtVariable(
 
         value?.let {it.parent=this}
     }
+
+    companion object {
+        fun builder(name: String, type: DataType, position: Position) = Builder(name, type, position)
+    }
+
+    class Builder(val name: String, val type: DataType, val position: Position) {
+        private var zeropage: ZeropageWish = ZeropageWish.DONTCARE
+        private var align: UInt = 0u
+        private var dirty: Boolean = false
+        private var value: PtExpression? = null
+        private var arraySize: UInt? = null
+
+        fun zeropage(z: ZeropageWish) = apply { zeropage = z }
+        fun align(a: UInt) = apply { align = a }
+        fun dirty(d: Boolean) = apply { dirty = d }
+        fun value(v: PtExpression?) = apply { value = v }
+        fun arraySize(s: UInt?) = apply { arraySize = s }
+
+        fun build() = PtVariable(name, type, zeropage, align, dirty, value, arraySize, position)
+    }
 }
 
 
-class PtConstant(name: String, override val type: DataType, val value: Double, position: Position) : PtNamedNode(name, position), IPtVariable
-// note: a constant is a value but IS NOT a PtExpression node; all constants must have been replaced by their actual value
+class PtConstant(
+    override var name: String,
+    type: DataType,
+    val value: Double?,                 // either a constant number...
+    val memorySlab: StMemorySlab?,     // .. or a memory() allocation
+    position: Position
+) : PtExpression(type, position), IPtVariable {
+
+    companion object {
+        fun builder(name: String, type: DataType, position: Position) = Builder(name, type, position)
+    }
+
+    class Builder(val name: String, val type: DataType, val position: Position) {
+        private var value: Double? = null
+        private var memorySlab: StMemorySlab? = null
+
+        fun value(v: Double?) = apply { value = v }
+        fun memorySlab(s: StMemorySlab?) = apply { memorySlab = s }
+
+        fun build() = PtConstant(name, type, value, memorySlab, position)
+    }
+}
 
 
 class PtMemMapped(name: String, override val type: DataType, val address: UInt, val arraySize: UInt?, position: Position) : PtNamedNode(name, position), IPtVariable {
     init {
         require(!type.isString)
     }
+
+    companion object {
+        fun builder(name: String, type: DataType, address: UInt, position: Position) = Builder(name, type, address, position)
+    }
+
+    class Builder(val name: String, val type: DataType, val address: UInt, val position: Position) {
+        private var arraySize: UInt? = null
+
+        fun arraySize(s: UInt?) = apply { arraySize = s }
+
+        fun build() = PtMemMapped(name, type, address, arraySize, position)
+    }
 }
 
 
-class PtStructDecl(name: String, val fields: List<Pair<DataType, String>>, position: Position) : PtNamedNode(name, position)
+class PtMemorySlabReservation(val slabName: String, val size: UInt, val align: UInt, position: Position) : PtNode(position) {
+    override fun copy() = PtMemorySlabReservation(slabName, size, align, position)
+}
+
+
+class PtStructDecl(name: String, val fields: List<Pair<DataType, String>>, position: Position) : PtNamedNode(name, position) {
+
+    companion object {
+        fun builder(name: String, position: Position) = Builder(name, position)
+    }
+
+    class Builder(val name: String, val position: Position) {
+        private var fields: MutableList<Pair<DataType, String>> = mutableListOf()
+
+        fun fields(f: Iterable<Pair<DataType, String>>) = apply { fields = f.toMutableList() }
+        fun fields(vararg f: Pair<DataType, String>) = apply { fields = f.toMutableList() }
+        fun addField(type: DataType, name: String) = apply { fields.add(type to name) }
+
+        fun build() = PtStructDecl(name, fields, position)
+    }
+}
 
 
 class PtWhen(position: Position) : PtNode(position) {
@@ -344,3 +482,12 @@ class PtDefer(position: Position): PtNode(position)
 
 
 class PtJmpTable(position: Position) : PtNode(position)     // contains only PtIdentifier nodes
+
+
+class PtSwap(position: Position): PtNode(position) {
+    val target1: PtAssignTarget
+        get() = children[0] as PtAssignTarget
+    val target2: PtAssignTarget
+        get() = children[1] as PtAssignTarget
+}
+

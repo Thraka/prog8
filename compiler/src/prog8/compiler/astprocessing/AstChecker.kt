@@ -8,7 +8,7 @@ import prog8.code.core.*
 import prog8.code.target.C128Target
 import prog8.code.target.Cx16Target
 import prog8.code.target.VMTarget
-import prog8.compiler.builtinFunctionReturnType
+import prog8.compiler.builtinFunctionReturnTypes
 import java.io.CharConversionException
 import java.io.File
 import kotlin.io.path.Path
@@ -38,6 +38,8 @@ internal class AstChecker(private val program: Program,
             } else {
                 if (startSub.parameters.isNotEmpty() || startSub.returntypes.isNotEmpty())
                     errors.err("program entrypoint subroutine can't have parameters and/or return values", startSub.position)
+                if (startSub.isPrivate)
+                    errors.err("program entrypoint subroutine 'start' cannot be private", startSub.position)
             }
         }
 
@@ -53,6 +55,8 @@ internal class AstChecker(private val program: Program,
         super.visit(module)
         if(module.name.startsWith('_'))
             errors.err("identifiers cannot start with an underscore", module.position)
+        if("::" in module.name)
+            errors.err("only enum members can be accessed with '::' syntax", module.position)
         val directives = module.statements.filterIsInstance<Directive>().groupBy { it.directive }
         directives.filter { it.value.size > 1 }.forEach{ entry ->
             when(entry.key) {
@@ -69,9 +73,9 @@ internal class AstChecker(private val program: Program,
             return  // identifiers will be checked over at the BinaryExpression itself
         }
 
-        if(identifier.nameInSource.any { it.startsWith('_') }) {
+        if(identifier.nameInSource.any { it.startsWith('_') })
             errors.err("identifiers cannot start with an underscore", identifier.position)
-        }
+
         if(identifier.nameInSource.any { it=="void" }) {
             // 'void' as "identifier" is only allowed as part of a multi-assignment expression
             if (!(identifier.nameInSource == listOf("void") && (identifier.parent as? AssignTarget)?.multi?.isNotEmpty() == true
@@ -82,6 +86,12 @@ internal class AstChecker(private val program: Program,
         }
 
         val stmt = identifier.targetStatement(program.builtinFunctions)
+        if(identifier.nameInSource.any { "::" in it }) {
+            val vartype = (stmt as? VarDecl)?.type
+            if(vartype!=VarDeclType.CONST) {
+                errors.err("only enum members can be accessed with '::' syntax", identifier.position)
+            }
+        }
         if(stmt==null) {
             if(identifier.parent is ArrayIndexedExpression) {
                 // might be a pointer dereference chain
@@ -102,10 +112,19 @@ internal class AstChecker(private val program: Program,
         }
 
         if(identifier.nameInSource.size>1) {
-            val lookupModule = identifier.definingScope.lookup(identifier.nameInSource.take(1))
+            val lookupModule = identifier.definingScope.lookup(identifier.nameInSource[0])
             if(lookupModule is VarDecl && !lookupModule.datatype.isPointer) {
                 errors.err("ambiguous symbol name, block name expected but found variable", identifier.position)
             }
+        }
+    }
+
+    private fun checkPrivateTypeAccess(type: DataType, position: Position, currentBlock: Block) {
+        val struct = type.subType
+        if(struct is StructDecl && struct.isPrivate) {
+            val structBlock = struct.definingBlock
+            if(currentBlock !== structBlock)
+                errors.err("cannot access private struct '${struct.scopedName.joinToString(".")}' from outside its block", position)
         }
     }
 
@@ -127,24 +146,42 @@ internal class AstChecker(private val program: Program,
         super.visit(unrollLoop)
     }
 
+    private fun countReturnValues(expr: Expression): Int {
+        // Count how many return values an expression contributes
+        // A function call that returns multiple values contributes multiple
+        return if (expr is FunctionCallExpression) {
+            when (val target = expr.target.targetStatement(program.builtinFunctions)) {
+                is Subroutine -> target.returntypes.size
+                is BuiltinFunctionPlaceholder -> {
+                    val types = program.builtinFunctions.returnTypes(expr.target.nameInSource[0])
+                    types.size
+                }
+                else -> 1
+            }
+        }
+        else 1
+    }
+
     override fun visit(returnStmt: Return) {
         val expectedReturnValues = returnStmt.definingSubroutine?.returntypes ?: emptyList()
-        if(returnStmt.values.size<expectedReturnValues.size) {
-            errors.err("too few return values for the subroutine: expected ${expectedReturnValues.size} got ${returnStmt.values.size}", returnStmt.position)
+        val actualReturnCount = returnStmt.values.sumOf { countReturnValues(it) }
+        if(actualReturnCount<expectedReturnValues.size) {
+            errors.err("too few return values for the subroutine: expected ${expectedReturnValues.size} got $actualReturnCount", returnStmt.position)
         }
-        else if(returnStmt.values.size>expectedReturnValues.size) {
-            errors.err("too many return values for the subroutine: expected ${expectedReturnValues.size} got ${returnStmt.values.size}", returnStmt.position)
+        else if(actualReturnCount>expectedReturnValues.size) {
+            errors.err("too many return values for the subroutine: expected ${expectedReturnValues.size} got $actualReturnCount", returnStmt.position)
         }
         for((expectedDt, actual) in expectedReturnValues.zip(returnStmt.values)) {
             val valueDt = actual.inferType(program)
             if(valueDt.isKnown) {
-                if (expectedDt != valueDt.getOrUndef()) {
-                    if(expectedDt.isUnsignedWord && (valueDt.isIterable || valueDt.isPointer)) {
+                val valueDataType = valueDt.getOrUndef()
+                if (expectedDt != valueDataType) {
+                    if(expectedDt.isUnsignedWord && (valueDataType.isIterable || valueDataType.isPointer)) {
                         // you can return a string or array or pointer when an uword (pointer) is returned
                     } else if(valueDt issimpletype BaseDataType.UWORD && expectedDt.isString) {
                         // you can return an uword pointer when the return type is a string
-                    } else if(valueDt.isUnsignedWord && expectedDt.isPointer) {
-                        // you can return an uword value when a pointer is required
+                    } else if((valueDataType.isUnsignedWord || valueDataType.isByte) && expectedDt.isPointer) {
+                        // you can return an uword/ubyte/byte value when a pointer is required
                     } else {
                         errors.err("return value type $valueDt doesn't match subroutine return type $expectedDt", actual.position)
                     }
@@ -237,8 +274,7 @@ internal class AstChecker(private val program: Program,
                     }
 
                     BaseDataType.LONG -> {
-                        if(!iterableDt.elementType().isInteger)
-                            errors.err("long loop variable can only loop over integers", forLoop.position)
+                        errors.warn("for loop using a long counter could be very slow", forLoop.position)
                     }
 
                     BaseDataType.FLOAT -> {
@@ -319,6 +355,8 @@ internal class AstChecker(private val program: Program,
     override fun visit(block: Block) {
         if(block.name.startsWith('_'))
             errors.err("identifiers cannot start with an underscore", block.position)
+        if("::" in block.name)
+            errors.err("only enum members can be accessed with '::' syntax", block.position)
 
         val addr = block.address
         if (addr!=null) {
@@ -338,12 +376,16 @@ internal class AstChecker(private val program: Program,
                 is Directive,
                 is Label,
                 is VarDecl,
+                is MemorySlabReservation,
+                is Subroutine,
                 is StructDecl,
                 is InlineAssembly,
                 is IStatementContainer -> true
                 is Assignment -> {
-                    val target = statement.target.identifier!!.targetStatement()
-                    target === statement.previousSibling()      // an initializer assignment is okay
+                    var prev = statement.previousSibling()
+                    while (prev is MemorySlabReservation) prev = prev.previousSibling()
+                    val target = statement.target.identifier?.targetStatement()
+                    target === prev      // an initializer assignment is okay
                 }
                 else -> false
             }
@@ -359,6 +401,8 @@ internal class AstChecker(private val program: Program,
     override fun visit(label: Label) {
         if(label.name.startsWith('_'))
             errors.err("identifiers cannot start with an underscore", label.position)
+        if("::" in label.name)
+            errors.err("only enum members can be accessed with '::' syntax", label.position)
 
         // scope check
         if(label.parent !is Block && label.parent !is Subroutine && label.parent !is AnonymousScope) {
@@ -406,6 +450,8 @@ internal class AstChecker(private val program: Program,
 
         if(subroutine.name.startsWith('_'))
             errors.err("identifiers cannot start with an underscore", subroutine.position)
+        if("::" in subroutine.name)
+            errors.err("only enum members can be accessed with '::' syntax", subroutine.position)
 
         if(subroutine.name in BuiltinFunctions)
             err("cannot redefine a built-in function")
@@ -413,7 +459,7 @@ internal class AstChecker(private val program: Program,
         if(subroutine.parameters.size>6 && !subroutine.isAsmSubroutine && !subroutine.definingBlock.isInLibrary)
             errors.info("subroutine has a large number of parameters, this is slow if called often", subroutine.position)
 
-        val uniqueNames = subroutine.parameters.asSequence().map { it.name }.toSet()
+        val uniqueNames = subroutine.parameters.mapTo(mutableSetOf()) { it.name }
         if(uniqueNames.size!=subroutine.parameters.size)
             err("parameter names must be unique")
 
@@ -434,11 +480,21 @@ internal class AstChecker(private val program: Program,
                 err("bank variable must be ubyte")
         }
         if(subroutine.inline && subroutine.asmAddress!=null)
-            throw FatalAstException("extsub cannot be inline")
+            throw FatalAstException("extsub can never be inline")
 
         val address = subroutine.asmAddress?.address
         if(address != null && address !is NumericLiteral)
             err("address must be a constant")
+
+        val currentBlock = subroutine.definingBlock
+        subroutine.parameters.forEach { param ->
+            if(param.type.isPointer || param.type.isStructInstance)
+                checkPrivateTypeAccess(param.type, subroutine.position, currentBlock)
+        }
+        subroutine.returntypes.forEach { rt ->
+            if(rt.isPointer || rt.isStructInstance)
+                checkPrivateTypeAccess(rt, subroutine.position, currentBlock)
+        }
 
         super.visit(subroutine)
 
@@ -584,18 +640,21 @@ internal class AstChecker(private val program: Program,
         // Instead, their reference (address) should be passed (as an UWORD).
         for(p in subroutine.parameters) {
             if (!subroutine.isAsmSubroutine && p.registerOrPair!=null) {
-                if (p.registerOrPair !in Cx16VirtualRegisters) errors.err("can only use R0-R15 as register param for normal subroutines", p.position)
+                if (p.registerOrPair !in Cx16VirtualRegisters && p.registerOrPair !in CombinedLongRegisters)
+                    errors.err("can only use R0-R15 as register param for normal subroutines", p.position)
                 else {
                     if(!compilerOptions.ignoreFootguns)
                         errors.warn("\uD83D\uDCA3 footgun: reusing R0-R15 as parameters risks overwriting due to clobbering or no callstack", subroutine.position)
-                    if(!p.type.isWordOrByteOrBool && !p.type.isPointer) {
-                        errors.err("can only use register param when type is boolean, byte, word or pointer", p.position)
+                    if(!p.type.isInteger && !p.type.isBool && !p.type.isPointer) {
+                        errors.err("can only use register param when type is boolean, integer or pointer", p.position)
                     }
                 }
             }
 
             if(p.name.startsWith('_'))
                 errors.err("identifiers cannot start with an underscore", p.position)
+            if("::" in p.name)
+                errors.err("only enum members can be accessed with '::' syntax", p.position)
 
             if(p.type.isPassByRef && !p.type.isString && !p.type.isUnsignedByteArray) {
                 errors.err("this pass-by-reference type can't be used as a parameter type.", p.position)
@@ -638,7 +697,12 @@ internal class AstChecker(private val program: Program,
         val iterations = repeatLoop.iterations?.constValue(program)
         if (iterations != null) {
             require(floor(iterations.number)==iterations.number)
-            if (iterations.number.toInt() > 65536) errors.err("repeat cannot exceed 65536 iterations", iterations.position)
+            if (iterations.number.toInt() > 65536) 
+                errors.warn("repeat using a long counter could be very slow", iterations.position)
+        }
+        
+        if(repeatLoop.iterations?.inferType(program)?.isLong==true) {
+            errors.warn("repeat using a long counter could be very slow", repeatLoop.iterations!!.position)
         }
 
         val ident = repeatLoop.iterations as? IdentifierReference
@@ -691,13 +755,15 @@ internal class AstChecker(private val program: Program,
         }
 
         val fcall = assignment.value as? IFunctionCall
-        val fcallTarget = fcall?.target?.targetSubroutine()
+        val fcallTarget = fcall?.target?.targetStatement(program.builtinFunctions)
         if(assignment.target.multi!=null) {
             checkMultiAssignment(assignment, fcall, fcallTarget)
-        } else if(fcallTarget!=null) {
-            if(fcallTarget.returntypes.size!=1) {
+        } else if(fcallTarget is Subroutine) {
+            if(fcallTarget.returntypes.size!=1)
                 return numberOfReturnValuesError(1, fcallTarget.returntypes, fcall.position)
-            }
+        } else if(fcallTarget is BuiltinFunctionPlaceholder) {
+            if(fcallTarget.returntypes.size!=1)
+                return numberOfReturnValuesError(1, fcallTarget.returntypes, fcall.position)
         }
 
         if(fcall?.target?.targetStructDecl()!=null)
@@ -730,22 +796,39 @@ internal class AstChecker(private val program: Program,
             errors.err("call returns too few values: expected $numAssigns got ${providedTypes.size}", position)
     }
 
-    private fun checkMultiAssignment(assignment: Assignment, fcall: IFunctionCall?, fcallTarget: Subroutine?) {
+    private fun checkMultiAssignment(assignment: Assignment, fcall: IFunctionCall?, fcallTarget: Statement?) {
         // multi-assign: check the number of assign targets vs. the number of return values of the subroutine
         // also check the types of the variables vs the types of each return value
-        if(fcall==null || fcallTarget==null) {
-            errors.err("expected a function call with multiple return values", assignment.value.position)
-            return
-        }
-        val targets = assignment.target.multi!!
-        if(fcallTarget.returntypes.size!=targets.size) {
-            return numberOfReturnValuesError(targets.size, fcallTarget.returntypes, fcall.position)
-        }
-        fcallTarget.returntypes.zip(targets).withIndex().forEach { (index, p) ->
-            val (returnType, target) = p
-            val targetDt = target.inferType(program).getOrUndef()
-            if (!target.void && returnType != targetDt)
-                errors.err("can't assign returnvalue #${index + 1} to corresponding target; $returnType vs $targetDt", target.position)
+        when {
+            fcall == null || fcallTarget==null -> {
+                errors.err("expected a function call with multiple return values, or a chained assignment (a=b=c=value)", assignment.value.position)
+            }
+            fcallTarget is Subroutine -> {
+                // function calls regular subroutine
+                val targets = assignment.target.multi!!
+                if (fcallTarget.returntypes.size != targets.size) {
+                    return numberOfReturnValuesError(targets.size, fcallTarget.returntypes, fcall.position)
+                }
+                fcallTarget.returntypes.zip(targets).withIndex().forEach { (_, p) ->
+                    val (returnType, target) = p
+                    val targetDt = target.inferType(program).getOrUndef()
+                    if (!target.void)
+                        checkAssignmentCompatible(targetDt, returnType, fcall as Expression, target.position)
+                }
+            }
+            fcallTarget is BuiltinFunctionPlaceholder -> {
+                // function calls builtin function
+                val targets = assignment.target.multi!!
+                if (fcallTarget.returntypes.size != targets.size) {
+                    return numberOfReturnValuesError(targets.size, fcallTarget.returntypes, fcall.position)
+                }
+                fcallTarget.returntypes.zip(targets).withIndex().forEach { (_, p) ->
+                    val (returnType, target) = p
+                    val targetDt = target.inferType(program).getOrUndef()
+                    if (!target.void)
+                        checkAssignmentCompatible(targetDt, returnType, fcall as Expression, target.position)
+                }
+            }
         }
     }
 
@@ -828,7 +911,7 @@ internal class AstChecker(private val program: Program,
         val variable=addressOf.identifier?.targetVarDecl()
         if (variable!=null) {
             if (variable.type == VarDeclType.CONST && addressOf.arrayIndex == null)
-                errors.err("invalid pointer-of operand type", addressOf.position)
+                errors.err("invalid address-of operand type", addressOf.position)
         }
 
         if(addressOf.msb) {
@@ -870,12 +953,21 @@ internal class AstChecker(private val program: Program,
     }
 
     override fun visit(decl: VarDecl) {
+
         if(decl.names.size>1)
             throw InternalCompilerException("vardecls with multiple names should have been converted into individual vardecls")
+
+        if(decl.datatype.isPointer || decl.datatype.isStructInstance)
+            checkPrivateTypeAccess(decl.datatype, decl.position, decl.definingBlock)
+
+        if(decl.type!=VarDeclType.CONST && "::" in decl.name)
+            errors.err("only enum members can be accessed with '::' syntax", decl.position)
 
         if(decl.type==VarDeclType.MEMORY) {
             if (decl.datatype.isString)
                 errors.err("strings cannot be memory-mapped", decl.position)
+            if (decl.datatype.isPointer || decl.datatype.isPointerArray)
+                errors.err("pointers cannot be memory-mapped", decl.position)
         }
 
         fun err(msg: String) = errors.err(msg, decl.position)
@@ -885,15 +977,18 @@ internal class AstChecker(private val program: Program,
         if(decl.value?.referencesIdentifier(listOf(decl.name)) == true || decl.arraysize?.indexExpr?.referencesIdentifier(listOf(decl.name)) == true)
             err("recursive var declaration")
 
-        // CONST can only occur on simple types (byte, word, float)
+        // CONST can only occur on simple types (byte, word, float) and pointers
         if(decl.type==VarDeclType.CONST) {
-            if (!decl.datatype.isNumericOrBool)
-                err("const can only be used on numbers and booleans")
+            if(decl.datatype.isString)
+                err("strings cannot be made const they are always potentially mutable")
+            else if (!decl.datatype.isNumericOrBool && !decl.datatype.isPointer)
+                err("const can only be used on numbers, booleans and pointers")
         }
 
         // FLOATS enabled?
-        if(!compilerOptions.floats && (decl.datatype.isFloat || decl.datatype.isFloatArray) && decl.type != VarDeclType.MEMORY)
+        if(!compilerOptions.floats && decl.type != VarDeclType.CONST && decl.type != VarDeclType.MEMORY && (decl.datatype.isFloat || decl.datatype.isFloatArray)) {
             err("floating point used, but that is not enabled via options")
+        }
         else if(compilerOptions.compTarget.name == C128Target.NAME && decl.type != VarDeclType.CONST && (decl.datatype.isFloat || decl.datatype.isFloatArray)) {
             err("c128 target does not support floating point numbers yet")
         }
@@ -934,6 +1029,28 @@ internal class AstChecker(private val program: Program,
                     is NumericLiteral -> {
                         checkValueTypeAndRange(decl.datatype, decl.value as NumericLiteral)
                     }
+                    is TypecastExpression -> {
+                        val cv = (decl.value as TypecastExpression).constValue(program)
+                        if (cv != null) {
+                            checkValueTypeAndRange(decl.datatype, cv)
+                        } else {
+                            if (decl.type == VarDeclType.CONST) {
+                                valueerr("const declaration needs a compile-time constant initializer value")
+                                super.visit(decl)
+                                return
+                            }
+                        }
+                    }
+                    is MemorySlabRef -> {
+                        // memory() as an initializer is okay, it will end up being a constant address in the end
+                    }
+                    is IFunctionCall -> {
+                        if (decl.type == VarDeclType.CONST) {
+                            valueerr("const declaration needs a compile-time constant initializer value")
+                            super.visit(decl)
+                            return
+                        }
+                    }
                     else -> {
                         if(decl.type==VarDeclType.CONST) {
                             valueerr("const declaration needs a compile-time constant initializer value")
@@ -967,7 +1084,7 @@ internal class AstChecker(private val program: Program,
                         else -> {}
                     }
                 }
-                val numvalue = decl.value as? NumericLiteral
+                val numvalue = decl.value?.constValue(program)
                 if(numvalue!=null) {
                     if (!numvalue.type.isInteger || numvalue.number.toInt() < 0 || numvalue.number.toInt() > 65535) {
                         valueerr($$"memory address must be valid integer 0..$ffff")
@@ -1099,11 +1216,6 @@ internal class AstChecker(private val program: Program,
             } else if(decl.alignment>64u) {
                 errors.info("large alignment might waste a lot of memory (check Gaps in assembler output)", decl.position)
             }
-        }
-
-        if(decl.datatype.isPointerArray) {
-            if(decl.splitwordarray==SplitWish.NOSPLIT)
-                errors.err("pointer arrays can only be split", decl.position)
         }
 
         if(decl.datatype.isStructInstance && decl.origin!=VarDeclOrigin.SUBROUTINEPARAM) {
@@ -1289,7 +1401,9 @@ internal class AstChecker(private val program: Program,
         }
 
         if(array.parent is VarDecl) {
-            if (!array.value.all { it is NumericLiteral || it is AddressOf || it is StaticStructInitializer }) {
+            if (!array.value.all { 
+                it is NumericLiteral || it is AddressOf || it is StaticStructInitializer || it is MemorySlabRef
+            }) {
                 errors.err("initialization value contains non-constant elements", array.value[0].position)
             }
 
@@ -1409,6 +1523,13 @@ internal class AstChecker(private val program: Program,
         super.visit(expr)
 
         if(expr.operator==".") {
+
+            // detect invalid syntax 0..20   (instead of 0 to 20)  to avoid crashing later
+            if(expr.left is NumericLiteral && expr.right is NumericLiteral) {
+                errors.err("invalid range syntax. Use 'x to y' instead of 'x..y'", expr.position)
+                return
+            }
+
             val leftIdentfier = expr.left as? IdentifierReference
             val leftIndexer = expr.left as? ArrayIndexedExpression
             val rightIdentifier = expr.right as? IdentifierReference
@@ -1528,10 +1649,6 @@ internal class AstChecker(private val program: Program,
                 val divisor = constvalRight?.number
                 if(divisor==0.0)
                     errors.err("division by zero", expr.right.position)
-                if(expr.operator=="%") {
-                    if ((!rightDt.isUnsignedByte && !rightDt.isUnsignedWord) || (!leftDt.isUnsignedByte && !leftDt.isUnsignedWord))
-                        errors.err("remainder can only be used on unsigned integer operands", expr.right.position)
-                }
             }
             "in" -> throw FatalAstException("in expression should have been replaced by containmentcheck")
             "<<", ">>" -> {
@@ -1642,9 +1759,16 @@ internal class AstChecker(private val program: Program,
         if(!typecast.expression.inferType(program).isKnown)
             errors.err("this expression doesn't return a value", typecast.expression.position)
 
-        if(typecast.expression is NumericLiteral) {
+        if(typecast.type.isPointer || typecast.type.isStructInstance) {
+            val currentBlock = findParentNode<Block>(typecast)
+            if(currentBlock!=null)
+                checkPrivateTypeAccess(typecast.type, typecast.position, currentBlock)
+        }
+
+        val cv = typecast.expression.constValue(program)
+        if(cv != null) {
             if(typecast.type.isBasic) {
-                val castResult = (typecast.expression as NumericLiteral).cast(typecast.type.base, typecast.implicit)
+                val castResult = cv.cast(typecast.type.base, typecast.implicit)
                 if (castResult.isValid)
                     throw FatalAstException("cast should have been performed in const eval already")
                 errors.err(castResult.whyFailed!!, typecast.expression.position)
@@ -1725,7 +1849,7 @@ internal class AstChecker(private val program: Program,
             }
         }
         else if(targetStatement is BuiltinFunctionPlaceholder) {
-            if(builtinFunctionReturnType(targetStatement.name).isUnknown) {
+            if(builtinFunctionReturnTypes(targetStatement.name).isEmpty()) {
                 if(functionCallExpr.parent is Expression || functionCallExpr.parent is Assignment)
                     errors.err("function doesn't return a value", functionCallExpr.position)
             }
@@ -1744,18 +1868,17 @@ internal class AstChecker(private val program: Program,
                 checkPointer(binexpr.left as IdentifierReference)
         }
 
-        if(builtinFunctionName=="memory") {
-            val str = functionCallExpr.args[0] as? StringLiteral
-            if(str==null)
-                errors.err("memory name argument must be a string literal", functionCallExpr.args[0].position)
-            else if(str.value.isEmpty())
-                errors.err("memory name argument cannot be empty string", functionCallExpr.args[0].position)
+        if(builtinFunctionName=="memory" || builtinFunctionName=="memory__ref") {
+            errors.err("memory() function call should have been desugared into dedicated AST nodes", functionCallExpr.position)
         }
 
         super.visit(functionCallExpr)
     }
 
     override fun visit(functionCallStatement: FunctionCallStatement) {
+        if(functionCallStatement.isMemoryCall || functionCallStatement.isMemoryRefCall) {
+            errors.err("memory() function call should have been desugared into dedicated AST nodes", functionCallStatement.position)
+        }
 
         if(functionCallStatement.target.nameInSource.size==1) {
             val functionName = functionCallStatement.target.nameInSource[0]
@@ -1781,7 +1904,7 @@ internal class AstChecker(private val program: Program,
             if(functionCallStatement.void) {
                 when(targetStatement) {
                     is BuiltinFunctionPlaceholder -> {
-                        if(!builtinFunctionReturnType(targetStatement.name).isKnown)
+                        if(builtinFunctionReturnTypes(targetStatement.name).isEmpty())
                             errors.info("redundant void", functionCallStatement.position)
                     }
                     is Label -> {
@@ -1805,14 +1928,6 @@ internal class AstChecker(private val program: Program,
                 val idref = functionCallStatement.args.singleOrNull() as? IdentifierReference
                 if(idref!=null && idref.inferType(program).isFloatArray) {
                     errors.err("sorting a floating point array is not supported", functionCallStatement.args.first().position)
-                }
-            }
-            else if(funcName[0].startsWith("divmod")) {
-                if(functionCallStatement.args[2] is TypecastExpression || functionCallStatement.args[3] is TypecastExpression) {
-                    errors.err("arguments must be all ubyte or all uword", functionCallStatement.position)
-                } else {
-                    if(functionCallStatement.args[2] !is IdentifierReference || functionCallStatement.args[3] !is IdentifierReference)
-                        errors.err("arguments 3 and 4 must be variables to receive the division and remainder", functionCallStatement.position)
                 }
             }
 
@@ -1916,8 +2031,13 @@ internal class AstChecker(private val program: Program,
             }
 
             if(target.returntypes.size>1) {
-                if(target.returntypes.count { it.isFloat }>1) {
-                    errors.err("can only have a single float value in a multi-value result", target.position)
+                // Multiple float return values are not supported on 6502 targets because the ROM
+                // float routines use FAC1/FAC2 as operand registers which would clobber earlier return values.
+                // The virtual target has no such limitation.
+                if(compilerOptions.compTarget !is VMTarget) {
+                    if(target.returntypes.count { it.isFloat }>1) {
+                        errors.err("can only have a single float value in a multi-value result on 6502 targets", target.position)
+                    }
                 }
             }
             if(target.returntypes.size>16) {
@@ -1941,6 +2061,23 @@ internal class AstChecker(private val program: Program,
     }
 
     override fun visit(arrayIndexedExpression: ArrayIndexedExpression) {
+        // Check for invalid chained indexing (more than 2 levels or on non-2D arrays)
+        if(arrayIndexedExpression.nestedArray != null) {
+            // This is a chained index like matrix[i][j]
+            val nested = arrayIndexedExpression.nestedArray!!
+            
+            // Check for more than 2 levels of chaining
+            if(nested.nestedArray != null) {
+                errors.err("3D or higher array indexing is not supported", arrayIndexedExpression.position)
+            }
+            
+            // Check that the base variable is a 2D array
+            val targetVarDecl = nested.plainarrayvar?.targetStatement(program.builtinFunctions) as? VarDecl
+            if(targetVarDecl != null && !targetVarDecl.is2DArray) {
+                errors.err("chained indexing requires the variable to be declared as a 2D array", arrayIndexedExpression.position)
+            }
+        }
+        
         val target = arrayIndexedExpression.plainarrayvar?.targetStatement(program.builtinFunctions)
         if(target is VarDecl) {
             if (!target.datatype.isIterable && !target.datatype.isUnsignedWord && !target.datatype.isPointer)
@@ -2153,7 +2290,7 @@ internal class AstChecker(private val program: Program,
     }
 
     override fun visit(struct: StructDecl) {
-        val uniqueFields = struct.fields.map { it.second }.toSet()
+        val uniqueFields = struct.fields.mapTo(mutableSetOf()) { it.second }
         if(uniqueFields.size!=struct.fields.size)
             errors.err("duplicate field names in struct", struct.position)
         val memsize = struct.memsize(program.memsizer)
@@ -2188,11 +2325,12 @@ internal class AstChecker(private val program: Program,
             }
         }
         if (deref.inferType(program).isUnknown) {
-            val symbol = deref.definingScope.lookup(deref.chain.take(1))
+            val firstName = deref.chain.firstOrNull()
+            val symbol = if(firstName != null) deref.definingScope.lookup(firstName) else null
             if(symbol==null)
-                errors.undefined(deref.chain.take(1), position=deref.position)
+                errors.undefined(deref.chain, position=deref.position)
             else
-                errors.err("unable to determine type of dereferenced pointer expression", deref.position)
+                errors.err("unable to determine type of dereferenced pointer expression, make sure it dereferences an actual pointer type", deref.position)
         }
 
         super.visit(deref)
@@ -2417,6 +2555,7 @@ internal class AstChecker(private val program: Program,
                         cast.valueOrZero().number
                 }
                 is StaticStructInitializer -> it.structname.hashCode() and 0xffff
+                is MemorySlabRef -> it.slabName.hashCode() and 0xffff
                 else -> -9999999
             }
         }
@@ -2441,7 +2580,9 @@ internal class AstChecker(private val program: Program,
             else -> throw FatalAstException("invalid type $targetDt")
         }
         if (!correct) {
-            if (value.parent is VarDecl && !value.value.all { it is NumericLiteral || it is AddressOf || it is StaticStructInitializer })
+            if (value.parent is VarDecl && !value.value.all { 
+                it is NumericLiteral || it is AddressOf || it is StaticStructInitializer || it is MemorySlabRef
+            })
                 errors.err("initialization value contains non-constant elements", value.value[0].position)
             else
                 errors.err("array element out of range for type $targetDt", value.position)
@@ -2550,7 +2691,9 @@ internal class AstChecker(private val program: Program,
                     }
                 }
             }
-            if (!args.all { it is NumericLiteral || it is AddressOf || (it is TypecastExpression && it.expression is NumericLiteral)})
+            if (!args.all { 
+                it is NumericLiteral || it is AddressOf || (it is TypecastExpression && it.expression is NumericLiteral) || it is MemorySlabRef 
+            })
                 errors.err("initialization value contains non-constant elements", args[0].position)
             val struct = initializer.structname.targetStructDecl()
             if(struct!=null) {
@@ -2578,8 +2721,8 @@ internal fun checkUnusedReturnValues(call: FunctionCallStatement, target: Statem
             else
                 errors.info("result values of subroutine call are discarded (use void?)", call.position)
         } else if (target is BuiltinFunctionPlaceholder) {
-            val rt = builtinFunctionReturnType(target.name)
-            if (rt.isKnown)
+            val rt = builtinFunctionReturnTypes(target.name)
+            if (rt.isNotEmpty())
                 errors.info("result value of a function call is discarded (use void?)", call.position)
         }
     }

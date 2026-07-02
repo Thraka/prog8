@@ -38,7 +38,6 @@ class AsmGen6502(val prefixSymbols: Boolean, private val lastGeneratedLabelSeque
                 is PtAsmSub, is PtSub -> node.name = "p8s_${node.name}"
                 is PtBlock -> node.name = "p8b_${node.name}"
                 is PtLabel -> if(!node.name.startsWith(GENERATED_LABEL_PREFIX)) node.name = "p8l_${node.name}"   // only prefix user defined labels
-                is PtConstant -> node.name = "p8c_${node.name}"
                 is PtVariable, is PtMemMapped, is PtSubroutineParameter -> node.name = "p8v_${node.name}"
                 is PtStructDecl -> node.name = "p8t_${node.name}"
             }
@@ -55,10 +54,21 @@ class AsmGen6502(val prefixSymbols: Boolean, private val lastGeneratedLabelSeque
                 }
                 is PtSub -> prefixNamedNode(node)
                 is PtFunctionCall -> {
-                    val stNode = st.lookup(node.name)!!
-                    if(stNode.astNode!!.definingBlock()?.options?.noSymbolPrefixing!=true) {
-                        val index = node.parent.children.indexOf(node)
-                        functionCallsToPrefix += node.parent to index
+                    if(node.builtin) {
+                        // could be a struct instance creation
+                        if(node.name=="prog8_lib_structalloc") {
+                            val struct = node.type.subType!!
+                            if(struct is StStruct) {
+                                // update link to active symboltable node
+                                node.type.subType = st.lookup(struct.scopedNameString) as StStruct
+                            }
+                        }
+                    } else {
+                        val stNode = st.lookup(node.name)!!
+                        if (stNode.astNode?.definingBlock()?.options?.noSymbolPrefixing != true) {
+                            val index = node.parent.children.indexOf(node)
+                            functionCallsToPrefix += node.parent to index
+                        }
                     }
                 }
                 is PtIdentifier -> {
@@ -90,7 +100,7 @@ class AsmGen6502(val prefixSymbols: Boolean, private val lastGeneratedLabelSeque
                     }
                 }
                 is PtBlock -> prefixNamedNode(node)
-                is PtConstant -> prefixNamedNode(node)
+                is PtConstant -> node.name = "p8c_${node.name}"
                 is PtLabel -> prefixNamedNode(node)
                 is PtMemMapped -> prefixNamedNode(node)
                 is PtSubroutineParameter -> prefixNamedNode(node)
@@ -99,16 +109,6 @@ class AsmGen6502(val prefixSymbols: Boolean, private val lastGeneratedLabelSeque
                     nodesToPrefix += node.parent to index
                 }
                 is PtStructDecl -> prefixNamedNode(node)        // note: field names are not prefixed here, we take care of that at asm generation time, which was a lot easier
-                is PtBuiltinFunctionCall -> {
-                    // could be a struct instance creation
-                    if(node.name=="prog8_lib_structalloc") {
-                        val struct = node.type.subType!!
-                        if(struct is StStruct) {
-                            // update link to active symboltable node
-                            node.type.subType = st.lookup(struct.scopedNameString) as StStruct
-                        }
-                    }
-                }
                 else -> { }
             }
 
@@ -124,7 +124,7 @@ class AsmGen6502(val prefixSymbols: Boolean, private val lastGeneratedLabelSeque
         }
 
         fun maybePrefixFunctionCallsAndIdentifierReferences(node: PtNode) {
-            if(node is PtFunctionCall) {
+            if(node is PtFunctionCall && !node.builtin) {
                 // function calls to subroutines defined in a block that does NOT have NoSymbolPrefixing, still have to be prefixed at the call site
                 val stNode = st.lookup(node.name)!!
                 if(stNode.astNode!!.definingBlock()?.options?.noSymbolPrefixing!=true) {
@@ -157,9 +157,9 @@ class AsmGen6502(val prefixSymbols: Boolean, private val lastGeneratedLabelSeque
 
         nodesToPrefix.forEach { (parent, index) ->
             when(val node = parent.children[index]) {
-                is PtIdentifier -> parent.children[index] = node.prefix(parent, st)
+                is PtIdentifier -> parent.setChild(index, node.prefix(parent, st))
                 is PtFunctionCall ->  throw AssemblyError("PtFunctionCall should be processed in their own list, last")
-                is PtVariable -> parent.children[index] = node.prefix(parent, st)
+                is PtVariable -> parent.setChild(index, node.prefix(parent, st))
                 else -> throw AssemblyError("weird node to prefix $node")
             }
         }
@@ -168,9 +168,9 @@ class AsmGen6502(val prefixSymbols: Boolean, private val lastGeneratedLabelSeque
         functionCallsToPrefix.reversed().forEach { (parent, index) ->
             val node = parent.children[index]
             if(node is PtFunctionCall) {
-                val prefixedName = PtIdentifier(node.name, DataType.UNDEFINED, Position.DUMMY).prefix(parent, st)
+                val prefixedName = PtIdentifier(node.name, DataType.UNDEFINED, node.position).prefix(parent, st)
                 val prefixedNode = node.withNewName(prefixedName.name)
-                parent.children[index] = prefixedNode
+                parent.setChild(index, prefixedNode)
             } else {
                 throw AssemblyError("expected PtFunctionCall")
             }
@@ -238,6 +238,7 @@ private fun PtVariable.prefix(parent: PtNode, st: SymbolTable): PtVariable {
             when(elt) {
                 is PtBool -> newValue.add(elt)
                 is PtNumber -> newValue.add(elt)
+                is PtConstant -> newValue.add(elt)
                 is PtAddressOf -> {
                     if(elt.definingBlock()?.options?.noSymbolPrefixing==true)
                         newValue.add(elt)
@@ -250,13 +251,11 @@ private fun PtVariable.prefix(parent: PtNode, st: SymbolTable): PtVariable {
                         newValue.add(newAddr)
                     }
                 }
-                is PtBuiltinFunctionCall -> {
-                    // could be a struct instance or memory slab "allocation"
-                    if (elt.name != "prog8_lib_structalloc" && elt.name != "memory")
+                is PtFunctionCall if elt.builtin -> {
+                    if (elt.name != "prog8_lib_structalloc")
                         throw AssemblyError("weird array value element $elt")
-                    else {
+                    else
                         newValue.add(elt)
-                    }
                 }
                 else -> throw AssemblyError("weird array value element $elt")
             }
@@ -274,8 +273,8 @@ private fun PtVariable.prefix(parent: PtNode, st: SymbolTable): PtVariable {
 //}
 
 private fun PtFunctionCall.withNewName(name: String): PtFunctionCall {
-    val call = PtFunctionCall(name, void, type, position)
-    call.children.addAll(children)
+    val call = PtFunctionCall(name, builtin, hasNoSideEffects, returntypes, position)
+    call.addAll(children)
     call.children.forEach { it.parent = call }
     call.parent = parent
     return call
@@ -345,9 +344,9 @@ class AsmGen6502Internal (
     private val anyExprGen = AnyExprAsmGen(this)
     private val pointerGen = PointerAssignmentsGen(this, allocator)
     private val assignmentAsmGen = AssignmentAsmGen(program, this, pointerGen, anyExprGen, allocator)
-    private val builtinFunctionsAsmGen = BuiltinFunctionsAsmGen(program, this, pointerGen,assignmentAsmGen)
+    internal val builtinFunctionsAsmGen = BuiltinFunctionsAsmGen(program, this, pointerGen,assignmentAsmGen)
     private val ifElseAsmgen = IfElseAsmGen(program, symbolTable, this, pointerGen, assignmentAsmGen, errors)
-    private val ifExpressionAsmgen = IfExpressionAsmGen(this, assignmentAsmGen, errors)
+    private val ifExpressionAsmgen = IfExpressionAsmGen(this, pointerGen, assignmentAsmGen, errors)
     private val augmentableAsmGen = AugmentableAssignmentAsmGen(program, assignmentAsmGen, this, pointerGen, allocator)
 
     init {
@@ -512,6 +511,54 @@ class AsmGen6502Internal (
             name.drop(subName.length+1)
         else
             name
+    }
+
+    fun unwrapCasts(expr: PtExpression): PtExpression {
+        var e = expr
+        while (e is PtTypeCast) e = e.value
+        return e
+    }
+
+    fun tryGetStaticAddress(expr: PtExpression, variableMemSize: Int): String? {
+        val e = unwrapCasts(expr)
+        if (e is PtIdentifier) return asmVariableName(e)
+        if (e is PtArrayIndexer) {
+            val idx = e.index.asConstInteger()
+            if (idx != null && e.variable != null) {
+                val offset = program.memsizer.memorySize(e.type, idx)
+                if (offset + (variableMemSize - 1) < 256) return "${asmVariableName(e.variable!!)}+$offset"
+            }
+        }
+        return null
+    }
+
+    fun getStaticAddressLowHigh(expr: PtExpression): Pair<String, String>? {
+        val e = unwrapCasts(expr)
+        if (e is PtIdentifier) {
+            val name = asmVariableName(e)
+            return Pair(name, "$name+1")
+        }
+        if (e is PtConstant) {
+            if (e.memorySlab != null) {
+                val label = "$StMemorySlabBlockName.${e.memorySlab!!.name}"
+                return Pair("#<$label", "#>$label")
+            } else if (e.value != null) {
+                val value = e.value!!.toInt()
+                return Pair("#<${(value and 0xff).toHex()}", "#>${((value shr 8) and 0xff).toHex()}")
+            }
+        }
+        if (e is PtNumber) {
+            val value = e.number.toInt()
+            return Pair("#<${(value and 0xff).toHex()}", "#>${((value shr 8) and 0xff).toHex()}")
+        }
+        if (e is PtAddressOf && e.identifier != null && !e.isFromArrayElement && e.dereference == null) {
+            var symbol = asmVariableName(e.identifier!!)
+            if (e.identifier!!.type.isSplitWordArray) {
+                symbol = if (e.isMsbForSplitArray) symbol + "_msb" else symbol + "_lsb"
+            }
+            return Pair("#<$symbol", "#>$symbol")
+        }
+        return null
     }
 
     fun asmVariableName(st: StNode, scope: IPtSubroutine?): String {
@@ -691,8 +738,12 @@ class AsmGen6502Internal (
             is PtSub -> programGen.translateSubroutine(stmt)
             is PtAsmSub -> programGen.translateAsmSubroutine(stmt)
             is PtInlineAssembly -> translate(stmt)
-            is PtBuiltinFunctionCall -> builtinFunctionsAsmGen.translateFunctioncallStatement(stmt)
-            is PtFunctionCall -> functioncallAsmGen.translateFunctionCallStatement(stmt)
+            is PtFunctionCall -> {
+                if(stmt.builtin)
+                    builtinFunctionsAsmGen.translateFunctioncallStatement(stmt)
+                else
+                    functioncallAsmGen.translateFunctionCallStatement(stmt)
+            }
             is PtAssignment -> {
                 if(stmt.multiTarget) assignmentAsmGen.translateMultiAssign(stmt)
                 else assignmentAsmGen.translate(stmt)
@@ -716,6 +767,8 @@ class AsmGen6502Internal (
             is PtDefer -> throw AssemblyError("defer should have been transformed")
             is PtNodeGroup -> stmt.children.forEach { translate(it) }
             is PtJmpTable -> translate(stmt)
+            is PtSwap -> translate(stmt)
+            is PtMemorySlabReservation -> { /* handled via symbol table */ }
             is PtNop, is PtStructDecl, is PtSubSignature -> {}
             else -> throw AssemblyError("missing asm translation for $stmt")
         }
@@ -766,7 +819,7 @@ class AsmGen6502Internal (
                 }
             }
             expr.type.isFloat -> {
-                if(options.compTarget.FLOAT_MEM_SIZE != 5)
+                if(options.compTarget.FLOAT_MEM_SIZE != 5u)
                     TODO("support float size other than 5 ${expr.position}")
                 assignExpressionToRegister(expr.index, RegisterOrPair.A)
                 out("""
@@ -786,8 +839,8 @@ class AsmGen6502Internal (
         }
     }
 
-    internal fun translateBuiltinFunctionCallExpression(bfc: PtBuiltinFunctionCall, resultRegister: RegisterOrPair?): BaseDataType? =
-            builtinFunctionsAsmGen.translateFunctioncallExpression(bfc, resultRegister)
+    internal fun translateBuiltinFunctionCallExpression(bfc: PtFunctionCall, firstReturnRegister: RegisterOrPair?): Array<RegisterOrPair> =
+            builtinFunctionsAsmGen.translateFunctioncallExpression(bfc, firstReturnRegister)  // returns the actual register(s) that the return value is in, so the caller should still make sure to place it into the actual correct destination
 
     internal fun translateFunctionCall(functionCallExpr: PtFunctionCall) =
             functioncallAsmGen.translateFunctionCall(functionCallExpr)
@@ -817,6 +870,111 @@ class AsmGen6502Internal (
             RegisterOrPair.FAC1 -> assignmentAsmGen.assignFAC1float(target)
             RegisterOrPair.FAC2 -> assignmentAsmGen.assignFAC2float(target)
             else -> throw AssemblyError("invalid register")
+        }
+    }
+
+    internal fun moveValueBetweenCpuRegisters(fromReg: RegisterOrStatusflag, fromType: DataType, toReg: RegisterOrStatusflag, toType: DataType) {
+        require(fromType == toType) { "moveValueBetweenCpuRegisters: type mismatch" }
+        
+        // Optimize for direct register-to-register transfers when possible
+        val fromRegPair = fromReg.registerOrPair
+        val toRegPair = toReg.registerOrPair
+        
+        when {
+            // Same register - nothing to do
+            fromReg == toReg -> return
+            
+            // Direct 8-bit transfers
+            fromRegPair == RegisterOrPair.A && toRegPair == RegisterOrPair.X -> out("  tax")
+            fromRegPair == RegisterOrPair.A && toRegPair == RegisterOrPair.Y -> out("  tay")
+            fromRegPair == RegisterOrPair.X && toRegPair == RegisterOrPair.A -> out("  txa")
+            fromRegPair == RegisterOrPair.Y && toRegPair == RegisterOrPair.A -> out("  tya")
+            fromRegPair == RegisterOrPair.X && toRegPair == RegisterOrPair.Y -> out("  txa | tay")
+            fromRegPair == RegisterOrPair.Y && toRegPair == RegisterOrPair.X -> out("  tya | tax")
+            
+            // Word transfers (AX, AY, XY, Virtual Registers)
+            fromRegPair == RegisterOrPair.AX && toRegPair == RegisterOrPair.AY -> out("  tay")  // X already in A, Y gets X
+            fromRegPair == RegisterOrPair.AY && toRegPair == RegisterOrPair.AX -> out("  tax")  // Y already in A, X gets Y
+            fromRegPair == RegisterOrPair.AX && toRegPair == RegisterOrPair.XY -> out("  tay")  // A->X (already there), X->Y
+            fromRegPair == RegisterOrPair.AY && toRegPair == RegisterOrPair.XY -> out("  tax")  // A->Y (already there), Y->X
+            
+            fromRegPair in Cx16VirtualRegisters && toRegPair in Cx16VirtualRegisters -> {
+                val fromName = fromRegPair.toString().lowercase()
+                val toName = toRegPair.toString().lowercase()
+                out("  lda  cx16.$fromName |  sta  cx16.$toName")
+                out("  lda  cx16.$fromName+1 |  sta  cx16.$toName+1")
+            }
+            fromRegPair == RegisterOrPair.AX && toRegPair in Cx16VirtualRegisters -> {
+                val toName = toRegPair.toString().lowercase()
+                out("  sta  cx16.$toName |  stx  cx16.$toName+1")
+            }
+            fromRegPair in Cx16VirtualRegisters && toRegPair == RegisterOrPair.AX -> {
+                val fromName = fromRegPair.toString().lowercase()
+                out("  lda  cx16.$fromName |  ldx  cx16.$fromName+1")
+            }
+            
+            // Long transfers (CombinedLongRegisters)
+            fromRegPair in CombinedLongRegisters && toRegPair in CombinedLongRegisters -> {
+                val fromStart = fromRegPair!!.startregname()
+                val toStart = toRegPair!!.startregname()
+                out("  lda  cx16.${fromStart} |  sta  cx16.${toStart}")
+                out("  lda  cx16.${fromStart}+1 |  sta  cx16.${toStart}+1")
+                out("  lda  cx16.${fromStart}+2 |  sta  cx16.${toStart}+2")
+                out("  lda  cx16.${fromStart}+3 |  sta  cx16.${toStart}+3")
+            }
+
+            // For everything else, use temp register
+            else -> {
+                val tempReg = "P8ZP_SCRATCH_REG"
+                if (!fromType.isByteOrBool) {
+                    // Fallback for multi-byte moves that are not handled above.
+                    // To avoid memory corruption, we must NOT use P8ZP_SCRATCH_REG as a multi-byte buffer.
+                    // We can just use A as a temporary byte and unroll the copy.
+                    
+                    val fromAddr = when(fromRegPair) {
+                        in Cx16VirtualRegisters -> "cx16.${fromRegPair.toString().lowercase()}"
+                        in CombinedLongRegisters -> "cx16.${fromRegPair!!.startregname()}"
+                        else -> throw AssemblyError("unsupported multi-byte source register $fromRegPair")
+                    }
+                    val toAddr = when(toRegPair) {
+                        in Cx16VirtualRegisters -> "cx16.${toRegPair.toString().lowercase()}"
+                        in CombinedLongRegisters -> "cx16.${toRegPair!!.startregname()}"
+                        else -> throw AssemblyError("unsupported multi-byte destination register $toRegPair")
+                    }
+                    val bytes = if (fromType.isLong) 4 else 2
+                    repeat(bytes) {
+                        val offset = if (it == 0) "" else "+$it"
+                        out("  lda  $fromAddr$offset |  sta  $toAddr$offset")
+                    }
+                    return
+                }
+
+                // Load from source register to temp
+                when(fromRegPair) {
+                    RegisterOrPair.A -> out("  sta  $tempReg")
+                    RegisterOrPair.X -> out("  stx  $tempReg")
+                    RegisterOrPair.Y -> out("  sty  $tempReg")
+                    in Cx16VirtualRegisters -> out("  lda  cx16.${fromRegPair.toString().lowercase()} |  sta  $tempReg")
+                    null -> when(fromReg.statusflag) {
+                        Statusflag.Pc -> out("  lda  #0 |  rol  a |  sta  $tempReg")
+                        else -> throw AssemblyError("unsupported statusflag ${fromReg.statusflag}")
+                    }
+                    else -> throw AssemblyError("weird CPU register ${fromReg}")
+                }
+                
+                // Store from temp to destination register
+                when(toRegPair) {
+                    RegisterOrPair.A -> out("  lda  $tempReg")
+                    RegisterOrPair.X -> out("  ldx  $tempReg")
+                    RegisterOrPair.Y -> out("  ldy  $tempReg")
+                    in Cx16VirtualRegisters -> out("  lda  $tempReg |  sta  cx16.${toRegPair.toString().lowercase()}")
+                    null -> when(toReg.statusflag) {
+                        Statusflag.Pc -> out("  lda  $tempReg |  asl  a")
+                        else -> throw AssemblyError("unsupported statusflag ${toReg.statusflag}")
+                    }
+                    else -> throw AssemblyError("weird CPU register ${toReg}")
+                }
+            }
         }
     }
 
@@ -862,8 +1020,12 @@ class AsmGen6502Internal (
                 assignmentAsmGen.assignRegisterByte(target, CpuRegister.A, target.datatype.isSigned, false)
             }
             target.datatype.isPointer -> {
-                assignExpressionToRegister(value, RegisterOrPair.AX)
-                pointerGen.assignWordReg(PtrTarget(target), RegisterOrPair.AX)
+                if(target.kind == TargetStorageKind.REGISTER) {
+                    assignExpressionToRegister(value, target.register!!)
+                } else {
+                    assignExpressionToRegister(value, RegisterOrPair.AX)
+                    assignmentAsmGen.assignRegisterpairWord(target, RegisterOrPair.AX)
+                }
             }
             target.datatype.isWord || target.datatype.isPassByRef -> {
                 assignExpressionToRegister(value, RegisterOrPair.AY)
@@ -1013,6 +1175,7 @@ class AsmGen6502Internal (
                 when {
                     iterations == 0 -> {}
                     iterations == 1 -> translate(stmt.statements)
+                    iterations > 65536 -> repeatLongCount(iterations.toLong(), stmt)
                     iterations !in 0..65536 -> throw AssemblyError("invalid number of iterations")
                     iterations <= 256 -> repeatByteCount(iterations, stmt)
                     else -> repeatWordCount(iterations, stmt)
@@ -1024,12 +1187,17 @@ class AsmGen6502Internal (
                 val name = asmVariableName(stmt.count as PtIdentifier)
                 when {
                     vardecl.type.isByte -> {
-                        assignVariableToRegister(name, RegisterOrPair.Y, stmt.definingISub(), stmt.count.position)
+                        assignVariableToRegister(name, RegisterOrPair.Y, stmt.definingISub(), stmt.count.position, vardecl.type.isSigned)
                         repeatCountInY(stmt, endLabel)
                     }
                     vardecl.type.isWord -> {
-                        assignVariableToRegister(name, RegisterOrPair.AY, stmt.definingISub(), stmt.count.position)
+                        assignVariableToRegister(name, RegisterOrPair.AY, stmt.definingISub(), stmt.count.position, vardecl.type.isSigned)
                         repeatWordCountInAY(endLabel, stmt)
+                    }
+                    vardecl.type.isLong -> {
+                        val reg = CombinedLongRegisters.last()
+                        assignVariableToRegister(name, reg, stmt.definingISub(), (stmt.count as PtIdentifier).position, vardecl.type.isSigned)
+                        repeatLongCountInReg(reg, endLabel, stmt)
                     }
                     else -> throw AssemblyError("invalid loop variable datatype ${vardecl.type}")
                 }
@@ -1037,12 +1205,17 @@ class AsmGen6502Internal (
             else -> {
                 when {
                     stmt.count.type.isByte -> {
-                        assignExpressionToRegister(stmt.count, RegisterOrPair.Y)
+                        assignExpressionToRegister(stmt.count, RegisterOrPair.Y, stmt.count.type.isSigned)
                         repeatCountInY(stmt, endLabel)
                     }
                     stmt.count.type.isWord -> {
-                        assignExpressionToRegister(stmt.count, RegisterOrPair.AY)
+                        assignExpressionToRegister(stmt.count, RegisterOrPair.AY, stmt.count.type.isSigned)
                         repeatWordCountInAY(endLabel, stmt)
+                    }
+                    stmt.count.type.isLong -> {
+                        val reg = CombinedLongRegisters.last()
+                        assignExpressionToRegister(stmt.count, reg, stmt.count.type.isSigned)
+                        repeatLongCountInReg(reg, endLabel, stmt)
                     }
                     else -> throw AssemblyError("invalid loop expression datatype ${stmt.count.type}")
                 }
@@ -1051,18 +1224,94 @@ class AsmGen6502Internal (
 
         loopEndLabels.removeLast()
     }
+    
+    private fun repeatLongCount(iterations: Long, stmt: PtRepeatLoop) {
+        require(iterations > 65536) { "invalid repeat count ${stmt.position}" }
+        val repeatLabel = makeLabel("repeat")
+        val counterVar = createTempVarReused(BaseDataType.LONG, true, stmt)
+
+        val bytes = mutableListOf<Int>()
+        var currentN = iterations
+        while (currentN > 0) {
+            val b = (currentN % 256).toInt()
+            bytes.add(b)
+            currentN = if (b == 0) currentN / 256 else currentN / 256 + 1
+            if (currentN == 1L) break
+        }
+
+        for (i in bytes.indices) {
+            val v = bytes[i]
+            val suffix = if (i > 0) "+$i" else ""
+            if (v == 0 && isTargetCpu(CpuType.CPU65C02)) {
+                out("  stz  $counterVar$suffix")
+            } else {
+                out("  lda  #$v")
+                out("  sta  $counterVar$suffix")
+            }
+        }
+
+        out(repeatLabel)
+        translate(stmt.statements)
+
+        for (i in bytes.indices) {
+            val suffix = if (i > 0) "+$i" else ""
+            out("  dec  $counterVar$suffix")
+            out("  bne  $repeatLabel")
+        }
+    }
+
+    private fun repeatLongCountInReg(reg: RegisterOrPair, endLabel: String, stmt: PtRepeatLoop) {
+        require(reg in CombinedLongRegisters)
+        val repeatLabel = makeLabel("repeat")
+        val regName = "cx16." + reg.startregname()
+        val d1 = makeLabel("skip_dec1")
+        val d2 = makeLabel("skip_dec2")
+        val d3 = makeLabel("skip_dec3")
+        out("""
+            lda  $regName
+            ora  $regName+1
+            ora  $regName+2
+            ora  $regName+3
+            beq  $endLabel
+$repeatLabel""")
+        translate(stmt.statements)
+        out("""
+            lda  $regName
+            bne  $d3
+            lda  $regName+1
+            bne  $d2
+            lda  $regName+2
+            bne  $d1
+            dec  $regName+3
+$d1         dec  $regName+2
+$d2         dec  $regName+1
+$d3         dec  $regName
+            lda  $regName
+            ora  $regName+1
+            ora  $regName+2
+            ora  $regName+3
+            bne  $repeatLabel""")
+        out(endLabel)
+    }
 
     private fun repeatWordCount(iterations: Int, stmt: PtRepeatLoop) {
         require(iterations in 257..65536) { "invalid repeat count ${stmt.position}" }
         val repeatLabel = makeLabel("repeat")
         val counterVar = createTempVarReused(BaseDataType.UWORD, true, stmt)
         val loopcount = if(iterations==65536) 0 else if(iterations and 0x00ff == 0) iterations else iterations + 0x0100   // so that the loop can simply use a double-dec
-        out("""
-            ldy  #>$loopcount
-            lda  #<$loopcount
-            sta  $counterVar
-            sty  $counterVar+1
+        if(isTargetCpu(CpuType.CPU65C02) && loopcount == 0) {
+            out("""
+                stz  $counterVar
+                stz  $counterVar+1
 $repeatLabel""")
+        } else {
+            out("""
+                ldy  #>$loopcount
+                lda  #<$loopcount
+                sta  $counterVar
+                sty  $counterVar+1
+$repeatLabel""")
+        }
         translate(stmt.statements)
         out("""
             dec  $counterVar
@@ -1097,19 +1346,15 @@ $repeatLabel""")
     private fun repeatByteCount(count: Int, stmt: PtRepeatLoop) {
         require(count in 2..256) { "invalid repeat count ${stmt.position}" }
         val repeatLabel = makeLabel("repeat")
-        if(isTargetCpu(CpuType.CPU65C02)) {
-            val counterVar = createTempVarReused(BaseDataType.UBYTE, true, stmt)
-            out("  lda  #${count and 255} |  sta  $counterVar")
-            out(repeatLabel)
-            translate(stmt.statements)
-            out("  dec  $counterVar |  bne  $repeatLabel")
-        } else {
-            val counterVar = createTempVarReused(BaseDataType.UBYTE, false, stmt)
-            out("  lda  #${count and 255} |  sta  $counterVar")
-            out(repeatLabel)
-            translate(stmt.statements)
-            out("  dec  $counterVar |  bne  $repeatLabel")
-        }
+        val actualCount = count and 255
+        val counterVar = createTempVarReused(BaseDataType.UBYTE, isTargetCpu(CpuType.CPU65C02), stmt)
+        if(isTargetCpu(CpuType.CPU65C02) && actualCount==0) 
+            out("  stz  $counterVar") 
+        else 
+            out("  lda  #$actualCount |  sta  $counterVar")
+        out(repeatLabel)
+        translate(stmt.statements)
+        out("  dec  $counterVar |  bne  $repeatLabel")
     }
 
     private fun repeatCountInY(stmt: PtRepeatLoop, endLabel: String) {
@@ -1197,6 +1442,483 @@ $repeatLabel""")
             out("  jmp  ${asmSymbolName((name as PtIdentifier).name)}")
         }
         out("  ; end jumptable")
+    }
+
+    private fun translate(swap: PtSwap) {
+        // TODO only supports a select few combinations of swappable arguments
+
+        fun swapByte() {
+            if(swap.target1.identifier!=null && swap.target2.identifier!=null) {
+                val varname1 = asmVariableName(swap.target1.identifier!!)
+                val varname2 = asmVariableName(swap.target2.identifier!!)
+                out("""
+                    lda  $varname1
+                    ldy  $varname2
+                    sta  $varname2
+                    sty  $varname1""")
+            }
+            else if(swap.target1.memory!=null && swap.target2.memory!=null) {
+                var var1ZpPtrVar = ""
+                var var2ZpPtrVar = ""
+                val v1 = swap.target1.memory!!
+                val v2 = swap.target2.memory!!
+
+                if(v1.address is PtIdentifier && v2.address is PtIdentifier) {
+                    var1ZpPtrVar = asmVariableName(v1.address as PtIdentifier)
+                    var2ZpPtrVar = asmVariableName(v2.address as PtIdentifier)
+                    if(!isZpVar(v1.address as PtIdentifier)) {
+                        out("  lda  $var1ZpPtrVar |  ldy  $var1ZpPtrVar+1 |  sta  P8ZP_SCRATCH_W1 |  sty  P8ZP_SCRATCH_W1+1")
+                        var1ZpPtrVar = "P8ZP_SCRATCH_W1"
+                    }
+                    if(!isZpVar(v2.address as PtIdentifier)) {
+                        out("  lda  $var2ZpPtrVar |  ldy  $var2ZpPtrVar+1 |  sta  P8ZP_SCRATCH_W2 |  sty  P8ZP_SCRATCH_W2+1")
+                        var2ZpPtrVar = "P8ZP_SCRATCH_W2"
+                    }
+                    out("""
+                        ldy  #0
+                        lda  ($var1ZpPtrVar),y
+                        pha
+                        lda  ($var2ZpPtrVar),y
+                        sta  ($var1ZpPtrVar),y
+                        pla
+                        sta  ($var2ZpPtrVar),y""")
+                } else {
+                    if (v1.address is PtNumber) {
+                        out("  lda  ${v1.address.asConstInteger()!!.toHex()} |  pha")
+                    } else if (v1.address is PtIdentifier) {
+                        var1ZpPtrVar = loadByteFromPointerIntoA(v1.address as PtIdentifier)
+                        out("  pha")
+                    } else {
+                        TODO("swap bytes not supported for this expression. Use a simpler expression, or even just a temporary variable and assignments for now. ${v1.position}")
+                    }
+                    if (v2.address is PtNumber) {
+                        out("  lda  ${v2.address.asConstInteger()!!.toHex()}")
+                    } else if (v2.address is PtIdentifier) {
+                        var2ZpPtrVar = loadByteFromPointerIntoA(
+                            v2.address as PtIdentifier,
+                            tempZpPtrVar = "P8ZP_SCRATCH_W1"
+                        )
+                    } else {
+                        TODO("swap bytes not supported for this expression. Use a simpler expression, or even just a temporary variable and assignments for now. ${v2.position}")
+                    }
+
+                    if (v1.address is PtNumber) {
+                        out("  sta  ${v1.address.asConstInteger()!!.toHex()}")
+                    } else if (v1.address is PtIdentifier) {
+                        storeIndirectByteReg(CpuRegister.A, var1ZpPtrVar, 0u, false, false)
+                    }
+                    if (v2.address is PtNumber) {
+                        out("  pla |  sta  ${v2.address.asConstInteger()!!.toHex()}")
+                    } else if (v2.address is PtIdentifier) {
+                        out("  pla")
+                        storeIndirectByteReg(CpuRegister.A, var2ZpPtrVar, 0u, false, false)
+                    }
+                }
+            }
+            else if(swap.target1.pointerDeref!=null || swap.target2.pointerDeref!=null) {
+                throw AssemblyError("swap bytes pointer dereference should have been replaced by swap memorybytes ${swap.position}")
+            }
+            else if(swap.target1.array?.variable?.type?.isPointer==true || swap.target2.array?.variable?.type?.isPointer==true) {
+                TODO("swap bytes expressions not supported yet for these expressions. Use a simpler expression, or even just a temporary variable and assignments for now. ${swap.position}")
+            }
+            else if(swap.target1.array?.pointerderef==null && swap.target1.array?.index?.isSimple()==true && swap.target2.array?.pointerderef==null && swap.target2.array?.index?.isSimple()==true) {
+                loadScaledArrayIndexIntoRegister(swap.target1.array!!, CpuRegister.X)
+                loadScaledArrayIndexIntoRegister(swap.target2.array!!, CpuRegister.Y)
+                val varname1 = asmVariableName(swap.target1.array!!.variable!!.name)
+                val varname2 = asmVariableName(swap.target2.array!!.variable!!.name)
+                out("""
+                    lda  $varname1,x
+                    pha
+                    lda  $varname2,y
+                    sta  $varname1,x
+                    pla
+                    sta  $varname2,y""")
+            }
+            else if(swap.target1.array!=null && swap.target2.array!=null && swap.target1.array!!.pointerderef==null && swap.target2.array!!.pointerderef==null) {
+                val offset1 = simpleOffsetIndexer(swap.target1.array!!)
+                val offset2 = simpleOffsetIndexer(swap.target2.array!!)
+                if(offset1==null || offset2==null)
+                    TODO("swap bytes not supported yet for nontrivial indexed[] expressions. Use a simpler index expression, or even just temporary variable and assignments for now. ${swap.position}")
+                else {
+                    val arrayname1 = asmVariableName(swap.target1.array!!.variable!!.name)
+                    val arrayname2 = asmVariableName(swap.target1.array!!.variable!!.name)
+                    val offsetname1 = asmVariableName(offset1.first)
+                    val offsetname2 = asmVariableName(offset2.first)
+                    val op1 = offset1.second
+                    val op2 = offset2.second
+                    out("""
+                        ldx  $offsetname1
+                        ldy  $offsetname2
+                        lda  $arrayname1 $op1 ${offset1.third},x
+                        pha
+                        lda  $arrayname2 $op2 ${offset2.third},y
+                        sta  $arrayname1 $op1 ${offset1.third},x
+                        pla
+                        sta  $arrayname2 $op2 ${offset2.third},y""")
+                }
+            }
+            else {
+                TODO("swap bytes not supported yet for these expressions. Use a simpler expression, or even just temporary variable and assignments for now. ${swap.position}")
+            }
+        }
+
+        fun swapWord() {
+            if(swap.target1.identifier!=null && swap.target2.identifier!=null) {
+                val varname1 = asmVariableName(swap.target1.identifier!!)
+                val varname2 = asmVariableName(swap.target2.identifier!!)
+                out("""
+                    lda  $varname1
+                    ldy  $varname2
+                    sta  $varname2
+                    sty  $varname1
+                    lda  $varname1+1
+                    ldy  $varname2+1
+                    sta  $varname2+1
+                    sty  $varname1+1""")
+            }
+            else if(swap.target1.pointerDeref!=null && swap.target2.pointerDeref!=null) {
+                val v1 = swap.target1.pointerDeref!!
+                val v2 = swap.target1.pointerDeref!!
+                if(v1.derefLast && v1.chain.isEmpty() && v2.derefLast && v2.chain.isEmpty() && isZpVar(v1.startpointer) && isZpVar(v2.startpointer)) {
+                    // optimized case where v1 and v2 are both already zeropage pointer variables
+                    val name1 = asmVariableName(v1.startpointer)
+                    val name2 = asmVariableName(v2.startpointer)
+                    out("""
+                        ldy  #0
+                        lda  ($name1),y
+                        pha
+                        lda  ($name2),y
+                        sta  ($name1),y
+                        pla
+                        sta  ($name2),y
+                        iny
+                        lda  ($name1),y
+                        pha
+                        lda  ($name2),y
+                        sta  ($name1),y
+                        pla
+                        sta  ($name2),y""")
+                } else {
+                    val (zpVar, offset) = pointerGen.deref(v1, true)
+                    require(offset == 0.toUByte())
+                    out("  lda  $zpVar |  ldy  $zpVar+1 |  sta  P8ZP_SCRATCH_W1 |  sty  P8ZP_SCRATCH_W1+1")
+                    val (zpVar2, offset2) = pointerGen.deref(v2, true)
+                    require(offset2 == 0.toUByte())
+                    out("  lda  $zpVar2 |  ldy  $zpVar2+1 |  jsr  prog8_lib.swap_words")
+                }
+            }
+            else if(swap.target1.array?.variable?.type?.isPointer==true || swap.target2.array?.variable?.type?.isPointer==true) {
+                TODO("swap words expressions not supported yet for these expressions. Use a simpler expression, or even just a temporary variable and assignments for now. ${swap.position}")
+            }
+            else if(swap.target1.array?.pointerderef==null && swap.target1.array?.index?.isSimple()==true && swap.target2.array?.pointerderef==null && swap.target2.array?.index?.isSimple()==true) {
+                val v1 = swap.target1.array!!
+                val v2 = swap.target2.array!!
+                loadScaledArrayIndexIntoRegister(v1, CpuRegister.X)
+                loadScaledArrayIndexIntoRegister(v2, CpuRegister.Y)
+                val varname1 = asmVariableName(v1.variable!!.name)
+                val varname2 = asmVariableName(v2.variable!!.name)
+                if(v1.splitWords && v2.splitWords) {
+                    // both of them are split-words arrays
+                    out("""
+                        lda  ${varname1}_lsb,x
+                        pha
+                        lda  ${varname2}_lsb,y
+                        sta  ${varname1}_lsb,x
+                        pla
+                        sta  ${varname2}_lsb,y
+                        lda  ${varname1}_msb,x
+                        pha
+                        lda  ${varname2}_msb,y
+                        sta  ${varname1}_msb,x
+                        pla
+                        sta  ${varname2}_msb,y""")
+                } else if(v1.splitWords || v2.splitWords) {
+                    TODO("swap words expressions not supported yet for 1 @split and 1 normal word array. Make them both the same, or use a temporary variable and assignments for now. ${swap.position}")
+                } else {
+                    out("""
+                        lda  $varname1,x
+                        pha
+                        lda  $varname2,y
+                        sta  $varname1,x
+                        pla
+                        sta  $varname2,y
+                        lda  $varname1+1,x
+                        pha
+                        lda  $varname2+1,y
+                        sta  $varname1+1,x
+                        pla
+                        sta  $varname2+1,y""")
+                }
+            }
+            else if(swap.target1.array!=null && swap.target2.array!=null && swap.target1.array!!.pointerderef==null && swap.target2.array!!.pointerderef==null) {
+                val v1 = swap.target1.array!!
+                val v2 = swap.target2.array!!
+                val offset1 = simpleOffsetIndexer(v1)
+                val offset2 = simpleOffsetIndexer(v2)
+                if(offset1==null || offset2==null)
+                    TODO("swap words not supported yet for nontrivial indexed[] expressions. Use a simpler index expression, or even just temporary variable and assignments for now. ${swap.position}")
+                else {
+                    val arrayname1 = asmVariableName(v1.variable!!.name)
+                    val arrayname2 = asmVariableName(v2.variable!!.name)
+                    val offsetname1 = asmVariableName(offset1.first)
+                    val offsetname2 = asmVariableName(offset2.first)
+                    val op1 = offset1.second
+                    val op2 = offset2.second
+                    if(v1.splitWords && v2.splitWords) {
+                        out("""
+                            ldx  $offsetname1
+                            ldy  $offsetname2
+                            lda  ${arrayname1}_lsb $op1 ${offset1.third},x
+                            pha
+                            lda  ${arrayname2}_lsb $op2 ${offset2.third},y
+                            sta  ${arrayname1}_lsb $op1 ${offset1.third},x
+                            pla
+                            sta  ${arrayname2}_lsb $op2 ${offset2.third},y
+                            lda  ${arrayname1}_msb $op1 ${offset1.third},x
+                            pha
+                            lda  ${arrayname2}_msb $op2 ${offset2.third},y
+                            sta  ${arrayname1}_msb $op1 ${offset1.third},x
+                            pla
+                            sta  ${arrayname2}_msb $op2 ${offset2.third},y""")
+                    }
+                    else {
+                        out("""
+                            lda  $offsetname1
+                            asl  a
+                            tax
+                            lda  $offsetname2
+                            asl  a
+                            tay
+                            lda  $arrayname1 $op1 ${offset1.third * 2},x
+                            pha
+                            lda  $arrayname2 $op2 ${offset2.third * 2},y
+                            sta  $arrayname1 $op1 ${offset1.third * 2},x
+                            pla
+                            sta  $arrayname2 $op2 ${offset2.third * 2},y
+                            lda  $arrayname1+1 $op1 ${offset1.third * 2},x
+                            pha
+                            lda  $arrayname2+1 $op2 ${offset2.third * 2},y
+                            sta  $arrayname1+1 $op1 ${offset1.third * 2},x
+                            pla
+                            sta  $arrayname2+1 $op2 ${offset2.third * 2},y""")
+                    }
+                }
+            }
+            else {
+                TODO("swap words expressions not supported yet for these expressions. Use a simpler expression, or even just a temporary variable and assignments for now. ${swap.position}")
+            }
+        }
+
+        fun swapLong() {
+            if(swap.target1.identifier!=null && swap.target2.identifier!=null) {
+                val varname1 = asmVariableName(swap.target1.identifier!!)
+                val varname2 = asmVariableName(swap.target2.identifier!!)
+                out("""
+                    lda  $varname1
+                    ldy  $varname2
+                    sta  $varname2
+                    sty  $varname1
+                    lda  $varname1+1
+                    ldy  $varname2+1
+                    sta  $varname2+1
+                    sty  $varname1+1
+                    lda  $varname1+2
+                    ldy  $varname2+2
+                    sta  $varname2+2
+                    sty  $varname1+2
+                    lda  $varname1+3
+                    ldy  $varname2+3
+                    sta  $varname2+3
+                    sty  $varname1+3""")
+            }
+            else if(swap.target1.pointerDeref!=null && swap.target2.pointerDeref!=null) {
+                val (zpVar, offset) = pointerGen.deref(swap.target1.pointerDeref!!, true)
+                require(offset == 0.toUByte())
+                out("  lda  $zpVar |  ldy  $zpVar+1 |  sta  P8ZP_SCRATCH_W1 |  sty  P8ZP_SCRATCH_W1+1")
+                val (zpVar2, offset2) = pointerGen.deref(swap.target2.pointerDeref!!, true)
+                require(offset2 == 0.toUByte())
+                out("  lda  $zpVar2 |  ldy  $zpVar2+1 |  jsr  prog8_lib.swap_longs")
+            }
+            else if(swap.target1.array?.variable?.type?.isPointer==true || swap.target2.array?.variable?.type?.isPointer==true) {
+                TODO("swap longs expressions not supported yet for these expressions. Use a simpler expression, or even just a temporary variable and assignments for now. ${swap.position}")
+            }
+            else if(swap.target1.array?.pointerderef==null && swap.target1.array?.index?.isSimple()==true && swap.target2.array?.pointerderef==null && swap.target2.array?.index?.isSimple()==true) {
+                val v1 = swap.target1.array!!
+                val v2 = swap.target2.array!!
+                loadScaledArrayIndexIntoRegister(v1, CpuRegister.X)
+                loadScaledArrayIndexIntoRegister(v2, CpuRegister.Y)
+                val varname1 = asmVariableName(v1.variable!!.name)
+                val varname2 = asmVariableName(v2.variable!!.name)
+                out("""
+                    lda  #4
+                    sta  P8ZP_SCRATCH_REG
+-                   lda  $varname1,x
+                    pha
+                    lda  $varname2,y
+                    sta  $varname1,x
+                    pla
+                    sta  $varname2,y
+                    inx
+                    iny
+                    dec  P8ZP_SCRATCH_REG
+                    bne  -""")
+            }
+            else if(swap.target1.array!=null && swap.target2.array!=null && swap.target1.array!!.pointerderef==null && swap.target2.array!!.pointerderef==null) {
+                val v1 = swap.target1.array!!
+                val v2 = swap.target2.array!!
+                val offset1 = simpleOffsetIndexer(v1)
+                val offset2 = simpleOffsetIndexer(v2)
+                if(offset1==null || offset2==null)
+                    TODO("swap longs not supported yet for nontrivial indexed[] expressions. Use a simpler expression, or even just temporary variable and assignments for now. ${swap.position}")
+                else {
+                    val arrayname1 = asmVariableName(v1.variable!!.name)
+                    val arrayname2 = asmVariableName(v2.variable!!.name)
+                    val offsetname1 = asmVariableName(offset1.first)
+                    val offsetname2 = asmVariableName(offset2.first)
+                    val op1 = offset1.second
+                    val op2 = offset2.second
+                    out("""
+                        lda  $offsetname1
+                        asl  a
+                        asl  a
+                        tax
+                        lda  $offsetname2
+                        asl  a
+                        asl  a
+                        tay
+                        lda  #4
+                        sta  P8ZP_SCRATCH_REG
+-                       lda  $arrayname1 $op1 ${offset1.third * 4},x
+                        pha
+                        lda  $arrayname2 $op2 ${offset2.third * 4},y
+                        sta  $arrayname1 $op1 ${offset1.third * 4},x
+                        pla
+                        sta  $arrayname2 $op2 ${offset2.third * 4},y
+                        inx
+                        iny
+                        dec  P8ZP_SCRATCH_REG
+                        bne  -""")
+                }
+            }
+            else {
+                TODO("swap longs expressions not supported yet for these expressions. Use a simpler expression, or even just a temporary variable and assignments for now. ${swap.position}")
+            }
+        }
+
+        fun swapFloat() {
+            if(swap.target1.identifier!=null && swap.target2.identifier!=null) {
+                val varname1 = asmVariableName(swap.target1.identifier!!)
+                val varname2 = asmVariableName(swap.target2.identifier!!)
+                out("""
+                    lda  #<$varname1
+                    ldy  #>$varname1
+                    sta  P8ZP_SCRATCH_W1
+                    sty  P8ZP_SCRATCH_W1+1
+                    lda  #<$varname2
+                    ldy  #>$varname2
+                    jsr  floats.swap_floats""")
+            }
+            else if(swap.target1.pointerDeref!=null || swap.target2.pointerDeref!=null) {
+                val (zpVar, offset) = pointerGen.deref(swap.target1.pointerDeref!!, true)
+                require(offset == 0.toUByte())
+                out("  lda  $zpVar |  ldy  $zpVar+1 |  sta  P8ZP_SCRATCH_W1 |  sty  P8ZP_SCRATCH_W1+1")
+                val (zpVar2, offset2) = pointerGen.deref(swap.target2.pointerDeref!!, true)
+                require(offset2 == 0.toUByte())
+                out("  lda  $zpVar2 |  ldy  $zpVar2+1 |  jsr  floats.swap_floats")
+            }
+            else if(swap.target1.array?.variable?.type?.isPointer==true || swap.target2.array?.variable?.type?.isPointer==true) {
+                TODO("swap floats expressions not supported yet for these expressions. Use a simpler expression, or even just a temporary variable and assignments for now. ${swap.position}")
+            }
+            else if(swap.target1.array?.pointerderef==null && swap.target1.array?.index?.isSimple()==true && swap.target2.array?.pointerderef==null && swap.target2.array?.index?.isSimple()==true) {
+                val v1 = swap.target1.array!!
+                val v2 = swap.target2.array!!
+                loadScaledArrayIndexIntoRegister(v1, CpuRegister.X)
+                loadScaledArrayIndexIntoRegister(v2, CpuRegister.Y)
+                val varname1 = asmVariableName(v1.variable!!.name)
+                val varname2 = asmVariableName(v2.variable!!.name)
+                out("""
+                    lda  #5
+                    sta  P8ZP_SCRATCH_REG
+-                   lda  $varname1,x
+                    pha
+                    lda  $varname2,y
+                    sta  $varname1,x
+                    pla
+                    sta  $varname2,y
+                    inx
+                    iny
+                    dec  P8ZP_SCRATCH_REG
+                    bne  -""")
+            }
+            else if(swap.target1.array!=null && swap.target2.array!=null && swap.target1.array!!.pointerderef==null && swap.target2.array!!.pointerderef==null) {
+                val v1 = swap.target1.array!!
+                val v2 = swap.target2.array!!
+                val offset1 = simpleOffsetIndexer(v1)
+                val offset2 = simpleOffsetIndexer(v2)
+                if(offset1==null || offset2==null)
+                    TODO("swap floats not supported yet for nontrivial indexed[] expressions. Use a simpler expression, or even just temporary variable and assignments for now. ${swap.position}")
+                else {
+                    require(options.compTarget.FLOAT_MEM_SIZE == 5u)
+                    val arrayname1 = asmVariableName(v1.variable!!.name)
+                    val arrayname2 = asmVariableName(v2.variable!!.name)
+                    val offsetname1 = asmVariableName(offset1.first)
+                    val offsetname2 = asmVariableName(offset2.first)
+                    val op1 = offset1.second
+                    val op2 = offset2.second
+                    out("""
+                        lda  $offsetname1
+                        asl  a
+                        asl  a
+                        clc
+                        adc  $offsetname1
+                        tax
+                        lda  $offsetname2
+                        asl  a
+                        asl  a
+                        clc
+                        adc  $offsetname2
+                        tay
+                        lda  #5
+                        sta  P8ZP_SCRATCH_REG
+-                       lda  $arrayname1 $op1 ${offset1.third * 5},x
+                        pha
+                        lda  $arrayname2 $op2 ${offset2.third * 5},y
+                        sta  $arrayname1 $op1 ${offset1.third * 5},x
+                        pla
+                        sta  $arrayname2 $op2 ${offset2.third * 5},y
+                        inx
+                        iny
+                        dec  P8ZP_SCRATCH_REG
+                        bne  -""")
+                }
+            }
+            else {
+                TODO("swap floats expressions not supported yet for these expressions. Use a simpler expression, or even just a temporary variable and assignments for now. ${swap.position}")
+            }
+        }
+
+        val dt = swap.target1.type
+        when {
+            dt.isByteOrBool -> swapByte()
+            dt.isWord || dt.isPointer -> swapWord()
+            dt.isLong -> swapLong()
+            dt.isFloat -> swapFloat()
+            else -> throw AssemblyError("weird type $dt")
+        }        
+    }
+
+    private fun simpleOffsetIndexer(indexer: PtArrayIndexer): Triple<PtIdentifier, Char, Int>? {
+        val expr = indexer.index as? PtBinaryExpression
+        if(expr!=null && expr.operator in "+-") {
+            val identifier = expr.left as? PtIdentifier ?: return null
+            val offset = expr.right as? PtNumber ?: return null
+            return Triple(identifier, expr.operator.first(), offset.number.toInt())
+        }
+        val identifier = indexer.index as? PtIdentifier
+        return if(identifier!=null)
+            Triple(identifier,'+',0)
+        else
+            null
     }
 
     private fun translate(stmt: PtConditionalBranch) {
@@ -1293,11 +2015,47 @@ $repeatLabel""")
     }
 
     private fun translate(ret: PtReturn) {
-        val returnvalue = ret.children.singleOrNull() as? PtExpression
+        val returnvalue = ret.children.singleOrNull() as? PtExpression      // could be a multi-value returning functioncall
         val sub = ret.definingSub()!!
         val returnRegs = sub.returnsWhatWhere()
 
         if(returnvalue!=null) {
+
+            if(ret.children.size < ret.numReturnValues()) {
+                // Return values come from a multi-value function call (e.g., "return multi2(99)")
+                // We need to call the function and then move its return values to our return registers
+                val fcall = ret.children.single() as? PtFunctionCall
+                    ?: throw AssemblyError("expected function call for multi-value return ${ret.position}")
+                
+                // Get the return register specs for the called function
+                val calledSub = symbolTable.lookup(fcall.name)
+                val calledReturnRegs = when(calledSub) {
+                    is StSub -> (calledSub.astNode!! as IPtSubroutine).returnsWhatWhere()
+                    is StExtSub -> calledSub.returns.map { it.register to it.type }
+                    else -> throw AssemblyError("unexpected subroutine type for multi-value return ${ret.position}")
+                }
+                
+                // Generate the function call (this writes directly to assembly)
+                translateFunctionCall(fcall)
+                
+                // Move each return value from the called function's return registers to our return registers
+                calledReturnRegs.zip(returnRegs).forEachIndexed { index, (fromRegTo, toRegTo) ->
+                    val (fromReg, fromType) = fromRegTo
+                    val (toReg, toType) = toRegTo
+                    require(fromType == toType) { "return type mismatch at position $index" }
+
+                    if(fromType.isFloat) {
+                        // For float returns, use FAC1
+                        require(fromReg.registerOrPair == RegisterOrPair.FAC1 && toReg.registerOrPair == RegisterOrPair.FAC1)
+                        // FAC1 already contains the result, no move needed if both use FAC1
+                    } else {
+                        moveValueBetweenCpuRegisters(fromReg, fromType, toReg, toType)
+                    }
+                }
+                out("  rts")
+                return
+            }
+
             val returnDt = sub.signature.returns.single()
             if (returnDt.isNumericOrBool || returnDt.isPointer) {
                 assignExpressionToRegister(returnvalue, returnRegs.single().first.registerOrPair!!, returnDt.isSigned)
@@ -1311,17 +2069,36 @@ $repeatLabel""")
                 assignmentAsmGen.assignExpressionToRegister(addrofValue, returnRegs.single().first.registerOrPair!!, false)
             }
         }
-        else if(ret.children.size>1) {
-            // note: multi-value returns are passed throug A or AY (for the first value) then cx16.R15 down to R0
+        else if(ret.numReturnValues()>1) {
+            // note: multi-value returns are passed through A or AY (for the first value) then cx16.R15 down to R0
             // (this allows unencumbered use of many Rx registers if you don't return that many values)
             // to avoid register clobbering, assign the first return value last in row.
+            // IMPORTANT: Float returns (FAC1) must be assigned LAST because other return value computations
+            // may involve float operations that clobber FAC1 (e.g., type casts like float.as ubyte).
+
+            require(ret.children.size == ret.numReturnValues())
             val assigns = ret.children.zip(returnRegs).map { it.first to it.second }
-            assigns.drop(1).forEach {
-                val tgt = AsmAssignTarget(TargetStorageKind.REGISTER, this, it.second.second, null, it.first.position, register = it.second.first.registerOrPair!!)
+            
+            // Find float return (if any) - it must be assigned last
+            val floatIdx = assigns.indexOfFirst { it.second.second.isFloat }
+            val nonFloatAssigns = if(floatIdx >= 0) assigns.filterIndexed { i, _ -> i != floatIdx } else assigns
+            val floatAssign = if(floatIdx >= 0) assigns[floatIdx] else null
+
+            // Assign non-float returns first (all except first, then first - same logic as before)
+            nonFloatAssigns.drop(1).forEach {
+                val targetDt = if(it.second.second.isPointer) DataType.UWORD else it.second.second
+                val tgt = AsmAssignTarget(TargetStorageKind.REGISTER, this, targetDt, null, it.first.position, register = it.second.first.registerOrPair!!)
                 assignExpressionTo(it.first as PtExpression, tgt)
             }
-            assigns.first().also {
-                assignExpressionToRegister(it.first as PtExpression, it.second.first.registerOrPair!!, (it.first as PtExpression).type.isSigned)
+            if(nonFloatAssigns.isNotEmpty()) {
+                nonFloatAssigns.first().also {
+                    assignExpressionToRegister(it.first as PtExpression, it.second.first.registerOrPair!!, (it.first as PtExpression).type.isSigned)
+                }
+            }
+            
+            // Assign float return LAST (so FAC1 has the correct value when we RTS)
+            if(floatAssign != null) {
+                assignExpressionToRegister(floatAssign.first as PtExpression, floatAssign.second.first.registerOrPair!!, false)
             }
         }
         out("  rts")
@@ -1482,15 +2259,21 @@ $repeatLabel""")
         val rightDt = right.type
         if((leftDt.isUnsignedWord || leftDt.isPointer) && rightDt.isUnsignedByte)
             return Pair(left, right)
-        if(leftDt.isUnsignedByte && rightDt.isUnsignedWord)
+        if(leftDt.isUnsignedByte && (rightDt.isUnsignedWord || rightDt.isPointer))
             return Pair(right, left)
-        if((leftDt.isUnsignedWord || leftDt.isPointer) && rightDt.isUnsignedWord) {
+        if((leftDt.isUnsignedWord || leftDt.isPointer) && (rightDt.isUnsignedWord || rightDt.isPointer)) {
             // could be that the index was a constant numeric byte but converted to word, check that
             val constIdx = right as? PtNumber
             if(constIdx!=null && constIdx.number.toInt()>=0 && constIdx.number.toInt()<=255) {
                 val num = PtNumber(BaseDataType.UBYTE, constIdx.number, constIdx.position)
                 num.parent = right.parent
                 return Pair(left, num)
+            }
+            val constIdxLeft = left as? PtNumber
+            if(constIdxLeft!=null && constIdxLeft.number.toInt()>=0 && constIdxLeft.number.toInt()<=255) {
+                val num = PtNumber(BaseDataType.UBYTE, constIdxLeft.number, constIdxLeft.position)
+                num.parent = left.parent
+                return Pair(right, num)
             }
             // could be that the index was typecasted into uword, check that
             val rightTc = right as? PtTypeCast
@@ -1533,7 +2316,11 @@ $repeatLabel""")
                     } else if(addrOf.dereference!=null) {
                         throw AssemblyError("write &dereference, makes no sense at ${addrOf.position}")
                     } else {
-                        out("  sta  ${asmSymbolName(addrOf.identifier!!)}+${constOffset}")
+                        var symbolName = asmSymbolName(addrOf.identifier!!)
+                        if(addrOf.identifier!!.type.isSplitWordArray) {
+                            symbolName = if(addrOf.isMsbForSplitArray) symbolName+"_msb" else symbolName+"_lsb"
+                        }
+                        out("  sta  $symbolName+${constOffset}")
                         return true
                     }
                 }
@@ -1576,7 +2363,11 @@ $repeatLabel""")
                     if(pointerGen.readByteByAddressOfDereference(addrOf, constOffset))
                         return true
                 } else {
-                    out("  lda  ${asmSymbolName(addrOf.identifier!!)}+${constOffset}")
+                    var symbolName = asmSymbolName(addrOf.identifier!!)
+                    if(addrOf.identifier!!.type.isSplitWordArray) {
+                        symbolName = if(addrOf.isMsbForSplitArray) symbolName+"_msb" else symbolName+"_lsb"
+                    }
+                    out("  lda  $symbolName+${constOffset}")
                     return true
                 }
             }
@@ -1626,7 +2417,11 @@ $repeatLabel""")
                     } else if(addrOf.dereference!=null) {
                         throw AssemblyError("write &dereference, makes no sense at ${addrOf.position}")
                     } else {
-                        out("  sta  ${asmSymbolName(addrOf.identifier!!)}-${constOffset}")
+                        var symbolName = asmSymbolName(addrOf.identifier!!)
+                        if(addrOf.identifier!!.type.isSplitWordArray) {
+                            symbolName = if(addrOf.isMsbForSplitArray) symbolName+"_msb" else symbolName+"_lsb"
+                        }
+                        out("  sta  $symbolName-${constOffset}")
                         return true
                     }
                 }
@@ -1659,7 +2454,11 @@ $repeatLabel""")
                     } else if(addrOf.dereference!=null) {
                         TODO("read &dereference ${addrOf.position}")
                     } else {
-                        out("  lda  ${asmSymbolName(addrOf.identifier!!)}-${constOffset}")
+                        var symbolName = asmSymbolName(addrOf.identifier!!)
+                        if(addrOf.identifier!!.type.isSplitWordArray) {
+                            symbolName = if(addrOf.isMsbForSplitArray) symbolName+"_msb" else symbolName+"_lsb"
+                        }
+                        out("  lda  $symbolName-${constOffset}")
                         return true
                     }
                 }
@@ -1702,6 +2501,7 @@ $repeatLabel""")
     }
 
     internal fun assignByteOperandsToAAndVar(left: PtExpression, right: PtExpression, rightVarName: String) {
+        // NOTE: do NOT optimize/alter this further! Will result in invalid code!
         if(left.isSimple()) {
             assignExpressionToVariable(right, rightVarName, DataType.UBYTE)
             assignExpressionToRegister(left, RegisterOrPair.A)
@@ -1713,10 +2513,11 @@ $repeatLabel""")
     }
 
     internal fun assignWordOperandsToAYAndVar(left: PtExpression, right: PtExpression, rightVarname: String) {
+        // NOTE: do NOT optimize/alter this further! Will result in invalid code!
         if(left.isSimple()) {
             assignExpressionToVariable(right, rightVarname, DataType.UWORD)
             assignExpressionToRegister(left, RegisterOrPair.AY)
-        }  else {
+        } else {
             pushCpuStack(BaseDataType.UWORD, left)
             assignExpressionToVariable(right, rightVarname, DataType.UWORD)
             restoreRegisterStack(CpuRegister.Y, false)
@@ -1882,21 +2683,22 @@ $repeatLabel""")
             out("  $compare  P8ZP_SCRATCH_REG")
         }
 
-        when(value) {
+        val e = unwrapCasts(value)
+        when(e) {
             is PtArrayIndexer -> {
-                val constIndex = value.index.asConstInteger()
+                val constIndex = e.index.asConstInteger()
                 if(constIndex!=null) {
-                    val offset = program.memsizer.memorySize(value.type, constIndex)
+                    val offset = program.memsizer.memorySize(e.type, constIndex)
                     if(offset<256) {
-                        if(value.variable==null)
-                            TODO("support for ptr indexing ${value.position}")
-                        return out("  ldy  #$offset |  $compare  ${asmVariableName(value.variable!!)},y")
+                        if(e.variable==null)
+                            TODO("support for ptr indexing ${e.position}")
+                        return out("  ldy  #$offset |  $compare  ${asmVariableName(e.variable!!)},y")
                     }
                 }
                 cmpViaScratch()
             }
             is PtMemoryByte -> {
-                val constAddr = value.address.asConstInteger()
+                val constAddr = e.address.asConstInteger()
                 if(constAddr!=null) {
                     out("  $compare  ${constAddr.toHex()}")
                 } else {
@@ -1904,11 +2706,11 @@ $repeatLabel""")
                 }
             }
             is PtIdentifier -> {
-                out("  $compare  ${asmVariableName(value)}")
+                out("  $compare  ${asmVariableName(e)}")
             }
             is PtNumber -> {
-                if(value.number!=0.0)
-                    out("  $compare  #${value.number.toInt()}")
+                if(e.number!=0.0)
+                    out("  $compare  #${e.number.toInt()}")
             }
             else -> {
                 cmpViaScratch()
@@ -2037,22 +2839,38 @@ $repeatLabel""")
         }
     }
 
-    internal fun checkIfConditionCanUseBIT(condition: PtBinaryExpression): Triple<Boolean, PtIdentifier, Int>? {
+    internal fun checkIfConditionCanUseBIT(condition: PtBinaryExpression): Triple<Boolean, String, Int>? {
         if(condition.operator == "==" || condition.operator == "!=") {
             if (condition.right.asConstInteger() == 0) {
-                val and = condition.left as? PtBinaryExpression
+                var and = condition.left as? PtBinaryExpression
+                if (and == null && condition.left is PtTypeCast) {
+                    and = (condition.left as PtTypeCast).value as? PtBinaryExpression
+                }
                 if (and != null && and.operator == "&" && and.type.isUnsignedByte) {
                     val bitmask = and.right.asConstInteger()
                     if(bitmask==128 || bitmask==64) {
+                        // handle msb(x) or lsb(x) calls
+                        val leftExpr = and.left
+                        if (leftExpr is PtFunctionCall) {
+                            if (leftExpr.name == "msb" || leftExpr.name == "lsb") {
+                                val arg = leftExpr.args.singleOrNull()
+                                if (arg is PtIdentifier && arg.type.isWord) {
+                                    val offset = if (leftExpr.name == "msb") 1 else 0
+                                    val variableName = "${asmVariableName(arg)}+$offset"
+                                    return Triple(condition.operator == "!=", variableName, bitmask)
+                                }
+                            }
+                        }
+
                         val variable = and.left as? PtIdentifier
                         if (variable != null && variable.type.isByte) {
-                            return Triple(condition.operator=="!=", variable, bitmask)
+                            return Triple(condition.operator=="!=", asmVariableName(variable), bitmask)
                         }
                         val typecast = and.left as? PtTypeCast
                         if (typecast != null && typecast.type.isUnsignedByte) {
                             val castedVariable = typecast.value as? PtIdentifier
                             if(castedVariable!=null && castedVariable.type.isByte)
-                                return Triple(condition.operator=="!=", castedVariable, bitmask)
+                                return Triple(condition.operator=="!=", asmVariableName(castedVariable), bitmask)
                         }
                     }
                 }
@@ -2093,7 +2911,7 @@ $repeatLabel""")
             jsr  floats.MOVFM""")
     }
 
-    internal fun loadIndirectWord(zpPtrVar: String, offset: UByte) {
+    internal fun loadIndirectWordAY(zpPtrVar: String, offset: UByte) {
         // loads word pointed to by the ptr var into AY
         if (offset > 0u) {
             out("""
@@ -2120,6 +2938,46 @@ $repeatLabel""")
                     lda  ($zpPtrVar),y
                     tay
                     txa""")
+        }
+    }
+
+    internal fun loadIndirectWordAX(zpPtrVar: String, offset: UByte) {
+        // loads word pointed to by the ptr var into AX
+        if (offset > 0u) {
+            out("""
+                    ldy  #$offset+1
+                    lda  ($zpPtrVar),y
+                    tax
+                    dey
+                    lda  ($zpPtrVar),y""")
+        } else {
+            if(isTargetCpu(CpuType.CPU65C02))
+                out("""
+                    ldy  #1
+                    lda  ($zpPtrVar),y
+                    tax
+                    lda  ($zpPtrVar)""")
+            else
+                out("""
+                    ldy  #1
+                    lda  ($zpPtrVar),y
+                    tax
+                    dey
+                    lda  ($zpPtrVar),y""")
+        }
+    }
+
+    internal fun loadIndirectWordIntoRegisters(zpPtrVar: String, offset: UByte, register: RegisterOrPair) {
+        when(register) {
+            RegisterOrPair.AY -> loadIndirectWordAY(zpPtrVar, offset)
+            RegisterOrPair.AX -> loadIndirectWordAX(zpPtrVar, offset)
+            RegisterOrPair.XY -> TODO("load into XY")
+            in Cx16VirtualRegisters -> {
+                loadIndirectWordAY(zpPtrVar, offset)
+                val regname = register.asScopedNameVirtualReg(null).joinToString(".")
+                out(" sta  $regname |  sty  $regname+1")
+            }
+            else -> throw AssemblyError("invalid register for indirect load word $register")
         }
     }
 
@@ -2544,6 +3402,7 @@ $repeatLabel""")
             ldy  P8ZP_SCRATCH_B1
             txa""")
     }
+
 }
 
 /**

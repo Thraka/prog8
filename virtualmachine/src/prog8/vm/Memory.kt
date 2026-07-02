@@ -6,123 +6,101 @@ import kotlin.random.Random
  * 64 Kb of random access memory. Initialized to random values.
  */
 class Memory {
-    private val mem = Array(64 * 1024) { Random.nextInt().toUByte() }
+    private val mem = ByteArray(64 * 1024) { Random.nextInt().toByte() }
 
     fun reset() {
-        mem.fill(0u)
+        mem.fill(0)
     }
 
-    fun getUB(address: Int): UByte {
-        return mem[address]
+    fun getUB(address: UInt): UByte = mem[address.toInt()].toUByte()
+    fun getSB(address: UInt): Byte = mem[address.toInt()]
+    fun setUB(address: UInt, value: UByte) { mem[address.toInt()] = value.toByte() }
+    fun setSB(address: UInt, value: Byte) { mem[address.toInt()] = value }
+
+    fun getUW(address: UInt): UShort {
+        val a = address.toInt()
+        return ((mem[a].toInt() and 0xFF) or ((mem[a+1].toInt() and 0xFF) shl 8)).toUShort()
     }
 
-    fun getSB(address: Int): Byte {
-        return mem[address].toByte()
+    fun getSW(address: UInt): Short {
+        val a = address.toInt()
+        return ((mem[a].toInt() and 0xFF) or ((mem[a+1].toInt() and 0xFF) shl 8)).toShort()
     }
 
-    fun setUB(address: Int, value: UByte) {
-        mem[address] = value
+    fun getSL(address: UInt): Int {
+        val a = address.toInt()
+        return (mem[a].toInt() and 0xFF) or
+               ((mem[a+1].toInt() and 0xFF) shl 8) or
+               ((mem[a+2].toInt() and 0xFF) shl 16) or
+               ((mem[a+3].toInt() and 0xFF) shl 24)
     }
 
-    fun setSB(address: Int, value: Byte) {
-        mem[address] = value.toUByte()
+    fun setUW(address: UInt, value: UShort) {
+        val a = address.toInt()
+        mem[a] = (value.toInt() and 0xFF).toByte()
+        mem[a+1] = ((value.toInt() shr 8) and 0xFF).toByte()
     }
 
-    fun getUW(address: Int): UShort {
-        return (mem[address] + 256u*mem[address+1]).toUShort()
+    fun setSW(address: UInt, value: Short) {
+        val a = address.toInt()
+        mem[a] = (value.toInt() and 0xFF).toByte()
+        mem[a+1] = ((value.toInt() shr 8) and 0xFF).toByte()
     }
 
-    fun getSL(address: Int): Int {
-        return (mem[address] + 256u*mem[address+1] + 65536u*mem[address+2] + 16777216u*mem[address+3]).toInt()
+    fun setSL(address: UInt, value: Int) {
+        val a = address.toInt()
+        mem[a] = (value and 0xFF).toByte()
+        mem[a+1] = ((value shr 8) and 0xFF).toByte()
+        mem[a+2] = ((value shr 16) and 0xFF).toByte()
+        mem[a+3] = ((value shr 24) and 0xFF).toByte()
     }
 
-    fun getSW(address: Int): Short {
-        return (mem[address].toInt() + mem[address+1].toInt()*256).toShort()
-    }
-
-    fun setUW(address: Int, value: UShort) {
-        mem[address+1]  = (value.toInt() ushr 8).toUByte()
-        mem[address] = value.toUByte()
-    }
-
-    fun setSW(address: Int, value: Short) {
-        val uv = value.toUShort()
-        mem[address+1]  = (uv.toInt() ushr 8).toUByte()
-        mem[address] = uv.toUByte()
-    }
-
-    fun setSL(address: Int, value: Int) {
-        val uv = value.toUInt()
-        mem[address+3] = (uv shr 24).toUByte()
-        mem[address+2] = (uv shr 16).toUByte()
-        mem[address+1] = (uv shr 8).toUByte()
-        mem[address] = uv.toUByte()
-    }
-
-    fun setFloat(address: Int, value: Double) {
+    fun setFloat(address: UInt, value: Double) {
         var bits = value.toBits()
-        mem[address] = bits.toUByte()
+        val a = address.toInt()
+        mem[a] = (bits and 0xFF).toByte()
         bits = bits ushr 8
-        mem[address+1] = bits.toUByte()
+        mem[a+1] = (bits and 0xFF).toByte()
         bits = bits ushr 8
-        mem[address+2] = bits.toUByte()
+        mem[a+2] = (bits and 0xFF).toByte()
         bits = bits ushr 8
-        mem[address+3] = bits.toUByte()
+        mem[a+3] = (bits and 0xFF).toByte()
         bits = bits ushr 8
-        mem[address+4] = bits.toUByte()
+        mem[a+4] = (bits and 0xFF).toByte()
         bits = bits ushr 8
-        mem[address+5] = bits.toUByte()
+        mem[a+5] = (bits and 0xFF).toByte()
         bits = bits ushr 8
-        mem[address+6] = bits.toUByte()
+        mem[a+6] = (bits and 0xFF).toByte()
         bits = bits ushr 8
-        mem[address+7] = bits.toUByte()
+        mem[a+7] = (bits and 0xFF).toByte()
     }
 
-    fun getFloat(address: Int): Double {
-        val bits = mem[address].toLong() +
-            (1L shl 8)*mem[address+1].toLong() +
-            (1L shl 16)*mem[address+2].toLong() +
-            (1L shl 24)*mem[address+3].toLong() +
-            (1L shl 32)*mem[address+4].toLong() +
-            (1L shl 40)*mem[address+5].toLong() +
-            (1L shl 48)*mem[address+6].toLong() +
-            (1L shl 56)*mem[address+7].toLong()
+    fun getFloat(address: UInt): Double {
+        val a = address.toInt()
+        val bits = (mem[a].toLong() and 0xFF) or
+            ((mem[a+1].toLong() and 0xFF) shl 8) or
+            ((mem[a+2].toLong() and 0xFF) shl 16) or
+            ((mem[a+3].toLong() and 0xFF) shl 24) or
+            ((mem[a+4].toLong() and 0xFF) shl 32) or
+            ((mem[a+5].toLong() and 0xFF) shl 40) or
+            ((mem[a+6].toLong() and 0xFF) shl 48) or
+            ((mem[a+7].toLong() and 0xFF) shl 56)
         return Double.fromBits(bits)
     }
 
-// for now, no LONG 32-bits support
-//    fun getL(address: Int): UInt {
-//        return mem[address+3] + 256u*mem[address+2] + 65536u*mem[address+1] + 16777216u*mem[address]
-//    }
-//
-//    fun setL(address: Int, value: UInt) {
-//        val v = value.toInt()
-//        mem[address] = (v ushr 24).toUByte()
-//        mem[address+1] = (v ushr 16).toUByte()
-//        mem[address+2] = (v ushr 8).toUByte()
-//        mem[address+3] = v.toUByte()
-//    }
-
-    fun setString(address: Int, string: String, zeroTerminated: Boolean) {
-        var addr=address
-        for (c in string) {
-            mem[addr] = c.code.toUByte()
-            addr++
-        }
+    fun setString(address: UInt, string: String, zeroTerminated: Boolean) {
+        val a = address.toInt()
+        val length = string.length
+        if (length > 0)
+            System.arraycopy(string.toByteArray(), 0, mem, a, length)
         if(zeroTerminated)
-            mem[addr] = 0u
+            mem[a + length] = 0
     }
 
-    fun getString(address: Int): String {
-        val sb = StringBuilder()
-        var addr = address
-        while(true) {
-            val char = mem[addr].toInt()
-            if(char==0)
-                break
-            sb.append(Char(char))
-            addr++
-        }
-        return sb.toString()
+    fun getString(address: UInt): String {
+        val a = address.toInt()
+        var length = 0
+        while (mem[a + length] != 0.toByte()) length++
+        return String(mem, a, length)
     }
 }

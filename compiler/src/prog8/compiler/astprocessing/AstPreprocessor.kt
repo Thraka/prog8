@@ -3,8 +3,7 @@ package prog8.compiler.astprocessing
 import prog8.ast.*
 import prog8.ast.expressions.*
 import prog8.ast.statements.*
-import prog8.ast.walk.AstWalker
-import prog8.ast.walk.IAstModification
+import prog8.ast.walk.*
 import prog8.code.core.*
 
 
@@ -12,7 +11,7 @@ class AstPreprocessor(val program: Program,
                       val errors: IErrorReporter,
                       val options: CompilationOptions) : AstWalker() {
 
-    override fun before(program: Program): Iterable<IAstModification> {
+    override fun before(program: Program): Iterable<AstModification> {
         if(options.zeropage==ZeropageType.KERNALSAFE || options.zeropage==ZeropageType.FULL) {
             // there may be enough space in the zero page to put the cx16 virtual registers there.
             // unfortunately, can't be the same address as CommanderX16.
@@ -75,39 +74,39 @@ class AstPreprocessor(val program: Program,
         vardecl.value = NumericLiteral(oldAddr.type, address.toDouble(), oldAddr.position)
     }
 
-    override fun before(directive: Directive, parent: Node): Iterable<IAstModification> {
+    override fun before(directive: Directive, parent: Node): Iterable<AstModification> {
         if(directive.parent is Expression)
             errors.err("${directive.directive} is ambiguous here as an operand for the % operator and a directive. Add spaces around the operator % to distinguish it.", directive.position)
         return noModifications
     }
 
-    override fun before(char: CharLiteral, parent: Node): Iterable<IAstModification> {
+    override fun before(char: CharLiteral, parent: Node): Iterable<AstModification> {
         if(char.encoding== Encoding.DEFAULT)
             char.encoding = char.definingModule.textEncoding
         return noModifications
     }
 
-    override fun before(string: StringLiteral, parent: Node): Iterable<IAstModification> {
+    override fun before(string: StringLiteral, parent: Node): Iterable<AstModification> {
         if(string.encoding==Encoding.DEFAULT)
             string.encoding = string.definingModule.textEncoding
         return super.before(string, parent)
     }
 
-    override fun before(expr: PrefixExpression, parent: Node): Iterable<IAstModification> {
+    override fun before(expr: PrefixExpression, parent: Node): Iterable<AstModification> {
         if (parent is RangeExpression)
             return noModifications
         val constValue = expr.constValue(program) ?: return noModifications
-        return listOf(IAstModification.ReplaceNode(expr, constValue, parent))
+        return listOf(AstReplaceNode(expr, constValue, parent))
     }
 
-    override fun after(range: RangeExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(range: RangeExpression, parent: Node): Iterable<AstModification> {
         // has to be done before the constant folding, otherwise certain checks there will fail on invalid range sizes
-        val modifications = mutableListOf<IAstModification>()
+        val modifications = mutableListOf<AstModification>()
         if(range.from !is NumericLiteral) {
             try {
                 val constval = range.from.constValue(program)
                 if (constval != null)
-                    modifications += IAstModification.ReplaceNode(range.from, constval, range)
+                    modifications += AstReplaceNode(range.from, constval, range)
             } catch (_: SyntaxError) {
                 // syntax errors will be reported later
             }
@@ -116,7 +115,7 @@ class AstPreprocessor(val program: Program,
             try {
                 val constval = range.to.constValue(program)
                 if(constval!=null)
-                    modifications += IAstModification.ReplaceNode(range.to, constval, range)
+                    modifications += AstReplaceNode(range.to, constval, range)
             } catch (_: SyntaxError) {
                 // syntax errors will be reported later
             }
@@ -125,7 +124,7 @@ class AstPreprocessor(val program: Program,
             try {
                 val constval = range.step.constValue(program)
                 if(constval!=null)
-                    modifications += IAstModification.ReplaceNode(range.step, constval, range)
+                    modifications += AstReplaceNode(range.step, constval, range)
             } catch (_: SyntaxError) {
                 // syntax errors will be reported later
             }
@@ -133,20 +132,20 @@ class AstPreprocessor(val program: Program,
         return modifications
     }
 
-    override fun after(scope: AnonymousScope, parent: Node): Iterable<IAstModification> {
+    override fun after(scope: AnonymousScope, parent: Node): Iterable<AstModification> {
 
         // move vardecls in Anonymous scope up to the containing subroutine
         // and add initialization assignment in its place if needed
         val vars = scope.statements.asSequence().filterIsInstance<VarDecl>()
         val parentscope = scope.definingScope
         if(vars.any() && parentscope !== parent) {
-            val movements = mutableListOf<IAstModification>()
-            val replacements = mutableListOf<IAstModification>()
+            val movements = mutableListOf<AstModification>()
+            val replacements = mutableListOf<AstModification>()
 
             for(decl in vars) {
                 if(decl.type != VarDeclType.VAR) {
-                    movements.add(IAstModification.InsertFirst(decl, parentscope))
-                    replacements.add(IAstModification.Remove(decl, scope))
+                    movements.add(AstInsert.first(parentscope, decl))
+                    replacements.add(AstRemove(decl, scope))
                 } else {
                     val declToInsert: VarDecl
                     if(decl.names.size>1) {
@@ -162,15 +161,15 @@ class AstPreprocessor(val program: Program,
                                     position = decl.position
                                 )
                                 val assign = Assignment(target.copy(), decl.value!!.copy(), AssignmentOrigin.VARINIT, decl.position)
-                                replacements.add(IAstModification.InsertAfter(decl, assign, scope))
+                                replacements.add(AstInsert.after(decl, assign, scope))
                             }
-                            replacements.add(IAstModification.Remove(decl, scope))
+                            replacements.add(AstRemove(decl, scope))
                             decl.value = null
                             decl.allowInitializeWithZero = false
                             declToInsert = decl
                         } else {
                             // just move it to the defining scope
-                            replacements.add(IAstModification.Remove(decl, scope))
+                            replacements.add(AstRemove(decl, scope))
                             declToInsert = decl
                         }
                     } else {
@@ -185,16 +184,16 @@ class AstPreprocessor(val program: Program,
                                 position = decl.position
                             )
                             val assign = Assignment(target, decl.value!!, AssignmentOrigin.VARINIT, decl.position)
-                            replacements.add(IAstModification.ReplaceNode(decl, assign, scope))
+                            replacements.add(AstReplaceNode(decl, assign, scope))
                             decl.value = null
                             decl.allowInitializeWithZero = false
                             declToInsert = decl.copy()
                         } else {
-                            replacements.add(IAstModification.Remove(decl, scope))
+                            replacements.add(AstRemove(decl, scope))
                             declToInsert = decl
                         }
                     }
-                    movements.add(IAstModification.InsertFirst(declToInsert, parentscope))
+                    movements.add(AstInsert.first(parentscope, declToInsert))
                 }
             }
             return movements + replacements
@@ -202,22 +201,58 @@ class AstPreprocessor(val program: Program,
         return noModifications
     }
 
-    override fun after(expr: BinaryExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(expr: BinaryExpression, parent: Node): Iterable<AstModification> {
         if(expr.operator==".")
             return noModifications
         if(expr.operator=="in") {
             val containment = ContainmentCheck(expr.left, expr.right, expr.position)
-            return listOf(IAstModification.ReplaceNode(expr, containment, parent))
+            return listOf(AstReplaceNode(expr, containment, parent))
         }
         if(expr.operator=="not in") {
             val containment = ContainmentCheck(expr.left, expr.right, expr.position)
             val notContainment = PrefixExpression("not", containment, expr.position)
-            return listOf(IAstModification.ReplaceNode(expr, notContainment, parent))
+            return listOf(AstReplaceNode(expr, notContainment, parent))
         }
         return noModifications
     }
 
-    override fun after(decl: VarDecl, parent: Node): Iterable<IAstModification> {
+    override fun before(decl: VarDecl, parent: Node): Iterable<AstModification> {
+        val tuple = decl.value as? ExpressionTuple
+        if(tuple!=null) {
+            if(decl.names.size != tuple.expressions.size) {
+                errors.err("number of initialization values does not match number of variables", decl.position)
+                decl.value = null
+            } else {
+                decl.value = null
+
+                // check if all values in the tuple are a NumericLiteral and that they are all the same number
+                // if so replace by vardecl with just this initialization value
+                if (tuple.expressions.all { it is NumericLiteral }) {
+                    val firstValue = (tuple.expressions.first() as NumericLiteral).number
+                    if(tuple.expressions.all { (it as NumericLiteral).number == firstValue }) {
+                        decl.value = tuple.expressions.first()
+                        return noModifications
+                    }
+                }
+
+                val vardecls = decl.names
+                    .zip(tuple.expressions)
+                    .reversed()
+                    .map { (name, value) ->
+                        val newDecl = VarDecl.builder(decl.datatype, decl.position)
+                            .copyFrom(decl)
+                            .names(name)
+                            .value(value)
+                            .build()
+                        AstInsert.after(decl, newDecl, parent as IStatementContainer)
+                    }
+                return vardecls + AstRemove(decl, parent as IStatementContainer)
+            }
+        }
+        return noModifications
+    }
+
+    override fun after(decl: VarDecl, parent: Node): Iterable<AstModification> {
         val nextAssignment = decl.nextSibling() as? Assignment
         if(nextAssignment!=null && nextAssignment.origin!=AssignmentOrigin.VARINIT) {
             // check if the following assignment initializes the variable
@@ -257,34 +292,34 @@ class AstPreprocessor(val program: Program,
         return noModifications
     }
 
-    override fun after(subroutine: Subroutine, parent: Node): Iterable<IAstModification> {
+    override fun after(subroutine: Subroutine, parent: Node): Iterable<AstModification> {
         // For non-kernal subroutines and non-asm parameters:
         // inject subroutine params as local variables (if they're not there yet).
         // If the param should be in a R0-R15 register, don't make a local variable but an alias instead.
         val symbolsInSub = subroutine.allDefinedSymbols
-        val namesInSub = symbolsInSub.map{ it.first }.toSet()
+        val namesInSub = symbolsInSub.mapTo(mutableSetOf()) { it.first }
         if(subroutine.asmAddress==null) {
             if(!subroutine.isAsmSubroutine && subroutine.parameters.isNotEmpty()) {
-                val mods = mutableListOf<IAstModification>()
+                val mods = mutableListOf<AstModification>()
                 val (normalParams, registerParams) = subroutine.parameters.partition { it.registerOrPair==null }
                 if(normalParams.isNotEmpty()) {
-                    val existingVars = subroutine.statements.asSequence().filterIsInstance<VarDecl>().map { it.name }.toSet()
+                    val existingVars = subroutine.statements.filterIsInstance<VarDecl>().mapTo(mutableSetOf()) { it.name }
                     normalParams
                         .filter { it.name !in namesInSub && it.name !in existingVars }
                         .forEach {
                             val vardecl = VarDecl.fromParameter(it)
-                            mods += IAstModification.InsertFirst(vardecl, subroutine)
+                            mods += AstInsert.first(subroutine, vardecl)
                         }
                 }
                 if(registerParams.isNotEmpty()) {
-                    val existingAliases = subroutine.statements.asSequence().filterIsInstance<Alias>().map { it.alias }.toSet()
+                    val existingAliases = subroutine.statements.filterIsInstance<Alias>().mapTo(mutableSetOf()) { it.alias }
                     registerParams
                         .filter { it.name !in namesInSub && it.name !in existingAliases }
                         .forEach {
-                            if (it.registerOrPair in Cx16VirtualRegisters) {
-                                if(it.type.isWordOrByteOrBool || it.type.isPointer) {
+                            if (it.registerOrPair in Cx16VirtualRegisters || it.registerOrPair in CombinedLongRegisters) {
+                                if(it.type.isInteger || it.type.isBool || it.type.isPointer) {
                                     val mappedParamVar = VarDecl.fromParameter(it)
-                                    mods += IAstModification.InsertFirst(mappedParamVar, subroutine)
+                                    mods += AstInsert.first(subroutine, mappedParamVar)
                                 } else {
                                     errors.err("using R0-R15 as register param requires integer or boolean type", it.position)
                                 }
@@ -315,11 +350,15 @@ class AstPreprocessor(val program: Program,
         return noModifications
     }
 
-    override fun after(functionCallExpr: FunctionCallExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(functionCallExpr: FunctionCallExpression, parent: Node): Iterable<AstModification> {
         val stmtOfExpression = findParentNode<Statement>(functionCallExpr)
             ?: throw FatalAstException("cannot determine statement scope of function call expression at ${functionCallExpr.position}")
 
         checkStringParam(functionCallExpr as IFunctionCall, stmtOfExpression)
+
+        if (functionCallExpr.isMemoryCall && functionCallExpr.args.size == 1) {
+            functionCallExpr.target = IdentifierReference(listOf("memory__ref"), functionCallExpr.target.position).apply { linkParents(functionCallExpr) }
+        }
 
         if(functionCallExpr.target.nameInSource==listOf("sizeof")) {
             val arg = functionCallExpr.args.firstOrNull()
@@ -329,19 +368,24 @@ class AstPreprocessor(val program: Program,
                 if(dt.isKnown) {
                     val dtName = dt.getOrUndef().toString()
                     val newArg = IdentifierReference(dtName.split("."), arg.position)
-                    return listOf(IAstModification.ReplaceNode(arg, newArg, functionCallExpr))
+                    return listOf(AstReplaceNode(arg, newArg, functionCallExpr))
                 }
             }
         }
         return noModifications
     }
 
-    override fun after(functionCallStatement: FunctionCallStatement, parent: Node): Iterable<IAstModification> {
+    override fun after(functionCallStatement: FunctionCallStatement, parent: Node): Iterable<AstModification> {
         checkStringParam(functionCallStatement as IFunctionCall, functionCallStatement)
+
+        if (functionCallStatement.isMemoryCall && functionCallStatement.args.size == 1) {
+            functionCallStatement.target = IdentifierReference(listOf("memory__ref"), functionCallStatement.target.position).apply { linkParents(functionCallStatement) }
+        }
+
         return noModifications
     }
 
-    override fun before(alias: Alias, parent: Node): Iterable<IAstModification> {
+    override fun before(alias: Alias, parent: Node): Iterable<AstModification> {
         // shortcut aliases that point to aliases (remove alias chains)
         val tgt = alias.target.targetStatement(program.builtinFunctions)
 
@@ -365,17 +409,17 @@ class AstPreprocessor(val program: Program,
                         val replacement = if(tgt2!=null) {
                             if(tgt2 is BuiltinFunctionPlaceholder) {
                                 val unscopedTarget = IdentifierReference(listOf(tgt2.name), alias.position)
-                                Alias(alias.alias, unscopedTarget, alias.position)
+                                Alias(alias.alias, unscopedTarget, alias.isPrivate, alias.position)
                             } else if(tgt2.scopedName != chainedTargetName.nameInSource) {
                                 val scopedTarget = IdentifierReference(tgt2.scopedName, alias.position)
-                                Alias(alias.alias, scopedTarget, alias.position)
+                                Alias(alias.alias, scopedTarget, alias.isPrivate, alias.position)
                             } else {
-                                Alias(alias.alias, chainedTargetName, alias.position)
+                                Alias(alias.alias, chainedTargetName, alias.isPrivate, alias.position)
                             }
                         } else {
-                            Alias(alias.alias, chainedTargetName, alias.position)
+                            Alias(alias.alias, chainedTargetName, alias.isPrivate, alias.position)
                         }
-                        return listOf(IAstModification.ReplaceNode(alias, replacement, parent))
+                        return listOf(AstReplaceNode(alias, replacement, parent))
                     }
                     maxhops--
                     if(maxhops==0) {
@@ -389,7 +433,7 @@ class AstPreprocessor(val program: Program,
         return noModifications
     }
 
-    override fun after(typecast: TypecastExpression, parent: Node): Iterable<IAstModification> {
+    override fun after(typecast: TypecastExpression, parent: Node): Iterable<AstModification> {
         // convert all antlr names to structs
         if(typecast.type.subTypeFromAntlr!=null) {
             val struct = typecast.definingScope.lookup(typecast.type.subTypeFromAntlr!!) as? ISubType
@@ -399,7 +443,7 @@ class AstPreprocessor(val program: Program,
         return noModifications
     }
 
-    override fun after(field: StructFieldRef, parent: Node): Iterable<IAstModification> {
+    override fun after(field: StructFieldRef, parent: Node): Iterable<AstModification> {
         if(field.type.subTypeFromAntlr!=null) {
             val struct = field.definingScope.lookup(field.type.subTypeFromAntlr!!) as? ISubType
             if(struct!=null)
@@ -409,7 +453,7 @@ class AstPreprocessor(val program: Program,
         return noModifications
     }
 
-    override fun after(struct: StructDecl, parent: Node): Iterable<IAstModification> {
+    override fun after(struct: StructDecl, parent: Node): Iterable<AstModification> {
         // convert all antlr names to structs
         struct.fields.forEach {
             if(it.first.subTypeFromAntlr!=null) {
@@ -431,6 +475,68 @@ class AstPreprocessor(val program: Program,
             convertedFields.copyInto(struct.fields)
 
         return noModifications
+    }
+
+    override fun after(enum: Enumeration, parent: Node): Iterable<AstModification> {
+        if (enum.members.isEmpty()) {
+            errors.err("enumeration must contain at least one member", enum.position)
+        }
+
+        // first check that there is no name conflict
+        (parent as? IStatementContainer)?.let {
+            val allNamed = it.statements.asSequence()
+                .filterIsInstance<INamedStatement>()
+                .filter { it.name==enum.name && it !== enum }
+                .toList()
+            if(allNamed.isNotEmpty()) {
+                val existing = allNamed.first() as Node
+                errors.err("name conflict '${enum.name}', also defined in ${existing.position.file} line ${existing.position.line}", enum.position)
+                return noModifications
+            }
+        }
+
+        if("::" in enum.name) {
+            errors.err("only enum members can be accessed with '::' syntax", enum.position)
+            return noModifications
+        }
+        for(member in enum.members) {
+            if("::" in member.first) {
+                errors.err("invalid enum member name '${member.first}'", enum.position)
+                return noModifications
+            }
+        }
+
+        // replace enum by a bunch of const vardecls inside a subroutine for scoping
+        val dt = DataType.forDt(enum.type)
+        var value = -1
+        val constants = enum.members.map {
+            val membername = "${enum.name}::${it.first}"
+            if(it.second!=null) {
+                if(it.second!!>value) {
+                    value = it.second!!
+                } else {
+                    errors.err("invalid enum sequence member value ${it.first} = ${it.second}", enum.position)
+                }
+            } else value++
+            val membervalue = NumericLiteral(enum.type, value.toDouble(), enum.position)
+            VarDecl.builder(dt, enum.position)
+                .names(membername)
+                .type(VarDeclType.CONST)
+                .value(membervalue)
+                .isPrivate(enum.isPrivate)
+                .build()
+        }
+
+        /*
+            val sub = Subroutine(enum.name, mutableListOf(), mutableListOf(), emptyList(), emptyList(),
+                emptySet(), null, false, false, statements=constants.toMutableList(), position=enum.position)
+         */
+
+        val modifications =
+            constants.map { AstInsert.before(enum, it, parent as IStatementContainer) } +
+                AstRemove(enum, parent as IStatementContainer)
+
+        return modifications
     }
 
     private fun checkStringParam(call: IFunctionCall, stmt: Statement) {

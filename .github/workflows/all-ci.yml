@@ -10,29 +10,30 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: build and install recent 64tass
+      - name: install 64tass
         run: |
-          sudo apt-get install -y make build-essential
-          git clone --depth=1 https://github.com/irmen/64tass
-          cd 64tass
-          make -j4
-          sudo make install          
+          sudo apt update
+          sudo apt install 64tass
+          64tass --version
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: 17
           distribution: temurin
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
       - name: Build and test with Gradle
         run: |
-          ./gradlew build shadowJar --no-daemon
+          ./gradlew build shadowJar --no-daemon --console=plain
           sha256sum -b compiler/build/libs/*-all.jar > compiler/build/libs/hash.txt
         
       - name: Create compiler shadowJar artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: prog8-compiler-jar-zipped
           path: |

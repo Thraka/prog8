@@ -31,7 +31,7 @@ class TestCompilerOptionSourcedirs: FunSpec({
             quietAssembler = true,
             showTimings = false,
             asmListfile = false,
-            includeSourcelines = false,
+            includeSourcelines = true,
             experimentalCodegen = false,
             dumpVariables = false,
             dumpSymbols = false,
@@ -44,8 +44,10 @@ class TestCompilerOptionSourcedirs: FunSpec({
             printAst1 = false,
             printAst2 = false,
             ignoreFootguns = false,
+            profilingInstrumentation = false,
+            nostdlib = false,
             symbolDefs = emptyMap(),
-            sourceDirs,
+            sourceDirs = sourceDirs,
             outputDir = tempdir().toPath()
         )
         return compileProgram(args)

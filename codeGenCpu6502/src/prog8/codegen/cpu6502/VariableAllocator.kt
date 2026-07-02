@@ -1,7 +1,7 @@
 package prog8.codegen.cpu6502
 
 import com.github.michaelbull.result.fold
-import com.github.michaelbull.result.onSuccess
+import com.github.michaelbull.result.onOk
 import prog8.code.*
 import prog8.code.core.*
 
@@ -85,12 +85,12 @@ internal class VariableAllocator(private val symboltable: SymbolTable,
                     variable.astNode?.position ?: Position.DUMMY,
                     errors
                 )
-                result.onSuccess { numVariablesAllocatedInZP++ }
+                result.onOk { numVariablesAllocatedInZP++ }
                 //  no need to check for allocation error, if there is one, just allocate in normal system ram.
             }
 
             // try to allocate the "don't care" interger variables into the zeropage until it is full.
-            // TODO some form of intelligent priorization? most often used variables first? loopcounter vars first? ...?
+            // TODO some form of intelligent priorization? most often used variables first? loopcounter vars first? ...?  Simply sorting by size (bytes prioritized) has BAD results
             if(errors.noErrors()) {
                 val sortedList = varsDontCareWithoutAlignment.sortedByDescending { it.scopedNameString }
                 for (variable in sortedList) {
@@ -105,7 +105,7 @@ internal class VariableAllocator(private val symboltable: SymbolTable,
                                 variable.astNode?.position ?: Position.DUMMY,
                                 errors
                             )
-                            result.onSuccess { numVariablesAllocatedInZP++ }
+                            result.onOk { numVariablesAllocatedInZP++ }
                         }
                     } else
                         numberOfNonIntegerVariables++

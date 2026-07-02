@@ -13,64 +13,68 @@ import prog8.code.core.Position
 import prog8.code.core.isInteger
 import kotlin.math.*
 
-private typealias ConstExpressionCaller = (args: List<Expression>, position: Position, program: Program) -> NumericLiteral
-
-internal val constEvaluatorsForBuiltinFuncs: Map<String, ConstExpressionCaller> = mapOf(
-    "abs" to ::builtinAbs,
-    "len" to ::builtinLen,
-    "sizeof" to ::builtinSizeof,
-    "offsetof" to ::builtinOffsetof,
-    "sgn" to ::builtinSgn,
-    "sqrt__ubyte" to { a, p, prg -> oneIntArgOutputInt(a, p, prg, false) { sqrt(it.toDouble()) } },
-    "sqrt__uword" to { a, p, prg -> oneIntArgOutputInt(a, p, prg, false) { sqrt(it.toDouble()) } },
-    "sqrt__long" to { a, p, prg -> oneIntArgOutputInt(a, p, prg, false) {
+// Maps builtin functions to constant evaluators for compile-time execution
+internal val constEvaluatorsForBuiltinFuncs: Map<String, (args: List<Expression>, position: Position, program: Program) -> List<NumericLiteral>> = mapOf(
+    "abs__byte" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, true) { abs(it).toDouble() }) },
+    "abs__word" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, true) { abs(it).toDouble() }) },
+    "abs__long" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, true) { abs(it).toDouble() }) },
+    "abs__float" to { a, p, prg -> listOf(oneFloatArgOutputFloat(a, p, prg) { abs(it) }) },
+    "len" to { a, p, prg -> listOf(builtinLen(a, p, prg)) },
+    "sizeof" to { a, p, prg -> listOf(builtinSizeof(a, p, prg)) },
+    "offsetof" to { a, p, prg -> listOf(builtinOffsetof(a, p, prg)) },
+    "sgn" to { a, p, prg -> listOf(builtinSgn(a, p, prg)) },
+    "sqrt__ubyte" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, false) { sqrt(it.toDouble()) }) },
+    "sqrt__uword" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, false) { sqrt(it.toDouble()) }) },
+    "sqrt__long" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, false) {
         val value=it.toDouble()
         if(value<0)
             throw CannotEvaluateException("sqrt", "argument cannot be negative")
         else
             sqrt(value)
-    } },
-    "sqrt__float" to { a, p, prg -> oneFloatArgOutputFloat(a, p, prg) {
+    }) },
+    "sqrt__float" to { a, p, prg -> listOf(oneFloatArgOutputFloat(a, p, prg) {
         if(it<0)
             throw CannotEvaluateException("sqrt", "argument cannot be negative")
         else
             sqrt(it)
-    } },
-    "lsb" to { a, p, prg -> oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x and 255).toDouble() } },
-    "lsb__long" to { a, p, prg -> oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x and 255).toDouble() } },
-    "lsw" to { a, p, prg -> oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x and 65535).toDouble() } },
-    "msb" to { a, p, prg -> oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x ushr 8 and 255).toDouble()} },
-    "msb__long" to { a, p, prg -> oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x ushr 24 and 255).toDouble()} },
-    "msw" to { a, p, prg -> oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x ushr 16 and 65535).toDouble()} },
-    "mkword" to ::builtinMkword,
-    "mklong" to ::builtinMklong,
-    "mklong2" to ::builtinMklong,
-    "clamp__ubyte" to ::builtinClampUByte,
-    "clamp__byte" to ::builtinClampByte,
-    "clamp__uword" to ::builtinClampUWord,
-    "clamp__word" to ::builtinClampWord,
-    "min__ubyte" to ::builtinMinUByte,
-    "min__byte" to ::builtinMinByte,
-    "min__uword" to ::builtinMinUWord,
-    "min__word" to ::builtinMinWord,
-    "min__long" to ::builtinMinLong,
-    "max__ubyte" to ::builtinMaxUByte,
-    "max__byte" to ::builtinMaxByte,
-    "max__uword" to ::builtinMaxUWord,
-    "max__word" to ::builtinMaxWord,
-    "max__long" to ::builtinMaxLong
+    }) },
+    "lsb" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x and 255).toDouble() }) },
+    "lsb__long" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x and 255).toDouble() }) },
+    "lsw" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x and 65535).toDouble() }) },
+    "msb" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x ushr 8 and 255).toDouble()}) },
+    "msb__long" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x ushr 24 and 255).toDouble()}) },
+    "msw" to { a, p, prg -> listOf(oneIntArgOutputInt(a, p, prg, true) { x: Int -> (x ushr 16 and 65535).toDouble()}) },
+    "mkword" to { a, p, prg -> listOf(builtinMkword(a, p, prg)) },
+    "mklong" to { a, p, prg -> listOf(builtinMklong(a, p, prg)) },
+    "mklong2" to { a, p, prg -> listOf(builtinMklong(a, p, prg)) },
+    "clamp__ubyte" to { a, p, prg -> listOf(builtinClampUByte(a, p, prg)) },
+    "clamp__byte" to { a, p, prg -> listOf(builtinClampByte(a, p, prg)) },
+    "clamp__uword" to { a, p, prg -> listOf(builtinClampUWord(a, p, prg)) },
+    "clamp__word" to { a, p, prg -> listOf(builtinClampWord(a, p, prg)) },
+    "clamp__long" to { a, p, prg -> listOf(builtinClampLong(a, p, prg)) },
+    "min__ubyte" to { a, p, prg -> listOf(builtinMinUByte(a, p, prg)) },
+    "min__byte" to { a, p, prg -> listOf(builtinMinByte(a, p, prg)) },
+    "min__uword" to { a, p, prg -> listOf(builtinMinUWord(a, p, prg)) },
+    "min__word" to { a, p, prg -> listOf(builtinMinWord(a, p, prg)) },
+    "min__long" to { a, p, prg -> listOf(builtinMinLong(a, p, prg)) },
+    "max__ubyte" to { a, p, prg -> listOf(builtinMaxUByte(a, p, prg)) },
+    "max__byte" to { a, p, prg -> listOf(builtinMaxByte(a, p, prg)) },
+    "max__uword" to { a, p, prg -> listOf(builtinMaxUWord(a, p, prg)) },
+    "max__word" to { a, p, prg -> listOf(builtinMaxWord(a, p, prg)) },
+    "max__long" to { a, p, prg -> listOf(builtinMaxLong(a, p, prg)) },
+    "lmh" to ::builtinLmh,
+    "divmod__ubyte" to ::builtinDivmodUByte,
+    "divmod__uword" to ::builtinDivmodUWord,
+    "divmod__byte" to ::builtinDivmodByte,
+    "divmod__word" to ::builtinDivmodWord
 )
 
-internal fun builtinFunctionReturnType(function: String): InferredTypes.InferredType {
+internal fun builtinFunctionReturnTypes(function: String): Array<InferredTypes.InferredType> {
     if(function in setOf("set_carry", "set_irqd", "clear_carry", "clear_irqd"))
-        return InferredTypes.InferredType.void()
+        return emptyArray()
 
     val func = BuiltinFunctions.getValue(function)
-    val returnType = func.returnType
-    return if(returnType==null)
-        InferredTypes.InferredType.void()
-    else
-        InferredTypes.knownFor(returnType)
+    return func.returnTypes.map { InferredTypes.knownFor(it) }.toTypedArray()
 }
 
 
@@ -108,16 +112,6 @@ private fun oneFloatArgOutputFloat(args: List<Expression>, position: Position, p
     return NumericLiteral(BaseDataType.FLOAT, result, args[0].position)
 }
 
-private fun builtinAbs(args: List<Expression>, position: Position, program: Program): NumericLiteral {
-    // 1 arg, type = int, result type= uword
-    if(args.size!=1)
-        throw SyntaxError("abs requires one integer argument", position)
-
-    val constval = args[0].constValue(program) ?: throw NotConstArgumentException()
-    return if (constval.type.isInteger) NumericLiteral.optimalInteger(abs(constval.number.toInt()), args[0].position)
-    else throw SyntaxError("abs requires one integer argument", position)
-}
-
 private fun builtinOffsetof(args: List<Expression>, position: Position, program: Program): NumericLiteral {
     // 1 arg, "Struct.field"
     if(args.size!=1)
@@ -137,12 +131,12 @@ private fun builtinSizeof(args: List<Expression>, position: Position, program: P
     // 1 arg, type = anything, result type = ubyte or uword
     if(args.size!=1)
         throw SyntaxError("sizeof requires one argument", position)
-    if(args[0] !is IdentifierReference && args[0] !is NumericLiteral && args[0] !is AddressOf)
+    if(args[0] !is IdentifierReference && args[0] !is NumericLiteral && args[0] !is AddressOf && args[0] !is MemorySlabRef)
         throw CannotEvaluateException("sizeof","argument should be an identifier, number, or type name")
 
     val dt = args[0].inferType(program)
     if(dt.isKnown) {
-        if(args[0] is NumericLiteral || args[0] is AddressOf)
+        if(args[0] is NumericLiteral || args[0] is AddressOf || args[0] is MemorySlabRef)
             return NumericLiteral.optimalInteger(program.memsizer.memorySize(dt.getOrUndef(), null), position)
 
         val target = (args[0] as? IdentifierReference)?.targetStatement()
@@ -394,3 +388,73 @@ private fun builtinClampWord(args: List<Expression>, position: Position, program
     return NumericLiteral(BaseDataType.WORD, result, position)
 }
 
+private fun builtinClampLong(args: List<Expression>, position: Position, program: Program): NumericLiteral {
+    if(args.size!=3)
+        throw SyntaxError("clamp requires 3 arguments", position)
+    val value = args[0].constValue(program) ?: throw NotConstArgumentException()
+    val minimum = args[1].constValue(program) ?: throw NotConstArgumentException()
+    val maximum = args[2].constValue(program) ?: throw NotConstArgumentException()
+    val result = min(max(value.number, minimum.number), maximum.number)
+    return NumericLiteral(BaseDataType.LONG, result, position)
+}
+
+
+private fun builtinLmh(args: List<Expression>, position: Position, program: Program): List<NumericLiteral> {
+    if (args.size != 1)
+        throw SyntaxError("lmh requires 1 argument", position)
+    val constval = args[0].constValue(program) ?: throw NotConstArgumentException()
+    val value = constval.number.toLong()
+    return listOf(
+        NumericLiteral(BaseDataType.UBYTE, (value and 0xff).toDouble(), position),
+        NumericLiteral(BaseDataType.UBYTE, ((value shr 8) and 0xff).toDouble(), position),
+        NumericLiteral(BaseDataType.UBYTE, ((value shr 16) and 0xff).toDouble(), position)
+    )
+}
+
+private fun builtinDivmodUByte(args: List<Expression>, position: Position, program: Program): List<NumericLiteral> {
+    if (args.size != 2)
+        throw SyntaxError("divmod requires 2 arguments", position)
+    val v1 = args[0].constValue(program) ?: throw NotConstArgumentException()
+    val v2 = args[1].constValue(program) ?: throw NotConstArgumentException()
+    if (v2.number.toInt() == 0) throw CannotEvaluateException("divmod", "division by zero")
+    return listOf(
+        NumericLiteral(BaseDataType.UBYTE, (v1.number.toInt() / v2.number.toInt()).toDouble(), position),
+        NumericLiteral(BaseDataType.UBYTE, (v1.number.toInt() % v2.number.toInt()).toDouble(), position)
+    )
+}
+
+private fun builtinDivmodUWord(args: List<Expression>, position: Position, program: Program): List<NumericLiteral> {
+    if (args.size != 2)
+        throw SyntaxError("divmod requires 2 arguments", position)
+    val v1 = args[0].constValue(program) ?: throw NotConstArgumentException()
+    val v2 = args[1].constValue(program) ?: throw NotConstArgumentException()
+    if (v2.number.toInt() == 0) throw CannotEvaluateException("divmod", "division by zero")
+    return listOf(
+        NumericLiteral(BaseDataType.UWORD, (v1.number.toInt() / v2.number.toInt()).toDouble(), position),
+        NumericLiteral(BaseDataType.UWORD, (v1.number.toInt() % v2.number.toInt()).toDouble(), position)
+    )
+}
+
+private fun builtinDivmodByte(args: List<Expression>, position: Position, program: Program): List<NumericLiteral> {
+    if (args.size != 2)
+        throw SyntaxError("divmod requires 2 arguments", position)
+    val v1 = args[0].constValue(program) ?: throw NotConstArgumentException()
+    val v2 = args[1].constValue(program) ?: throw NotConstArgumentException()
+    if (v2.number.toInt() == 0) throw CannotEvaluateException("divmod", "division by zero")
+    return listOf(
+        NumericLiteral(BaseDataType.BYTE, (v1.number.toInt() / v2.number.toInt()).toDouble(), position),
+        NumericLiteral(BaseDataType.BYTE, (v1.number.toInt() % v2.number.toInt()).toDouble(), position)
+    )
+}
+
+private fun builtinDivmodWord(args: List<Expression>, position: Position, program: Program): List<NumericLiteral> {
+    if (args.size != 2)
+        throw SyntaxError("divmod requires 2 arguments", position)
+    val v1 = args[0].constValue(program) ?: throw NotConstArgumentException()
+    val v2 = args[1].constValue(program) ?: throw NotConstArgumentException()
+    if (v2.number.toInt() == 0) throw CannotEvaluateException("divmod", "division by zero")
+    return listOf(
+        NumericLiteral(BaseDataType.WORD, (v1.number.toInt() / v2.number.toInt()).toDouble(), position),
+        NumericLiteral(BaseDataType.WORD, (v1.number.toInt() % v2.number.toInt()).toDouble(), position)
+    )
+}

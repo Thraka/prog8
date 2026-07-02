@@ -154,8 +154,8 @@ internal class AstIdentifiersChecker(private val errors: IErrorReporter,
 
             // check that there are no local symbols (variables, labels, subs) that redefine the subroutine's parameters.
             val symbolsInSub = subroutine.allDefinedSymbols
-            val namesInSub = symbolsInSub.map{ it.first }.toSet()
-            val paramNames = subroutine.parameters.map { it.name }.toSet()
+            val namesInSub = symbolsInSub.mapTo(mutableSetOf()) { it.first }
+            val paramNames = subroutine.parameters.mapTo(mutableSetOf()) { it.name }
             val paramsToCheck = paramNames.intersect(namesInSub)
             for(name in paramsToCheck) {
                 val symbol = subroutine.searchSymbol(name)
@@ -177,6 +177,13 @@ internal class AstIdentifiersChecker(private val errors: IErrorReporter,
         }
 
         super.visit(subroutine)
+    }
+
+    override fun visit(alias: Alias) {
+        val existing = alias.definingScope.lookup(listOf(alias.alias))
+        if(existing != null && existing !== alias)
+            nameError(alias.alias, alias.position, existing)
+        super.visit(alias)
     }
 
     override fun visit(label: Label) {
@@ -240,20 +247,6 @@ internal class AstIdentifiersChecker(private val errors: IErrorReporter,
                     if(call.args.size != expectedNumberOfArgs) {
                         val pos = (if(call.args.any()) call.args[0] else (call as Node)).position
                         invalidNumberOfArgsError(pos, call.args.size, func.parameters.map {it.name })
-                    }
-                    if(target.name=="memory") {
-                        val name = call.args[0] as? StringLiteral
-                        if(name!=null) {
-                            val processed = name.value.map {
-                                if(it.isLetterOrDigit())
-                                    it
-                                else
-                                    '_'
-                            }.joinToString("")
-                            val textEncoding = (call as Node).definingModule.textEncoding
-                            call.args[0] = StringLiteral.create(processed, textEncoding, name.position)
-                            call.args[0].linkParents(call as Node)
-                        }
                     }
                 }
                 is Label -> {

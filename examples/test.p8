@@ -1,159 +1,269 @@
+%encoding iso
+%option no_sysinit
 %import textio
-%import conv
-%import strings
 %zeropage basicsafe
 
 main {
-    ; Test the routine
+    ; test values
+    ubyte @shared ub0 = 0
+    ubyte @shared ub1 = 1
+    ubyte @shared ub127 = 127
+    ubyte @shared ub128 = 128
+    ubyte @shared ub255 = 255
+
+    byte @shared bmin = -128
+    byte @shared b_1 = -1
+    byte @shared b0 = 0
+    byte @shared b1 = 1
+    byte @shared bmax = 127
+
+    uword @shared uw0 = 0
+    uword @shared uw1 = 1
+    uword @shared uw32767 = 32767
+    uword @shared uw32768 = 32768
+    uword @shared uwmax = 65535
+
+    word @shared wmin = -32768
+    word @shared w_1 = -1
+    word @shared w0 = 0
+    word @shared w1 = 1
+    word @shared wmax = 32767
+
+    long @shared lmin = -2147483647
+    long @shared l_1 = -1
+    long @shared l0 = 0
+    long @shared l1 = 1
+    long @shared lmax = 2147483647
+    uword @shared failures = 0
+
     sub start() {
-        str test_string1 = "12345"
-        str test_string2 = "-98765"
-        str test_string3 = "0"
-        str test_string4 = "2147483647"  ; Max positive 32-bit signed integer
-        str test_string5 = "-2147483648" ; Min negative 32-bit signed integer
-        str test_string6 = "42"
-        str test_string7 = "1000000000"  ; Large number
-        str test_string8 = ""             ; Empty string
-        str test_string9 = "abc123"     ; Invalid string
-        str test_string10 = "255"        ; Max unsigned byte
-        str test_string11 = "127"        ; Max signed byte
-        str test_string12 = "-128"       ; Min signed byte
-        str test_string13 = "65535"      ; Max unsigned word
-        str test_string14 = "32767"      ; Max signed word
-        str test_string15 = "-32768"     ; Min signed word
-        str test_string16 = "100000"     ; Just over 65535/10
-        str test_string17 = "999999"     ; Larger number
-        str test_string18 = "+999999"    ; Larger number with plus
+        txt.iso()
+        txt.print("--- sgn tests ---\n")
+        test_sgn()
+        txt.print("--- cmp ubyte ---\n")
+        test_ubyte()
+        txt.print("--- cmp byte ---\n")
+        test_byte()
+        txt.print("--- cmp uword ---\n")
+        test_uword()
+        txt.print("--- cmp word ---\n")
+        test_word()
+        txt.print("--- cmp long ---\n")
+        test_long()
+        txt.print("\n")
+        txt.print_uw(failures)
+        txt.print(" failures!\n")
+        sys.poweroff_system()
+    }
 
-        long result1 = conv.str2long(test_string1)
-        long result2 = conv.str2long(test_string2)
-        long result3 = conv.str2long(test_string3)
-        long result4 = conv.str2long(test_string4)
-        long result5 = conv.str2long(test_string5)
-        long result6 = conv.str2long(test_string6)
-        long result7 = conv.str2long(test_string7)
-        long result8 = conv.str2long(test_string8)  ; This should return 0 for empty string
-        long result9 = conv.str2long(test_string9) ; This should return 0 since it starts with non-digit
-        long result10 = conv.str2long(test_string10)  ; Max unsigned byte
-        long result11 = conv.str2long(test_string11)  ; Max signed byte
-        long result12 = conv.str2long(test_string12)  ; Min signed byte
-        long result13 = conv.str2long(test_string13)  ; Max unsigned word
-        long result14 = conv.str2long(test_string14)  ; Max signed word
-        long result15 = conv.str2long(test_string15)  ; Min signed word
-        long result16 = conv.str2long(test_string16)  ; Just over 65535/10
-        long result17 = conv.str2long(test_string17)  ; Larger number
-        long result18 = conv.str2long(test_string18)  ; Larger number with +
+    sub print_flags(ubyte f) {
+        if ((f & 128) != 0) txt.print("n") else txt.print(".")
+        if ((f & 64) != 0) txt.print("v") else txt.print(".")
+        if ((f & 2) != 0) txt.print("z") else txt.print(".")
+        if ((f & 1) != 0) txt.print("c") else txt.print(".")
+    }
 
-        ; Print results using the built-in textio library
-        txt.print("str ")
-        txt.print(test_string1)
-        txt.print(" = ")
-        txt.print_l(result1)
-        txt.nl()
+    sub test_sgn() {
+        check_sgn_b(b_1, "-1")
+        check_sgn_b(b0, "0")
+        check_sgn_b(b1, "1")
+        check_sgn_l(l_1, "-1")
+        check_sgn_l(l0, "0")
+        check_sgn_l(l1, "1")
+    }
 
-        txt.print("str ")
-        txt.print(test_string2)
-        txt.print(" = ")
-        txt.print_l(result2)
-        txt.nl()
+    sub check_sgn_b(byte v, uword s) {
+        txt.print("sgn(")
+        txt.print(s)
+        txt.print(") -> ")
+        byte res = sgn(v)
+        ubyte flags = sys.read_flags() & $c3
+        txt.print_b(res)
+        txt.print(" flags: ")
+        print_flags(flags)
+        txt.print("\n")
+    }
 
-        txt.print("str ")
-        txt.print(test_string3)
-        txt.print(" = ")
-        txt.print_l(result3)
-        txt.nl()
+    sub check_sgn_l(long v, uword s) {
+        txt.print("sgn(")
+        txt.print(s)
+        txt.print(") -> ")
+        byte res = sgn(v)
+        ubyte flags = sys.read_flags() & $c3
+        txt.print_b(res)
+        txt.print(" flags: ")
+        print_flags(flags)
+        txt.print("\n")
+    }
 
-        txt.print("str ")
-        txt.print(test_string4)
-        txt.print(" = ")
-        txt.print_l(result4)
-        txt.nl()
+    sub check_ub(ubyte a, ubyte b, uword sa, uword sb) {
+        txt.print("cmp(")
+        txt.print(sa)
+        txt.print(",")
+        txt.print(sb)
+        txt.print(") -> ")
+        cmp(a, b)
+        ubyte actual = sys.read_flags() & $83
+        print_flags(actual)
+        ubyte res = a - b
+        ubyte expected = 0
+        if res == 0 expected |= 2
+        if (res & 128) != 0 expected |= 128
+        if a >= b expected |= 1
+        if actual != expected {
+            txt.print(" fail!")
+            failures += 1
+        }
+        txt.print("\n")
+    }
 
-        txt.print("str ")
-        txt.print(test_string5)
-        txt.print(" = ")
-        txt.print_l(result5)
-        txt.nl()
+    sub test_ubyte() {
+        do_ub(ub0, ub0, "0", "0")
+        do_ub(ub0, ub1, "0", "1")
+        do_ub(ub127, ub128, "127", "128")
+        do_ub(ub0, ub255, "0", "255")
+        do_ub(ub255, ub255, "255", "255")
+    }
+    sub do_ub(ubyte a, ubyte b, uword sa, uword sb) {
+        check_ub(a, b, sa, sb)
+        if a != b check_ub(b, a, sb, sa)
+    }
 
-        txt.print("str ")
-        txt.print(test_string6)
-        txt.print(" = ")
-        txt.print_l(result6)
-        txt.nl()
+    sub check_b(byte a, byte b, uword sa, uword sb) {
+        txt.print("cmp(")
+        txt.print(sa)
+        txt.print(",")
+        txt.print(sb)
+        txt.print(") -> ")
+        cmp(a, b)
+        ubyte actual = sys.read_flags() & $c3
+        print_flags(actual)
+        byte res = a - b
+        ubyte expected = 0
+        if res == 0 expected |= 2
+        if (res & 128) != 0 expected |= 128
+        if ((a as ubyte) >= (b as ubyte)) { expected |= 1 }
+        if (((a ^ b) & (a ^ res) & 128) != 0) expected |= 64
+        if actual != expected {
+            txt.print(" fail!")
+            failures += 1
+        }
+        txt.print("\n")
+    }
 
-        txt.print("str ")
-        txt.print(test_string7)
-        txt.print(" = ")
-        txt.print_l(result7)
-        txt.nl()
+    sub test_byte() {
+        do_b(b0, b0, "0", "0")
+        do_b(b0, b1, "0", "1")
+        do_b(b_1, b0, "-1", "0")
+        do_b(bmin, bmax, "-128", "127")
+        do_b(b_1, b1, "-1", "1")
+        do_b(bmin, bmin, "-128", "-128")
+    }
+    sub do_b(byte a, byte b, uword sa, uword sb) {
+        check_b(a, b, sa, sb)
+        if a != b check_b(b, a, sb, sa)
+    }
 
-        txt.print("str ")
-        txt.print(test_string8)
-        txt.print(" = ")
-        txt.print_l(result8)
-        txt.nl()
+    sub check_uw(uword a, uword b, uword sa, uword sb) {
+        txt.print("cmp(")
+        txt.print(sa)
+        txt.print(",")
+        txt.print(sb)
+        txt.print(") -> ")
+        cmp(a, b)
+        ubyte actual = sys.read_flags() & $83
+        print_flags(actual)
+        uword res = a - b
+        ubyte expected = 0
+        if res == 0 expected |= 2
+        if (res & $8000) != 0 expected |= 128
+        if a >= b expected |= 1
+        if actual != expected {
+            txt.print(" fail!")
+            failures += 1
+        }
+        txt.print("\n")
+    }
 
-        txt.print("str ")
-        txt.print(test_string9)
-        txt.print(" = ")
-        txt.print_l(result9)
-        txt.nl()
+    sub test_uword() {
+        do_uw(uw0, uw0, "0", "0")
+        do_uw(uw0, uw1, "0", "1")
+        do_uw(uw32767, uw32768, "32767", "32768")
+        do_uw(uw0, uwmax, "0", "65535")
+        do_uw(uwmax, uwmax, "65535", "65535")
+    }
+    sub do_uw(uword a, uword b, uword sa, uword sb) {
+        check_uw(a, b, sa, sb)
+        if a != b check_uw(b, a, sb, sa)
+    }
 
-        txt.print("str ")
-        txt.print(test_string10)
-        txt.print(" = ")
-        txt.print_l(result10)
-        txt.nl()
+    sub check_w(word a, word b, uword sa, uword sb) {
+        txt.print("cmp(")
+        txt.print(sa)
+        txt.print(",")
+        txt.print(sb)
+        txt.print(") -> ")
+        cmp(a, b)
+        ubyte actual = sys.read_flags() & $c3
+        print_flags(actual)
+        word res = a - b
+        ubyte expected = 0
+        if res == 0 expected |= 2
+        if (res & $8000) != 0 expected |= 128
+        if ((a as uword) >= (b as uword)) { expected |= 1 }
+        if (((a ^ b) & (a ^ res) & $8000) != 0) expected |= 64
+        if actual != expected {
+            txt.print(" fail!")
+            failures += 1
+        }
+        txt.print("\n")
+    }
 
-        txt.print("str ")
-        txt.print(test_string11)
-        txt.print(" = ")
-        txt.print_l(result11)
-        txt.nl()
+    sub test_word() {
+        do_w(w0, w0, "0", "0")
+        do_w(w0, w1, "0", "1")
+        do_w(w_1, w0, "-1", "0")
+        do_w(wmin, wmax, "-32768", "32767")
+        do_w(w_1, w1, "-1", "1")
+        do_w(wmin, wmin, "-32768", "-32768")
+    }
+    sub do_w(word a, word b, uword sa, uword sb) {
+        check_w(a, b, sa, sb)
+        if a != b check_w(b, a, sb, sa)
+    }
 
-        txt.print("str ")
-        txt.print(test_string12)
-        txt.print(" = ")
-        txt.print_l(result12)
-        txt.nl()
+    sub check_l(long a, long b, uword sa, uword sb) {
+        txt.print("cmp(")
+        txt.print(sa)
+        txt.print(",")
+        txt.print(sb)
+        txt.print(") -> ")
+        cmp(a, b)
+        ubyte actual = sys.read_flags() & $c3
+        print_flags(actual)
+        long res = a - b
+        ubyte expected = 0
+        if res == 0 expected |= 2
+        if (res & $80000000) != 0 expected |= 128
+        if (a ^ $80000000) >= (b ^ $80000000) expected |= 1
+        if (((a ^ b) & (a ^ res) & $80000000) != 0) expected |= 64
+        if actual != expected {
+            txt.print(" fail!")
+            failures += 1
+        }
+        txt.print("\n")
+    }
 
-        txt.print("str ")
-        txt.print(test_string13)
-        txt.print(" = ")
-        txt.print_l(result13)
-        txt.nl()
-
-        txt.print("str ")
-        txt.print(test_string14)
-        txt.print(" = ")
-        txt.print_l(result14)
-        txt.nl()
-
-        txt.print("str ")
-        txt.print(test_string15)
-        txt.print(" = ")
-        txt.print_l(result15)
-        txt.nl()
-
-        txt.print("str ")
-        txt.print(test_string16)
-        txt.print(" = ")
-        txt.print_l(result16)
-        txt.nl()
-
-        txt.print("str ")
-        txt.print(test_string17)
-        txt.print(" = ")
-        txt.print_l(result17)
-        txt.nl()
-
-        txt.print("str ")
-        txt.print(test_string18)
-        txt.print(" = ")
-        txt.print_l(result18)
-        txt.nl()
-
-        ; To make sure the program finishes properly
-        return
+    sub test_long() {
+        do_l(l0, l0, "0", "0")
+        do_l(l0, l1, "0", "1")
+        do_l(l_1, l0, "-1", "0")
+        do_l(lmin, lmax, "lmin", "lmax")
+        do_l(l_1, l1, "-1", "1")
+        do_l(lmin, lmin, "lmin", "lmin")
+    }
+    sub do_l(long a, long b, uword sa, uword sb) {
+        check_l(a, b, sa, sb)
+        if a != b check_l(b, a, sb, sa)
     }
 }

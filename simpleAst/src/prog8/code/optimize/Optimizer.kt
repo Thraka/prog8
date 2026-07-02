@@ -1,282 +1,142 @@
 package prog8.code.optimize
 
-import prog8.code.StExtSub
 import prog8.code.SymbolTable
-import prog8.code.ast.*
-import prog8.code.core.*
-import prog8.code.target.VMTarget
-import kotlin.math.log2
+import prog8.code.ast.PtProgram
+import prog8.code.core.CompilationOptions
+import prog8.code.core.IErrorReporter
+import prog8.code.core.Position
 
+/**
+ * Simple AST optimizer for the simplified AST.
+ *
+ * **Design note:** This optimizer uses simple tree-walks and pattern matching.
+ * **No Control Flow Analysis (CFA) or dataflow analysis is (or will be) done** to keep
+ * the implementation simple. This means some optimization opportunities may be missed
+ * (e.g., jumps like break/continue are treated conservatively, function calls are assumed
+ * to potentially reference any variable), but the generated code remains correct.
+ *
+ * **Redundant optimizations NOT done here** (already handled in compilerAST phase):
+ * - **Constant folding** (e.g., `5 + 3` → `8`) - done by `ConstantFoldingOptimizer` in compilerAST
+ * - **General expression simplification** - done by `ExpressionSimplifier` in compilerAST
+ * - **Statement optimization** - done by `StatementOptimizer` in compilerAST
+ * - **Dead code elimination** - done by `UnusedCodeRemover` in compilerAST
+ * - **Subroutine inlining** - done in compilerAST optimization loop
+ *
+ * This simpleAst optimizer focuses on:
+ * - Pattern-specific optimizations that may emerge after AST simplification
+ * - Algebraic identities (x+0, x*1, x&0, etc.)
+ * - Boolean/logic simplifications (x and true, not(not x), etc.)
+ * - Bitwise identities (x&-1, x|-1, x^-1, etc.)
+ * - Comparison simplifications (unsigned>=0→true, x<=y-1→x<y, etc.)
+ * - Comparison identities (x==x→true, x<x→false)
+ * - Expression rearrangement (x+(-y)→x-y, factoring common terms)
+ * - Strength reduction (x/2^n→x>>n for unsigned, x%2^n→x&(2^n-1))
+ * - Address-of/dereference cancellation (@(&x)→x for byte types)
+ * - Conditional simplification (if true/false branches)
+ *
+ * **Optimizer organization:**
+ * - [ExpressionOptimizers] - Algebraic identities, rearrangement, strength reduction
+ * - [ComparisonOptimizers] - Comparison simplifications and identities
+ * - [BooleanOptimizers] - Boolean logic and bitwise operations
+ * - [ControlFlowOptimizers] - If/else, when statements
+ * - [MemoryOptimizers] - Address-of, struct field access
+ * - [VariableOptimizers] - Assignment targets, redundant initializations
+ *
+ * **Implementation approach:**
+ *
+ * The optimizer functions use direct tree manipulation with `walkAst()` rather than a
+ * tree-rewriting base class. This was a deliberate design decision after attempting
+ * to use an `AstRewriter` class (see AstWalker.kt for details).
+ *
+ * Key lessons learned:
+ *
+ * 1. **In-place modifications are common**: The code generator's `prefixSymbols()` function
+ *    modifies node names in-place. Tree-rewriting approaches that create copies can conflict
+ *    with this, causing bugs like double-prefixing of symbol names.
+ *
+ * 2. **Pattern matching needs original structure**: Some optimizations (like pointer arithmetic)
+ *    need to see specific AST patterns including typecasts. Removing these patterns too early
+ *    (e.g., in a postprocess phase before optimization) prevents the optimizer from matching
+ *    and improving the code.
+ *
+ * 3. **Order matters**: The compilation pipeline has a specific order that must be maintained:
+ *    - postprocessSimplifiedAst() - subtype resolution only (no typecast removal)
+ *    - optimizeSimplifiedAst() - all optimizations (needs to see original patterns)
+ *    - removeRedundantPointerCasts() - cleanup typecasts (after optimizer is done)
+ *    - code generation - produces final assembly
+ *
+ * See Compiler.kt for the full pipeline with detailed comments.
+ */
+
+/**
+ * Context object passed to all optimization functions.
+ * Consolidates the common parameters to reduce boilerplate.
+ */
+private data class OptimizerContext(
+    val st: SymbolTable,
+    val options: CompilationOptions,
+    val errors: IErrorReporter
+)
 
 fun optimizeSimplifiedAst(program: PtProgram, options: CompilationOptions, st: SymbolTable, errors: IErrorReporter) {
     if (!options.optimize)
         return
-    while (errors.noErrors() &&
-        optimizeAssignTargets(program, st)
-        + optimizeFloatComparesToZero(program)
-        + optimizeLsbMsbOnStructfields(program)
-        + optimizeSingleWhens(program, errors)
-        + optimizeSgnComparisons(program, errors)
-        + optimizeBinaryExpressions(program, options) > 0) {
-        // keep rolling
+
+    val ctx = OptimizerContext(st, options, errors)
+
+    // Run fixpoint optimizations until no more changes occur
+    runFixpointOptimizations(program, ctx)
+
+    // Run single-pass optimizations (only need to run once)
+    runSinglePassOptimizations(program, options)
+}
+
+/**
+ * Runs optimizations that may create opportunities for each other.
+ * These are run in a loop until no more changes occur.
+ * NOTE: some optimizations here may seem redundant because they're already done in a Compiler AST optimizer step,
+ * but they're done again here to catch cases where rewriting the AST after optimization may have introduced optimizable changes again.
+ * 
+ * Maximum iteration limit prevents infinite loops from buggy optimizations.
+ */
+private fun runFixpointOptimizations(program: PtProgram, ctx: OptimizerContext) {
+    val MAX_FIXPOINT_ITERATIONS = 50
+    var iteration = 0
+    
+    while (ctx.errors.noErrors() &&
+        VariableOptimizers.optimizeAssignTargets(program, ctx.st)
+        + ExpressionOptimizers.optimizeAlgebraicIdentities(program, ctx.options)
+        + ExpressionOptimizers.optimizeExpressionRearrangement(program)
+        + BooleanOptimizers.optimizeBitwisePrefix(program)
+        + MemoryOptimizers.optimizeAddressOfDereference(program)
+        + MemoryOptimizers.optimizeLsbMsbOnStructfields(program)
+        + ComparisonOptimizers.optimizeFloatComparesToZero(program)
+        + ComparisonOptimizers.optimizeSgnComparisons(program, ctx.errors)
+        + ComparisonOptimizers.optimizeComparisonSimplifications(program)
+        + ComparisonOptimizers.optimizeComparisonIdentities(program, ctx.options)
+        + BooleanOptimizers.optimizeBooleanExpressions(program, ctx.options)
+        + BooleanOptimizers.optimizeBitwiseComplementBinary(program, ctx.options)
+        + ExpressionOptimizers.optimizeBinaryExpressions(program, ctx.options)
+        + ExpressionOptimizers.optimizeOperandOrder(program)
+        + ControlFlowOptimizers.optimizeSingleWhens(program, ctx.errors)
+        + ControlFlowOptimizers.optimizeConditionalExpressions(program, ctx.errors)
+        + ControlFlowOptimizers.optimizeDeadConditionalBranches(program) > 0) {
+        iteration++
+        if (iteration >= MAX_FIXPOINT_ITERATIONS) {
+            ctx.errors.warn("Optimization hit iteration limit ($MAX_FIXPOINT_ITERATIONS), may be incomplete", Position.DUMMY)
+            break
+        }
     }
 }
 
+/**
+ * Runs optimizations that only need to execute once.
+ * These don't create opportunities for other optimizations, so no fixpoint loop needed.
+ */
+private fun runSinglePassOptimizations(program: PtProgram, options: CompilationOptions) {
+    // Variable optimizations
+    VariableOptimizers.optimizeRedundantVarInits(program)
 
-private fun walkAst(root: PtNode, act: (node: PtNode, depth: Int) -> Boolean) {
-    fun recurse(node: PtNode, depth: Int) {
-        if(act(node, depth))
-            node.children.forEach { recurse(it, depth+1) }
-    }
-    recurse(root, 0)
-}
-
-
-private fun optimizeAssignTargets(program: PtProgram, st: SymbolTable): Int {
-    var changes = 0
-    walkAst(program) { node: PtNode, depth: Int ->
-        if(node is PtAssignment) {
-            val value = node.value
-            val functionName = when(value) {
-                is PtBuiltinFunctionCall -> value.name
-                is PtFunctionCall -> value.name
-                else -> null
-            }
-            if(functionName!=null) {
-                val stNode = st.lookup(functionName)
-                if (stNode is StExtSub) {
-                    require(node.children.size==stNode.returns.size+1) {
-                        "number of targets must match return values"
-                    }
-                    node.children.zip(stNode.returns).withIndex().forEach { (index, xx) ->
-                        val target = xx.first as PtAssignTarget
-                        val returnedRegister = xx.second.register.registerOrPair
-                        if(returnedRegister!=null && !target.void && target.identifier!=null) {
-                            if(isSame(target.identifier!!, xx.second.type, returnedRegister)) {
-                                // output register is already identical to target register, so it can become void
-                                val voidTarget = PtAssignTarget(true, target.position)
-                                node.children[index] = voidTarget
-                                voidTarget.parent = node
-                                changes++
-                            }
-                        }
-                    }
-                }
-                if(node.children.dropLast(1).all { (it as PtAssignTarget).void }) {
-                    // all targets are now void, the whole assignment can be discarded and replaced by just a (void) call to the subroutine
-                    val index = node.parent.children.indexOf(node)
-                    val voidCall = PtFunctionCall(functionName, true, DataType.UNDEFINED, value.position)
-                    value.children.forEach { voidCall.add(it) }
-                    node.parent.children[index] = voidCall
-                    voidCall.parent = node.parent
-                    changes++
-                }
-            }
-        }
-        true
-    }
-    return changes
-}
-
-
-internal fun isSame(identifier: PtIdentifier, type: DataType, returnedRegister: RegisterOrPair): Boolean {
-    if(returnedRegister in Cx16VirtualRegisters) {
-        val regname = returnedRegister.name.lowercase()
-        val identifierRegName = identifier.name.substringAfterLast('.')
-        /*
-            cx16.r?    UWORD
-            cx16.r?s   WORD
-            cx16.r?L   UBYTE
-            cx16.r?H   UBYTE
-            cx16.r?sL  BYTE
-            cx16.r?sH  BYTE
-         */
-        if(identifier.type.isByte && type.isByte) {
-            if(identifier.name.startsWith("cx16.$regname") && identifierRegName.startsWith(regname)) {
-                return identifierRegName.substring(2) in arrayOf("", "L", "sL")     // note: not the -H (msb) variants!
-            }
-        }
-        else if(identifier.type.isWord && type.isWord) {
-            if(identifier.name.startsWith("cx16.$regname") && identifierRegName.startsWith(regname)) {
-                return identifierRegName.substring(2) in arrayOf("", "s")
-            }
-        }
-    }
-    return false   // there are no identifiers directly corresponding to cpu registers
-}
-
-
-private fun optimizeBinaryExpressions(program: PtProgram, options: CompilationOptions): Int {
-    var changes = 0
-    walkAst(program) { node: PtNode, depth: Int ->
-        if (node is PtBinaryExpression) {
-            val constvalue = node.right.asConstValue()
-            if(node.operator=="<<" && constvalue==1.0 && options.compTarget.name!=VMTarget.NAME) {
-                val typecast=node.left as? PtTypeCast
-                if(typecast!=null && typecast.type.isWord && typecast.value is PtIdentifier) {
-                    val addition = node.parent as? PtBinaryExpression
-                    if(addition!=null && addition.operator=="+" && addition.type.isWord) {
-                        // word + (byte<<1 as uword) (== word + byte*2)  -->  (word + (byte as word)) + (byte as word)
-                        val parent = addition.parent
-                        val index = parent.children.indexOf(addition)
-                        val addFirst = PtBinaryExpression(addition.operator, addition.type, addition.position)
-                        val addSecond = PtBinaryExpression(addition.operator, addition.type, addition.position)
-                        if(addition.left===node)
-                            addFirst.add(addition.right)
-                        else
-                            addFirst.add(addition.left)
-                        addFirst.add(typecast)
-                        addSecond.add(addFirst)
-                        addSecond.add(typecast.copy())
-                        parent.children[index] = addSecond
-                        addSecond.parent = parent
-                        changes++
-                    }
-                }
-            }
-            else if (node.operator=="*" && !node.right.type.isFloat) {
-                if (constvalue in powersOfTwoFloat) {
-                    // x * power-of-two -> bitshift
-                    val numshifts = log2(constvalue!!)
-                    val shift = PtBinaryExpression("<<", node.type, node.position)
-                    shift.add(node.left)
-                    shift.add(PtNumber(BaseDataType.UBYTE, numshifts, node.position))
-                    shift.parent = node.parent
-                    val index = node.parent.children.indexOf(node)
-                    node.parent.children[index] = shift
-                    changes++
-                } else if(constvalue in negativePowersOfTwoFloat) {
-                    TODO("x * negative power-of-two -> bitshift  ${node.position}")
-                }
-            } else if(node.operator=="*" && !node.right.type.isFloat && constvalue in negativePowersOfTwoFloat) {
-                TODO("x * negative power-of-two -> bitshift  ${node.position}")
-            }
-        }
-        true
-    }
-    return changes
-}
-
-
-private fun optimizeFloatComparesToZero(program: PtProgram): Int {
-    var changes = 0
-    walkAst(program) { node: PtNode, depth: Int ->
-        if (node is PtBinaryExpression) {
-            val constvalue = node.right.asConstValue()
-            if(node.type.isBool && constvalue==0.0 && node.left.type.isFloat && node.operator in ComparisonOperators) {
-                // float == 0 --> sgn(float) == 0
-                val sign = PtBuiltinFunctionCall("sgn", false, true, DataType.BYTE, node.position)
-                sign.add(node.left)
-                val replacement = PtBinaryExpression(node.operator, DataType.BOOL, node.position)
-                replacement.add(sign)
-                replacement.add(PtNumber(BaseDataType.BYTE, 0.0, node.position))
-                replacement.parent = node.parent
-                val index = node.parent.children.indexOf(node)
-                node.parent.children[index] = replacement
-                changes++
-            }
-        }
-        true
-    }
-    return changes
-}
-
-
-private fun optimizeLsbMsbOnStructfields(program: PtProgram): Int {
-    var changes = 0
-    walkAst(program) { node: PtNode, depth: Int ->
-        if (node is PtBuiltinFunctionCall && (node.name=="msb" || node.name=="lsb")) {
-            if(node.args[0] is PtPointerDeref) {
-                if(!node.args[0].type.isByteOrBool) {
-                    // msb(struct.field) -->  @(&struct.field+1)
-                    // lsb(struct.field) -->  @(&struct.field)
-                    val addressOfDeref = PtAddressOf(DataType.UWORD, false, node.args[0].position)
-                    addressOfDeref.add(node.args[0])
-                    val address: PtExpression
-                    if(node.name=="msb") {
-                        address = PtBinaryExpression("+", addressOfDeref.type, addressOfDeref.position)
-                        address.add(addressOfDeref)
-                        address.add(PtNumber(BaseDataType.UWORD, 1.0, addressOfDeref.position))
-                    } else {
-                        address = addressOfDeref
-                    }
-                    val memread = PtMemoryByte(address.position)
-                    memread.add(address)
-                    memread.parent = node.parent
-                    val index = node.parent.children.indexOf(node)
-                    node.parent.children[index] = memread
-                    changes++
-                }
-            }
-        }
-        true
-    }
-
-    return changes
-}
-
-
-private fun optimizeSingleWhens(program: PtProgram, errors: IErrorReporter): Int {
-    var changes = 0
-
-    walkAst(program) { node: PtNode, depth: Int ->
-        if(node is PtWhen && node.choices.children.size==2) {
-            val choice1 = node.choices.children[0] as PtWhenChoice
-            val choice2 = node.choices.children[1] as PtWhenChoice
-            if(choice1.isElse && choice2.values.children.size==1 || choice2.isElse && choice1.values.children.size==1) {
-                errors.info("when can be simplified into an if-else", node.position)
-                val truescope: PtNodeGroup
-                val elsescope: PtNodeGroup
-                val comparisonValue : PtNumber
-                if(choice1.isElse) {
-                    truescope = choice2.statements
-                    elsescope = choice1.statements
-                    comparisonValue = choice2.values.children.single() as PtNumber
-                } else {
-                    truescope = choice1.statements
-                    elsescope = choice2.statements
-                    comparisonValue = choice1.values.children.single() as PtNumber
-                }
-                val ifelse = PtIfElse(node.position)
-                val condition = PtBinaryExpression("==", DataType.BOOL, node.position)
-                condition.add(node.value)
-                condition.add(comparisonValue)
-                ifelse.add(condition)
-                ifelse.add(truescope)
-                ifelse.add(elsescope)
-                ifelse.parent = node.parent
-                val index = node.parent.children.indexOf(node)
-                node.parent.children[index] = ifelse
-                changes++
-            }
-        }
-        true
-    }
-
-    return changes
-}
-
-
-private fun optimizeSgnComparisons(program: PtProgram, errors: IErrorReporter): Int {
-    // NOTE: do *not* optimize away sgn() comparisons on floats! Those ARE more efficient than the normal compares!
-    var changes = 0
-
-    walkAst(program) { node: PtNode, depth: Int ->
-        if(node is PtBuiltinFunctionCall && node.name=="sgn" && node.args[0].type.isInteger) {
-            val comparison = node.parent as? PtBinaryExpression
-            if(comparison!=null && comparison.right.asConstInteger()==0 && comparison.operator in ComparisonOperators) {
-                //  sgn(integer) >= 0   -> just use   integer >= 0
-                val replacement = PtBinaryExpression(comparison.operator, DataType.BOOL, comparison.position)
-                replacement.add(node.args[0])
-                replacement.add(PtNumber(node.args[0].type.base, 0.0, comparison.position))
-                replacement.parent = comparison.parent
-                val index = comparison.parent.children.indexOf(comparison)
-                comparison.parent.children[index] = replacement
-                changes++
-            }
-        }
-        true
-    }
-
-    return changes
+    // Strength reduction (x/2^n→x>>n, x%2^n→x&(2^n-1)) doesn't create opportunities for other opts
+    ExpressionOptimizers.optimizeStrengthReduction(program, options)
 }

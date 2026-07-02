@@ -10,25 +10,21 @@ import prog8.codegen.vm.VmAssemblyProgram
 import prog8.codegen.vm.VmCodeGen
 import prog8.intermediate.IRSubroutine
 import prog8.intermediate.Opcode
+import prog8.intermediate.toAddress
+import prog8tests.helpers.DummyMemsizer
+import prog8tests.helpers.DummyStringEncoder
+import prog8tests.helpers.ErrorReporterForTests
 
 class TestVmCodeGen: FunSpec({
 
     fun getTestOptions(): CompilationOptions {
         val target = VMTarget()
-        return CompilationOptions(
-            OutputType.RAW,
-            CbmPrgLauncherType.NONE,
-            ZeropageType.DONTUSE,
-            zpReserved = emptyList(),
-            zpAllowed = CompilationOptions.AllZeropageAllowed,
-            floats = true,
-            noSysInit = false,
-            romable = false,
-            compTarget = target,
-            compilerVersion="99.99",
-            loadAddress = target.PROGRAM_LOAD_ADDRESS,
-            memtopAddress = 0xffffu
-        )
+        return CompilationOptions.builder(target)
+            .output(OutputType.RAW)
+            .zeropage(ZeropageType.DONTUSE)
+            .floats(true)
+            .compilerVersion("99.99")
+            .build()
     }
 
     test("augmented assigns") {
@@ -146,6 +142,75 @@ class TestVmCodeGen: FunSpec({
         val result = codegen.generate(program, st, options, errors) as VmAssemblyProgram
         val irChunks = (result.irProgram.blocks.first().children.single() as IRSubroutine).chunks
         irChunks.size shouldBe 1
+    }
+
+    test("augmented assigns with PtMemoryByte target - all register opcodes") {
+// Tests the fix for using ADDR/SUBR/ANDR/ORR/XORR (register-to-register)
+// instead of ADD/SUB/AND/OR/XOR (register+immediate) when the target is a
+// PtMemoryByte with a non-constant address and the operand is a variable.
+//
+// Pattern: @(ptr+offset) = @(ptr+offset) + val   i.e.  ptr[offset] += val
+// Non-zero offsets are used to avoid potential optimization of the address expression.
+        val codegen = VmCodeGen(false)
+        val program = PtProgram("test", DummyMemsizer, DummyStringEncoder)
+        val block = PtBlock("main", false, SourceCode.Generated("test"), PtBlock.Options(), Position.DUMMY)
+        val sub = PtSub("start", emptyList(), emptyList(), Position.DUMMY)
+        sub.add(PtVariable("ptr", DataType.pointer(BaseDataType.UBYTE), ZeropageWish.DONTCARE, 0u, false, null, null, Position.DUMMY))
+        sub.add(PtVariable("val", DataType.UBYTE, ZeropageWish.DONTCARE, 0u, false, null, null, Position.DUMMY))
+
+        fun makeMemByteAssign(op: String, offset: Int): PtAugmentedAssign {
+            // Use non-zero offset to avoid optimization
+            val addrExpr = PtBinaryExpression("+", DataType.UWORD, Position.DUMMY)
+            addrExpr.add(PtIdentifier("main.start.ptr", DataType.pointer(BaseDataType.UBYTE), Position.DUMMY))
+            addrExpr.add(PtNumber(BaseDataType.UWORD, offset.toDouble(), Position.DUMMY))
+            val memByte = PtMemoryByte(Position.DUMMY)
+            memByte.add(addrExpr)
+            val target = PtAssignTarget(false, Position.DUMMY)
+            target.add(memByte)
+            val assign = PtAugmentedAssign(op, Position.DUMMY)
+            assign.add(target)
+            assign.add(PtIdentifier("main.start.val", DataType.UBYTE, Position.DUMMY))
+            return assign
+        }
+
+        sub.add(makeMemByteAssign("+=", 3))
+        sub.add(makeMemByteAssign("-=", 5))
+        sub.add(makeMemByteAssign("|=", 7))
+        sub.add(makeMemByteAssign("&=", 11))
+        sub.add(makeMemByteAssign("^=", 13))
+
+        block.add(sub)
+        program.add(block)
+
+        val options = getTestOptions()
+        val st = SymbolTableMaker(program, options).make()
+        val errors = ErrorReporterForTests()
+        val result = codegen.generate(program, st, options, errors) as VmAssemblyProgram
+        val irChunks = (result.irProgram.blocks.first().children.single() as IRSubroutine).chunks
+        irChunks.size shouldBe 1
+        val instructions = irChunks[0].instructions
+
+        // Verify correct register-to-register opcodes are used (not immediate variants)
+        val addrCount = instructions.count { it.opcode == Opcode.ADDR }
+        val subrCount = instructions.count { it.opcode == Opcode.SUBR }
+        val orrCount = instructions.count { it.opcode == Opcode.ORR }
+        val andrCount = instructions.count { it.opcode == Opcode.ANDR }
+        val xorrCount = instructions.count { it.opcode == Opcode.XORR }
+
+        addrCount shouldBe 1
+        subrCount shouldBe 1
+        orrCount shouldBe 1
+        andrCount shouldBe 1
+        xorrCount shouldBe 1
+
+        // Verify that the immediate-only variants are NOT used with reg2
+        val wrongAdd = instructions.any { it.opcode == Opcode.ADD && it.reg2 != null }
+        val wrongSub = instructions.any { it.opcode == Opcode.SUB && it.reg2 != null }
+        val wrongOr = instructions.any { it.opcode == Opcode.OR && it.reg2 != null }
+        val wrongAnd = instructions.any { it.opcode == Opcode.AND && it.reg2 != null }
+        val wrongXor = instructions.any { it.opcode == Opcode.XOR && it.reg2 != null }
+
+        (wrongAdd || wrongSub || wrongOr || wrongAnd || wrongXor) shouldBe false
     }
 
     test("float comparison expressions against zero") {
@@ -554,7 +619,7 @@ class TestVmCodeGen: FunSpec({
         val extsub = PtAsmSub("routine", PtAsmSub.Address(null, null, 0x5000u), setOf(CpuRegister.Y), emptyList(), emptyList(), false, Position.DUMMY)
         block.add(extsub)
         val sub = PtSub("start", emptyList(), emptyList(), Position.DUMMY)
-        val call = PtFunctionCall("main.routine", true, DataType.UNDEFINED, Position.DUMMY)
+        val call = PtFunctionCall("main.routine", false, false, emptyArray(), Position.DUMMY)
         sub.add(call)
         block.add(sub)
         program.add(block)
@@ -568,6 +633,6 @@ class TestVmCodeGen: FunSpec({
         irChunks[0].instructions.size shouldBe 1
         val callInstr = irChunks[0].instructions[0]
         callInstr.opcode shouldBe Opcode.CALL
-        callInstr.address shouldBe 0x5000
+        callInstr.address shouldBe 0x5000u.toAddress()
     }
 })

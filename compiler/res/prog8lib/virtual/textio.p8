@@ -6,6 +6,7 @@
 txt {
 
 sub width() -> ubyte {
+    ; syscall 46 returns size encoded in a single uword: MSB=rows, LSB=columns
     %ir {{
         syscall 46 (): r99000.w
         lsigb.w r99100,r99000
@@ -14,6 +15,7 @@ sub width() -> ubyte {
 }
 
 sub height() -> ubyte {
+    ; syscall 46 returns size encoded in a single uword: MSB=rows, LSB=columns
     %ir {{
         syscall 46 (): r99000.w
         msigb.w r99100,r99000
@@ -56,6 +58,14 @@ sub lowercase() {
 
 sub uppercase() {
     ; not supported
+}
+
+sub iso() {
+    ; virtual target is iso always, this is just for code compatibility
+}
+
+sub iso_off() {
+    ; virtual target is iso always, this is just for code compatibility
 }
 
 sub rvs_on() {

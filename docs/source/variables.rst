@@ -75,12 +75,23 @@ Tag         Effect
 @requirezp  force the variable into Zero page. If ZP is full, compilation will fail.
 @nozp       force the variable to normal system ram, never place it into zeropage.
 @shared     means the variable is shared with some assembly code and that it cannot be optimized away if not used elsewhere.
-@nosplit    (only valid on (u)word arrays) Store the array as a single inear array instead of a separate array for lsb and msb values
+@nosplit    (only valid on (u)word arrays) Store the array as a single linear array instead of a separate array for lsb and msb values
 @alignword  aligns string or array variable on an even memory address
 @align64    aligns string or array variable on a 64 byte address interval (example: for C64 sprite data)
 @alignpage  aligns string or array variable on a 256 byte address interval (example: to avoid page boundaries)
 @dirty      the variable won't be set to zero when entering the subroutine (note: it will still be set to zero once on program startup, like all other uninitialized variables). You'll usually have to make sure to assign a value yourself before using the variable! This is used to reduce overhead in certain scenarios. 🦶🔫 Footgun warning.
 ==========  ======
+
+.. _private-variables:
+.. index:: pair: Variables; Private
+
+You can use the ``private`` keyword (must come first, before the datatype and any tags) to make a variable or constant invisible from outside its block::
+
+    private ubyte secret = 42
+    private ubyte @shared hiddenvar = 10
+    private const ubyte fixed_value = 99
+
+This makes the variable only accessible within the block where it's declared. Accessing it from another block will result in a compilation error.
 
 
 Variables can be defined inside any scope (blocks, subroutines etc.) See :ref:`blocks`.
@@ -166,19 +177,60 @@ Initializing a variable
 You can specify an initialization value in the variable declaration.
 This will then be used to initialize the variable with at the start of the subroutine, instead of the default value 0.
 The provided value doesn't have to be a constant; it can be any expression.
-It is a shorter notation for declaring the variables and then assigning the values to them in separate assignment statment(s).
+It is a shorter notation for declaring the variables and then assigning the values to them in separate assignment statement(s).
 
 There are a few special situations:
 
 initializing an array: ``ubyte[3] array = [11,22,33]``
-    The initiazation value has to be a range value or an array literal (remember you can use '[4] * 3' and such).
-    Ofcourse the size of the range or the number of values in the array has to match the declared array size.
+    The initialization value has to be a range value or an array literal (remember you can use '[4] * 3' and such).
+    Of course the size of the range or the number of values in the array has to match the declared array size.
 
-initializing a multi variable declaration: ``ubyte a,b,c = multi()``
-    The initialization value can be a single constant value which will then be assigned to each of the variables.
-    It can also be a subroutine call to a subroutine returning multiple result values, which will then be put
-    into the declared variables in order.  Ofcourse the number of values has to match the number of variables.
+initializing a multi variable declaration with different values: ``ubyte a,b,c = 11,22,33``
+    Here we have separate initialization values for each of the declared variables in that order.
+    This is just a shorter way to write this as writing it as three separate variable declarations.
 
+initializing a multi variable declaration with the same value for all: ``ubyte a,b,c = 42``
+    The initialization value here is a single constant value which will then be assigned to each of the variables.
+
+initializing from a subroutine returning multiple result values: ``ubyte a,b,c = multi()``
+    Here the initialization value can also be a subroutine call to a subroutine returning multiple result values, which will then be put
+    into the declared variables in order.  Of course the number of values has to match the number of variables.
+
+
+Constants
+---------
+.. index:: single: Constants
+
+When using ``const``, the value of the 'variable' cannot be changed; it has become a compile-time constant value instead.
+You'll have to specify the initial value expression. This value is then used
+by the compiler everywhere you refer to the constant (and no memory is allocated
+for the constant itself). Only the simple numeric types (byte, word, long, float) and pointer types can be defined as a constant.
+If something is defined as a constant, very efficient code can usually be generated from it.
+Variables on the other hand can't be optimized as much, need memory, and more code to manipulate them.
+Note that a subset of the library routines in the ``math``, ``strings`` and ``floats`` modules are recognised in
+compile time expressions. For example, the compiler knows what ``math.sin8u(12)`` is and replaces it with the computed result.
+
+Enums
+-----
+.. index:: single: Enums
+
+There is a more convenient way to define a bunch of constants that belong together: a "enum".
+That is a grouped list of constants that get autonumbered for you (unless you override the numeric value yourself).
+It starts numbering from zero by default. Right now the enum declaration does not define a new type, only a list of constants. Here's an example::
+
+    enum Priority {
+        LOW = 1,
+        NORMAL,
+        HIGH,
+        EXTREME=255
+    }
+
+This will define a bunch of constants like so (the "Enum::Field" syntax is specific for enumeration elements)::
+
+    const ubyte Priority::LOW = 1
+    const ubyte Priority::NORMAL= 2
+    const ubyte Priority::HIGH = 3
+    const ubyte Priority::EXTREME = 255
 
 Data Types
 ----------
@@ -191,7 +243,7 @@ type identifier  type                     storage size       example var declara
 ===============  =======================  =================  =========================================
 ``byte``         signed byte              1 byte = 8 bits    ``byte myvar = -22``
 ``ubyte``        unsigned byte            1 byte = 8 bits    ``ubyte myvar = $8f``,   ``ubyte c = 'a'``
-``bool``         boolean                  1 byte = 8 bits    ``bool myvar = true`` or ``bool myvar == false``
+``bool``         boolean                  1 byte = 8 bits    ``bool myvar = true`` or ``bool myvar = false``
 ``word``         signed word              2 bytes = 16 bits  ``word myvar = -12345``
 ``uword``        unsigned word            2 bytes = 16 bits  ``uword myvar = $8fee``
 ``long``         signed 32 bits integer   4 bytes            ``long large = $12345678``
@@ -275,7 +327,7 @@ to be done on word values, and don't want to explicitly have to cast everything 
     **longs and cx16.R12,R13,R14,R15**:
     **Some operations on long values require the use of the R12-R15 virtual register as temporary storage**
     So if you are working with long values, you should assume that the contents of R12-R15 could be destroyed.
-    ()Many operations preserve the values, but not all because of reasons)
+    (Many operations preserve the values, but not all, because of reasons)
     **Using R12,R13,R14,R15 in expressions that work with longs, will sometimes give a corrupted result, without
     a warning of the compiler!** It is strongly advised to *not* use R12-R15 at all when dealing with longs.
 
@@ -313,7 +365,7 @@ any underscores in the number are ignored by the compiler.
 For instance ``30_000.999_999`` is a valid floating point number 30000.999999.
 
 .. attention::
-    On the X16, make sure rom bank 4 is still active before doing floationg point operations (it's the bank that contains the fp routines).
+    On the X16, make sure rom bank 4 is still active before doing floating point operations (it's the bank that contains the fp routines).
     On the C64, you have to make sure the Basic ROM is still banked in (same reason).
 
 
@@ -324,7 +376,8 @@ Arrays
 .. index:: pair: Data Types; Arrays
 
 Arrays can be created from a list of booleans, bytes, words, floats, addresses of other variables
-(such as explicit address-of expressions, strings, or other array variables), pointers, or struct initializers.
+(such as explicit address-of expressions, strings, or other array variables), pointers, struct initializers,
+or ``memory()`` calls (either directly or via ``const`` variables holding ``memory()`` results).
 The values in an array literal always have to be constants.
 A trailing comma is allowed, sometimes this is easier when copying values
 or when adding more stuff to the array later. Here are some examples of arrays::
@@ -337,6 +390,7 @@ or when adding more stuff to the array later. Here are some examples of arrays::
     uword[] others = [names, array]   ; array of pointers/addresses to other arrays
     bool[2] flags = [true, false]     ; array of two boolean values  (take up 1 byte each, like a byte array)
     ^^float[3] values                 ; array of three pointers to floats
+    uword[2] memarr = [memory("m1",10,0), memory("m2",20,0)]  ; array of memory block addresses
 
     value = array[3]            ; the fourth value in the array (index is 0-based)
     char = string[4]            ; the fifth character (=byte) in the string
@@ -346,7 +400,7 @@ or when adding more stuff to the array later. Here are some examples of arrays::
     To allow the 6502 CPU to efficiently access values in an array, the array should be small enough to be
     indexable by a single byte index.
     This means byte arrays should be <= 256 elements, word arrays <= 256 elements as well (if split, which
-    is the default. When not split, the maximum length is 128. See below for details about this disctinction).t
+    is the default. When not split, the maximum length is 128. See below for details about this distinction).
     Float arrays should be <= 51 elements.
 
 Arrays can be initialized with a range expression or an array literal value.
@@ -367,6 +421,55 @@ for instance.
 
 Using the ``in`` operator you can easily check if a value is present in an array,
 example: ``if choice in [1,2,3,4] {....}``
+
+2D Arrays
+^^^^^^^^^
+.. index:: triple: Data Types; Matrixes; Two-dimensional Arrays
+    
+Prog8 provides a convenient syntactic sugar for working with two-dimensional arrays.
+Instead of manually calculating offsets into a flat 1D array, you can declare and
+access arrays using familiar 2D syntax.
+
+Declaration uses two bracket pairs to specify the number of rows and columns::
+
+    ubyte[3][4] matrix   ; 3 rows, 4 columns (12 elements total)
+
+Access uses chained indexing with ``[row][column]``::
+
+    ubyte value = matrix[1][2]   ; element at row 1, column 2
+    matrix[0][0] = 42            ; set top-left element
+
+This is purely **syntactic sugar**. The compiler automatically transforms
+``matrix[row][col]`` into the equivalent 1D index calculation
+``matrix[row * numCols + col]``. There is no runtime overhead or special
+2D tracking — after compilation it behaves exactly like a regular 1D array access.
+
+**Initialization:**
+
+When initializing a 2D array, provide the values as a **flat list** that matches
+the total number of elements (rows × columns). Nested list initializers
+(such as ``[[1,2,3],[4,5,6]]``) are **not supported**::
+
+    ubyte[2][3] matrix = [1, 2, 3, 4, 5, 6]   ; correct: flat list
+
+**Size limitations:**
+
+The combined array size is subject to the same limits as regular 1D arrays:
+
+- For byte arrays (``ubyte``, ``byte``, ``bool``): maximum **256 elements** total (rows × columns ≤ 256).
+- For split word arrays (``uword``, ``word``, ``str``): maximum **256 elements** total, which occupies 512 bytes of storage (LSB and MSB arrays).
+- For long arrays (``long``): maximum **64 elements** total (rows × columns ≤ 64), which occupies 256 bytes.
+- For float arrays (``float``): maximum **51 elements** total (rows × columns ≤ 51), which occupies 255 bytes.
+- For sequential word arrays (``@nosplit uword`` etc): maximum **128 elements** total, which occupies 256 bytes.
+- The ``@split`` tag works normally with 2D syntax.
+- The ``@nosplit`` tag can also be used on 2D word arrays if sequential storage is needed.
+
+**Not supported:**
+
+- 3D or higher-dimensional arrays are not supported.
+- Chained indexing (``arr[y][x]``) can only be used on variables that were
+  explicitly declared with the 2D ``[rows][cols]`` syntax. Using it on a
+  regular 1D array variable will produce a compile error.
 
 **Arrays at a specific memory location:**
 
@@ -395,9 +498,9 @@ As an optimization, (u)word arrays, pointer arrays, and str arrays are split by 
 one with the LSBs and one with the MSBs of the word values. This is more efficient to access by the 6502 cpu.
 It also allows a maximum length of 256 for word arrays, where normally it would have been 128.
 
-For normal prog8 array indexing, the compiler takes care of the distiction for you under water.
+For normal prog8 array indexing, the compiler takes care of the distinction for you under water.
 *But for assembly code, or code that otherwise accesses the array elements directly, you have to be aware of the distinction from 'normal' arrays.*
-In the assembly code, the array is generated as two byte arrays namely ``name_lsb`` and ``name_msb``, immediately following eachother in memory.
+In the assembly code, the array is generated as two byte arrays namely ``name_lsb`` and ``name_msb``, immediately following each other in memory.
 
 The ``@nosplit`` tag can be added to the variable declaration to *not* split the array. This is useful for compatibility with
 code that expects the words to be sequentially in memory (such as the cx16.FB_set_palette routine).
@@ -411,7 +514,7 @@ code that expects the words to be sequentially in memory (such as the cx16.FB_se
 .. note::
     Array literals are stored as split arrays if they're initializing a split word array, otherwise,
     they are stored as sequential words!  So if you pass one directly to a subroutine (like ``func([1111,2222,3333])``),
-    the array values are sequential in memory.  If this is undesiarable (i.e. the subroutine expects a split word array),
+    the array values are sequential in memory.  If this is undesirable (i.e. the subroutine expects a split word array),
     you have to create a normal array variable first and then pass that to the subroutine.
 
 .. caution::
@@ -575,20 +678,6 @@ Range expressions are most often used in for loops, but can be also be used to c
 	byte[] array = 100 to 199     ; initialize array with [100, 101, ..., 198, 199]
 
 
-Constants
-^^^^^^^^^
-.. index:: pair: Data Types; Constants
-
-When using ``const``, the value of the 'variable' cannot be changed; it has become a compile-time constant value instead.
-You'll have to specify the initial value expression. This value is then used
-by the compiler everywhere you refer to the constant (and no memory is allocated
-for the constant itself). Onlythe simple numeric types (byte, word, long, float) can be defined as a constant.
-If something is defined as a constant, very efficient code can usually be generated from it.
-Variables on the other hand can't be optimized as much, need memory, and more code to manipulate them.
-Note that a subset of the library routines in the ``math``, ``strings`` and ``floats`` modules are recognised in
-compile time expressions. For example, the compiler knows what ``math.sin8u(12)`` is and replaces it with the computed result.
-
-
 Memory-mapped
 ^^^^^^^^^^^^^
 .. index:: pair: Data Types; Memory-mapped
@@ -639,6 +728,11 @@ Many type conversions are possible by just writing ``as <type>`` at the end of a
     word   w = uw as word       ; w will be -5583 (simply reinterpret $ea31 as 2-complement negative number)
     f = 56.777
     ub = f as ubyte             ; ub will be 56
+
+.. note::
+    The ``as`` operator has very low precedence, lower than almost all other operators.
+    This means that ``a + b as long`` is parsed as ``(a + b) as long``.
+    Use parentheses if you want to cast an operand before an operation: ``(a as long) * b``.
 
 Sometimes it is a straight reinterpretation of the given value as being of the other type,
 sometimes an actual value conversion is done to convert it into the other type.

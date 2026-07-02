@@ -6,6 +6,7 @@ import io.kotest.inspectors.shouldForAll
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.string.shouldNotContain
 import prog8.ast.expressions.NumericLiteral
 import prog8.ast.statements.Assignment
 import prog8.ast.statements.FunctionCallStatement
@@ -29,7 +30,7 @@ class TestBuiltinFunctions: FunSpec({
         func.parameters[0].name shouldBe "value"
         func.parameters[0].possibleDatatypes. shouldForAll { it.isNumeric }
         func.pure shouldBe true
-        func.returnType shouldBe BaseDataType.BYTE
+        func.returnTypes shouldBe arrayOf(BaseDataType.BYTE)
 
         val conv = func.callConvention(listOf(BaseDataType.UBYTE))
         conv.params.size shouldBe 1
@@ -44,7 +45,7 @@ class TestBuiltinFunctions: FunSpec({
         val func = BuiltinFunctions.getValue("cmp")
         func.parameters.size shouldBe 2
         func.pure shouldBe false
-        func.returnType shouldBe null
+        func.returnTypes.size shouldBe 0
 
         val conv = func.callConvention(listOf(BaseDataType.UWORD, BaseDataType.UWORD))
         conv.params.size shouldBe 2
@@ -60,7 +61,7 @@ class TestBuiltinFunctions: FunSpec({
         func.parameters[1].name shouldBe "value"
         func.parameters[1].possibleDatatypes shouldBe arrayOf(BaseDataType.UBYTE, BaseDataType.BYTE)
         func.pure shouldBe false
-        func.returnType shouldBe null
+        func.returnTypes.size shouldBe 0
     }
 
     test("certain builtin functions should be compile time evaluated") {
@@ -92,20 +93,6 @@ main {
         (a3.value as NumericLiteral).number shouldBe 6.0
         (a4.value as NumericLiteral).number shouldBe 200*256+100
         (a5.args[0] as NumericLiteral).number shouldBe 6.0
-    }
-
-    test("divmod target args should be treated as variables that are written") {
-        val src="""
-main {
-    ubyte c
-    ubyte l
-
-    sub start() {
-        divmod(99, 10, c, l)
-    }
-}"""
-
-        compileText(Cx16Target(), true, src, outputDir, writeAssembly = true) shouldNotBe null
     }
 
     test("warning for return value discarding of pure functions") {
@@ -183,6 +170,37 @@ main {
         compileText(VMTarget(), false, src, outputDir, writeAssembly = true) shouldNotBe null
         compileText(Cx16Target(), false, src, outputDir, writeAssembly = true) shouldNotBe null
         compileText(C64Target(), false, src, outputDir, writeAssembly = true) shouldNotBe null
+    }
+
+    test("divmod and lmh should be compile time folded") {
+        val src="""
+main {
+    ubyte @shared d, r, l, m, h
+    sub start() {
+        d, r = divmod(100, 13)
+        l, m, h = lmh(123456)
+    }
+}"""
+        val result = compileText(C64Target(), true, src, outputDir, writeAssembly = false)!!
+        val statements = result.compilerAst.entrypoint.statements
+        
+        val assignments = statements.filterIsInstance<Assignment>()
+        val d = assignments.find { it.target.identifier?.nameInSource?.last() == "d" }!!
+        val r = assignments.find { it.target.identifier?.nameInSource?.last() == "r" }!!
+        val l = assignments.find { it.target.identifier?.nameInSource?.last() == "l" }!!
+        val m = assignments.find { it.target.identifier?.nameInSource?.last() == "m" }!!
+        val h = assignments.find { it.target.identifier?.nameInSource?.last() == "h" }!!
+
+        (d.value as NumericLiteral).number shouldBe 7.0
+        (r.value as NumericLiteral).number shouldBe 9.0
+        (l.value as NumericLiteral).number shouldBe 64.0
+        (m.value as NumericLiteral).number shouldBe 226.0
+        (h.value as NumericLiteral).number shouldBe 1.0
+
+        statements.forEach { 
+             it.toString() shouldNotContain "divmod("
+             it.toString() shouldNotContain "lmh("
+        }
     }
 
     test("sgn") {

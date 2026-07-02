@@ -25,15 +25,16 @@ smallringbuffer {
     }
 
     sub free() -> ubyte {
-        return 255-fill
+        return 255 - fill
     }
 
     sub isfull() -> bool {
-        return fill>=254
+        ; returns true if less than 2 bytes of space remaining (to allow putw)
+        return fill >= 254
     }
 
     sub isempty() -> bool {
-        return fill<=1
+        return fill == 0
     }
 
     sub put(ubyte value) {
@@ -74,7 +75,7 @@ smallringbuffer {
 smallstack {
     ; -- A small stack (LIFO) that uses just 256 bytes and is independent of the CPU stack. Stack is growing downward from the top of the buffer.
     ;    You can store and retrieve bytes and words. There are no guards against stack over/underflow.
-    ; note: for a "small stack"  (256 bytes size) you might also perhaps just use the CPU stack via sys.push[w] / sys.pop[w].
+    ; note: for a "small stack"  (256 bytes size) you might also perhaps just use the CPU stack via push[w] / pop[w].
 
     ubyte[256] buffer
     ubyte sp = 255
@@ -92,20 +93,21 @@ smallstack {
     }
 
     sub isfull() -> bool {
-        return sp==0
+        ; returns true if less than 2 bytes of space remaining (to allow push_w)
+        return sp <= 1
     }
 
     sub isempty() -> bool {
-        return sp==255
+        return sp == 255
     }
 
-    sub push(ubyte value) {
+    sub push_b(ubyte value) {
         ; -- put a byte on the stack
         buffer[sp] = value
         sp--
     }
 
-    sub pushw(uword value) {
+    sub push_w(uword value) {
         ; -- put a word on the stack (lsb first then msb)
         buffer[sp] = lsb(value)
         sp--
@@ -113,13 +115,13 @@ smallstack {
         sp--
     }
 
-    sub pop() -> ubyte {
+    sub pop_b() -> ubyte {
         ; -- pops a byte off the stack
         sp++
         return buffer[sp]
     }
 
-    sub popw() -> uword {
+    sub pop_w() -> uword {
         ; -- pops a word off the stack.
         sp++
         cx16.r0H = buffer[sp]
@@ -150,20 +152,21 @@ stack {
     }
 
     sub isfull() -> bool {
-        return sp==0
+        ; returns true if less than 2 bytes of space remaining (to allow push_w)
+        return sp == 0 or sp > 8191
     }
 
     sub isempty() -> bool {
-        return sp==8191
+        return sp == 8191
     }
 
-    sub push(ubyte value) {
+    sub push_b(ubyte value) {
         ; -- put a byte on the stack
         buffer_ptr[sp] = value
         sp--
     }
 
-    sub pushw(uword value) {
+    sub push_w(uword value) {
         ; -- put a word on the stack (lsb first then msb)
         buffer_ptr[sp] = lsb(value)
         sp--
@@ -171,13 +174,13 @@ stack {
         sp--
     }
 
-    sub pop() -> ubyte {
+    sub pop_b() -> ubyte {
         ; -- pops a byte off the stack
         sp++
         return buffer_ptr[sp]
     }
 
-    sub popw() -> uword {
+    sub pop_w() -> uword {
         ; -- pops a word off the stack.
         sp++
         cx16.r0H = buffer_ptr[sp]
@@ -207,15 +210,16 @@ ringbuffer {
     }
 
     sub free() -> uword {
-        return 8191-fill
+        return 8192-fill
     }
 
     sub isempty() -> bool {
-        return fill==0
+        return fill == 0
     }
 
     sub isfull() -> bool {
-        return fill>=8191
+        ; returns true if less than 2 bytes of space remaining (to allow putw)
+        return fill >= 8191
     }
 
     sub put(ubyte value) {

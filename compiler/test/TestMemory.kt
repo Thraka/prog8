@@ -27,7 +27,7 @@ class TestMemory: FunSpec({
 
     fun wrapWithProgram(statements: List<Statement>): Program {
         val program = Program("test", DummyFunctions, DummyMemsizer, DummyStringEncoder)
-        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, statements.toMutableList(), Position.DUMMY)
+        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, false, statements.toMutableList(), Position.DUMMY)
         val module = Module(mutableListOf(subroutine), Position.DUMMY, SourceCode.Generated("test"))
         program.addModule(module)
         return program
@@ -196,8 +196,11 @@ class TestMemory: FunSpec({
     }
 
     fun createTestProgramForMemoryRefViaVar(address: UInt, vartype: VarDeclType): AssignTarget {
-        val decl = VarDecl(vartype, VarDeclOrigin.USERCODE, DataType.BYTE, ZeropageWish.DONTCARE,
-            SplitWish.DONTCARE, null, "address", emptyList(), NumericLiteral.optimalInteger(address, Position.DUMMY), false, 0u, false, Position.DUMMY)
+        val decl = VarDecl.builder(DataType.BYTE, Position.DUMMY)
+            .names("address")
+            .type(vartype)
+            .value(NumericLiteral.optimalInteger(address, Position.DUMMY))
+            .build()
         val memexpr = IdentifierReference(listOf("address"), Position.DUMMY)
         val target = AssignTarget(
             null,
@@ -256,8 +259,7 @@ class TestMemory: FunSpec({
     }
 
     test("regular variable not in mapped IO ram on C64") {
-        val decl = VarDecl(VarDeclType.VAR, VarDeclOrigin.USERCODE, DataType.BYTE, ZeropageWish.DONTCARE,
-            SplitWish.DONTCARE, null, "address", emptyList(), null, false, 0u, false, Position.DUMMY)
+        val decl = VarDecl.builder(DataType.BYTE, Position.DUMMY).names("address").build()
         val target = AssignTarget(
             IdentifierReference(listOf("address"), Position.DUMMY),
             null,
@@ -267,7 +269,7 @@ class TestMemory: FunSpec({
             position = Position.DUMMY
         )
         val assignment = Assignment(target, NumericLiteral.optimalInteger(0, Position.DUMMY), AssignmentOrigin.USERCODE, Position.DUMMY)
-        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
+        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
         val module = Module(mutableListOf(subroutine), Position.DUMMY, SourceCode.Generated("test"))
         Program("test", DummyFunctions, DummyMemsizer, DummyStringEncoder)
             .addModule(module)
@@ -276,8 +278,11 @@ class TestMemory: FunSpec({
 
     test("memory mapped variable not in mapped IO ram on C64") {
         val address = 0x1000u
-        val decl = VarDecl(VarDeclType.MEMORY, VarDeclOrigin.USERCODE, DataType.UBYTE, ZeropageWish.DONTCARE,
-            SplitWish.DONTCARE, null, "address", emptyList(), NumericLiteral.optimalInteger(address, Position.DUMMY), false, 0u, false, Position.DUMMY)
+        val decl = VarDecl.builder(DataType.UBYTE, Position.DUMMY)
+            .names("address")
+            .type(VarDeclType.MEMORY)
+            .value(NumericLiteral.optimalInteger(address, Position.DUMMY))
+            .build()
         val target = AssignTarget(
             IdentifierReference(listOf("address"), Position.DUMMY),
             null,
@@ -287,7 +292,7 @@ class TestMemory: FunSpec({
             position = Position.DUMMY
         )
         val assignment = Assignment(target, NumericLiteral.optimalInteger(0, Position.DUMMY), AssignmentOrigin.USERCODE, Position.DUMMY)
-        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
+        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
         val module = Module(mutableListOf(subroutine), Position.DUMMY, SourceCode.Generated("test"))
         Program("test", DummyFunctions, DummyMemsizer, DummyStringEncoder)
             .addModule(module)
@@ -296,8 +301,11 @@ class TestMemory: FunSpec({
 
     test("memory mapped variable in mapped IO ram on C64") {
         val address = 0xd020u
-        val decl = VarDecl(VarDeclType.MEMORY, VarDeclOrigin.USERCODE, DataType.UBYTE, ZeropageWish.DONTCARE,
-            SplitWish.DONTCARE, null, "address", emptyList(), NumericLiteral.optimalInteger(address, Position.DUMMY), false, 0u, false, Position.DUMMY)
+        val decl = VarDecl.builder(DataType.UBYTE, Position.DUMMY)
+            .names("address")
+            .type(VarDeclType.MEMORY)
+            .value(NumericLiteral.optimalInteger(address, Position.DUMMY))
+            .build()
         val target = AssignTarget(
             IdentifierReference(listOf("address"), Position.DUMMY),
             null,
@@ -307,7 +315,7 @@ class TestMemory: FunSpec({
             position = Position.DUMMY
         )
         val assignment = Assignment(target, NumericLiteral.optimalInteger(0, Position.DUMMY), AssignmentOrigin.USERCODE, Position.DUMMY)
-        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
+        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
         val module = Module(mutableListOf(subroutine), Position.DUMMY, SourceCode.Generated("test"))
         Program("test", DummyFunctions, DummyMemsizer, DummyStringEncoder)
             .addModule(module)
@@ -315,12 +323,13 @@ class TestMemory: FunSpec({
     }
 
     test("array not in mapped IO ram") {
-        val decl = VarDecl(VarDeclType.VAR, VarDeclOrigin.USERCODE, DataType.arrayFor(BaseDataType.UBYTE), ZeropageWish.DONTCARE,
-            SplitWish.DONTCARE, null, "address", emptyList(), null, false, 0u, false, Position.DUMMY)
-        val arrayindexed = ArrayIndexedExpression(IdentifierReference(listOf("address"), Position.DUMMY), null, ArrayIndex(NumericLiteral.optimalInteger(1, Position.DUMMY), Position.DUMMY), Position.DUMMY)
+        val decl = VarDecl.builder(DataType.arrayFor(BaseDataType.UBYTE), Position.DUMMY)
+            .names("address")
+            .build()
+        val arrayindexed = ArrayIndexedExpression(IdentifierReference(listOf("address"), Position.DUMMY), null, null, ArrayIndex(NumericLiteral.optimalInteger(1, Position.DUMMY), Position.DUMMY), Position.DUMMY)
         val target = AssignTarget(null, arrayindexed, null, null, false, position = Position.DUMMY)
         val assignment = Assignment(target, NumericLiteral.optimalInteger(0, Position.DUMMY), AssignmentOrigin.USERCODE, Position.DUMMY)
-        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
+        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
         val module = Module(mutableListOf(subroutine), Position.DUMMY, SourceCode.Generated("test"))
         Program("test", DummyFunctions, DummyMemsizer, DummyStringEncoder)
             .addModule(module)
@@ -329,12 +338,15 @@ class TestMemory: FunSpec({
 
     test("memory mapped array not in mapped IO ram") {
         val address = 0x1000u
-        val decl = VarDecl(VarDeclType.MEMORY, VarDeclOrigin.USERCODE, DataType.arrayFor(BaseDataType.UBYTE), ZeropageWish.DONTCARE,
-            SplitWish.DONTCARE, null, "address", emptyList(), NumericLiteral.optimalInteger(address, Position.DUMMY), false, 0u, false, Position.DUMMY)
-        val arrayindexed = ArrayIndexedExpression(IdentifierReference(listOf("address"), Position.DUMMY), null, ArrayIndex(NumericLiteral.optimalInteger(1, Position.DUMMY), Position.DUMMY), Position.DUMMY)
+        val decl = VarDecl.builder(DataType.arrayFor(BaseDataType.UBYTE), Position.DUMMY)
+            .names("address")
+            .type(VarDeclType.MEMORY)
+            .value(NumericLiteral.optimalInteger(address, Position.DUMMY))
+            .build()
+        val arrayindexed = ArrayIndexedExpression(IdentifierReference(listOf("address"), Position.DUMMY), null, null, ArrayIndex(NumericLiteral.optimalInteger(1, Position.DUMMY), Position.DUMMY), Position.DUMMY)
         val target = AssignTarget(null, arrayindexed, null, null, false, position = Position.DUMMY)
         val assignment = Assignment(target, NumericLiteral.optimalInteger(0, Position.DUMMY), AssignmentOrigin.USERCODE, Position.DUMMY)
-        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
+        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
         val module = Module(mutableListOf(subroutine), Position.DUMMY, SourceCode.Generated("test"))
         Program("test", DummyFunctions, DummyMemsizer, DummyStringEncoder)
             .addModule(module)
@@ -343,12 +355,15 @@ class TestMemory: FunSpec({
 
     test("memory mapped array in mapped IO ram") {
         val address = 0xd800u
-        val decl = VarDecl(VarDeclType.MEMORY, VarDeclOrigin.USERCODE, DataType.arrayFor(BaseDataType.UBYTE), ZeropageWish.DONTCARE,
-            SplitWish.DONTCARE, null, "address", emptyList(), NumericLiteral.optimalInteger(address, Position.DUMMY), false, 0u, false, Position.DUMMY)
-        val arrayindexed = ArrayIndexedExpression(IdentifierReference(listOf("address"), Position.DUMMY), null, ArrayIndex(NumericLiteral.optimalInteger(1, Position.DUMMY), Position.DUMMY), Position.DUMMY)
+        val decl = VarDecl.builder(DataType.arrayFor(BaseDataType.UBYTE), Position.DUMMY)
+            .names("address")
+            .type(VarDeclType.MEMORY)
+            .value(NumericLiteral.optimalInteger(address, Position.DUMMY))
+            .build()
+        val arrayindexed = ArrayIndexedExpression(IdentifierReference(listOf("address"), Position.DUMMY), null, null, ArrayIndex(NumericLiteral.optimalInteger(1, Position.DUMMY), Position.DUMMY), Position.DUMMY)
         val target = AssignTarget(null, arrayindexed, null, null, false, position = Position.DUMMY)
         val assignment = Assignment(target, NumericLiteral.optimalInteger(0, Position.DUMMY), AssignmentOrigin.USERCODE, Position.DUMMY)
-        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
+        val subroutine = Subroutine("test", mutableListOf(), mutableListOf(), emptyList(), emptyList(), emptySet(), null, false, false, false, false, mutableListOf(decl, assignment), Position.DUMMY)
         val module = Module(mutableListOf(subroutine), Position.DUMMY, SourceCode.Generated("test"))
         Program("test", DummyFunctions, DummyMemsizer, DummyStringEncoder)
             .addModule(module)
@@ -387,12 +402,12 @@ class TestMemory: FunSpec({
             target.memorySize(BaseDataType.BYTE) shouldBe 1
             target.memorySize(BaseDataType.WORD) shouldBe 2
             target.memorySize(BaseDataType.LONG) shouldBe 4
-            target.memorySize(BaseDataType.FLOAT) shouldBe target.FLOAT_MEM_SIZE
+            target.memorySize(BaseDataType.FLOAT) shouldBe target.FLOAT_MEM_SIZE.toInt()
 
             target.memorySize(DataType.BOOL, null) shouldBe 1
             target.memorySize(DataType.WORD, null) shouldBe 2
             target.memorySize(DataType.LONG, null) shouldBe 4
-            target.memorySize(DataType.FLOAT, null) shouldBe target.FLOAT_MEM_SIZE
+            target.memorySize(DataType.FLOAT, null) shouldBe target.FLOAT_MEM_SIZE.toInt()
 
             target.memorySize(DataType.STR, null) shouldBe 2
             target.memorySize(DataType.STR, 50) shouldBe 50
@@ -405,14 +420,14 @@ class TestMemory: FunSpec({
             target.memorySize(DataType.arrayFor(BaseDataType.WORD), 10) shouldBe 20
             target.memorySize(DataType.arrayFor(BaseDataType.UWORD), 10) shouldBe 20
             target.memorySize(DataType.arrayFor(BaseDataType.LONG), 10) shouldBe 40
-            target.memorySize(DataType.arrayFor(BaseDataType.FLOAT), 10) shouldBe 10*target.FLOAT_MEM_SIZE
+            target.memorySize(DataType.arrayFor(BaseDataType.FLOAT), 10) shouldBe 10*target.FLOAT_MEM_SIZE.toInt()
             target.memorySize(DataType.arrayFor(BaseDataType.WORD, true), 10) shouldBe 20
             target.memorySize(DataType.arrayFor(BaseDataType.UWORD, true), 10) shouldBe 20
 
             target.memorySize(DataType.BOOL, 10) shouldBe 10
             target.memorySize(DataType.UWORD, 10) shouldBe 20
             target.memorySize(DataType.LONG, 10) shouldBe 40
-            target.memorySize(DataType.FLOAT, 10) shouldBe 10*target.FLOAT_MEM_SIZE
+            target.memorySize(DataType.FLOAT, 10) shouldBe 10*target.FLOAT_MEM_SIZE.toInt()
         }
     }
 

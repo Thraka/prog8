@@ -1,5 +1,6 @@
 ; all library modules for the cx16 compiler target
 
+%import adpcm
 %import bcd
 %import bmx
 %import buffers
@@ -13,12 +14,14 @@
 %import gfx_hires
 %import gfx_lores
 %import graphics
+%import lineclip
 %import math
 %import monogfx
 %import palette
 %import prog8_lib
 %import psg
 %import psg2
+%import serial
 %import sorting
 %import sprites
 %import strings
@@ -26,3 +29,4 @@
 %import test_stack
 %import textio
 %import verafx
+%import wavfile

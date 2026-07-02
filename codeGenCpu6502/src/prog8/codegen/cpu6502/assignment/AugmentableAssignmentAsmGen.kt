@@ -44,7 +44,14 @@ internal class AugmentableAssignmentAsmGen(private val program: PtProgram,
             "^=", "xor=" -> inplaceModification(assign.target, "^", assign.source)
             "<<=" -> inplaceModification(assign.target, "<<", assign.source)
             ">>=" -> inplaceModification(assign.target, ">>", assign.source)
-            "%=" -> inplaceModification(assign.target, "%", assign.source)
+            "%=" -> {
+                if(assign.source.datatype.isSigned) {
+                    asmgen.errors.err("remainder can only be used on unsigned integer operands on 6502 target for now", assign.position)
+                    // TODO implement the signed remainder asm routine
+                }
+                else
+                    inplaceModification(assign.target, "%", assign.source)
+            }
             "==" -> inplaceModification(assign.target, "==", assign.source)
             "!=" -> inplaceModification(assign.target, "!=", assign.source)
             "<" -> inplaceModification(assign.target, "<", assign.source)
@@ -311,14 +318,13 @@ internal class AugmentableAssignmentAsmGen(private val program: PtProgram,
                                 SourceStorageKind.REGISTER -> inplacemodificationLongWithVariable(targetVarName, operator, regName(value))
                                 SourceStorageKind.MEMORY -> TODO("inplace long modification with memread value ${target.position}")
                                 SourceStorageKind.ARRAY -> TODO("inplace long modification with array value ${target.position}")
-                                SourceStorageKind.EXPRESSION -> {
+                                SourceStorageKind.EXPRESSION ->
                                     if(value.expression is PtTypeCast) {
                                         if (tryInplaceModifyWithRemovedRedundantCast(value.expression, target, operator)) return
                                         TODO("inplace long modification ${target.position}")
                                     } else {
                                         TODO("inplace long modification ${target.position}")
                                     }
-                                }
                             }
                         }
 
@@ -570,11 +576,12 @@ internal class AugmentableAssignmentAsmGen(private val program: PtProgram,
     internal fun inplacemodificationLongWithVariable(targetVar: String, operator: String, sourceVar: String) {
         when(operator) {
             "+" -> {
+                // need to unroll to correctly keep Carry flag for multi-byte arithmetic
                 asmgen.out("""
                     clc
-                    lda  $targetVar
-                    adc  $sourceVar
-                    sta  $targetVar
+                    lda  $targetVar+0
+                    adc  $sourceVar+0
+                    sta  $targetVar+0
                     lda  $targetVar+1
                     adc  $sourceVar+1
                     sta  $targetVar+1
@@ -583,14 +590,16 @@ internal class AugmentableAssignmentAsmGen(private val program: PtProgram,
                     sta  $targetVar+2
                     lda  $targetVar+3
                     adc  $sourceVar+3
-                    sta  $targetVar+3""")
+                    sta  $targetVar+3
+                    """)
             }
             "-" -> {
+                // need to unroll to correctly keep Carry flag for multi-byte arithmetic
                 asmgen.out("""
                     sec
-                    lda  $targetVar
-                    sbc  $sourceVar
-                    sta  $targetVar
+                    lda  $targetVar+0
+                    sbc  $sourceVar+0
+                    sta  $targetVar+0
                     lda  $targetVar+1
                     sbc  $sourceVar+1
                     sta  $targetVar+1
@@ -599,7 +608,8 @@ internal class AugmentableAssignmentAsmGen(private val program: PtProgram,
                     sta  $targetVar+2
                     lda  $targetVar+3
                     sbc  $sourceVar+3
-                    sta  $targetVar+3""")
+                    sta  $targetVar+3
+                    """)
             }
             "<<" -> {
                 asmgen.out("""
@@ -625,51 +635,102 @@ internal class AugmentableAssignmentAsmGen(private val program: PtProgram,
             }
             "|" -> {
                 asmgen.out("""
-                    lda  $targetVar
-                    ora  $sourceVar
-                    sta  $targetVar  
-                    lda  $targetVar+1
-                    ora  $sourceVar+1
-                    sta  $targetVar+1
-                    lda  $targetVar+2
-                    ora  $sourceVar+2
-                    sta  $targetVar+2
-                    lda  $targetVar+3
-                    ora  $sourceVar+3
-                    sta  $targetVar+3""")
+                    ldy  #3
+-                   lda  $targetVar,y
+                    ora  $sourceVar,y
+                    sta  $targetVar,y
+                    dey
+                    bpl  -""")
             }
             "&" -> {
                 asmgen.out("""
-                    lda  $targetVar
-                    and  $sourceVar
-                    sta  $targetVar  
-                    lda  $targetVar+1
-                    and  $sourceVar+1
-                    sta  $targetVar+1
-                    lda  $targetVar+2
-                    and  $sourceVar+2
-                    sta  $targetVar+2
-                    lda  $targetVar+3
-                    and  $sourceVar+3
-                    sta  $targetVar+3""")
+                    ldy  #3
+-                   lda  $targetVar,y
+                    and  $sourceVar,y
+                    sta  $targetVar,y
+                    dey
+                    bpl  -""")
             }
             "^" -> {
                 asmgen.out("""
-                    lda  $targetVar
-                    eor  $sourceVar
-                    sta  $targetVar  
-                    lda  $targetVar+1
-                    eor  $sourceVar+1
+                    ldy  #3
+-                   lda  $targetVar,y
+                    eor  $sourceVar,y
+                    sta  $targetVar,y
+                    dey
+                    bpl  -""")
+            }
+            "*" -> {
+                asmgen.out("""
+                    ; Copy target to R12R13 (multiplicand)
+                    ldy  #3
+-                   lda  $targetVar,y
+                    sta  cx16.r12,y
+                    dey
+                    bpl  -
+                    ; Copy source to R14R15 (multiplier)
+                    ldy  #3
+-                   lda  $sourceVar,y
+                    sta  cx16.r14,y
+                    dey
+                    bpl  -
+                    jsr  prog8_math.multiply_longs
+                    ; Copy result from R14R15 back to target
+                    ldy  #3
+-                   lda  cx16.r14,y
+                    sta  $targetVar,y
+                    dey
+                    bpl  -""")
+            }
+            "/" -> {
+                asmgen.out("""
+                    ; Copy target to R12R13 (dividend)
+                    ldy  #3
+-                   lda  $targetVar,y
+                    sta  cx16.r12,y
+                    dey
+                    bpl  -
+                    ; Copy source to R14R15 (divisor)
+                    ldy  #3
+-                   lda  $sourceVar,y
+                    sta  cx16.r14,y
+                    dey
+                    bpl  -
+                    jsr  prog8_math.div_longs
+                    ; Copy result from R14R15 back to target
+                    ldy  #3
+-                   lda  cx16.r14,y
+                    sta  $targetVar,y
+                    dey
+                    bpl  -""")
+            }
+            "%" -> {
+                asmgen.out("""
+                    ; Copy target to R12R13 (dividend)
+                    ldy  #3
+-                   lda  $targetVar,y
+                    sta  cx16.r12,y
+                    dey
+                    bpl  -
+                    ; Copy source to R14R15 (divisor)
+                    ldy  #3
+-                   lda  $sourceVar,y
+                    sta  cx16.r14,y
+                    dey
+                    bpl  -
+                    jsr  prog8_math.div_longs
+                    ; Copy remainder from P8ZP_SCRATCH_W1/W2 back to target
+                    lda  P8ZP_SCRATCH_W1
+                    sta  $targetVar
+                    lda  P8ZP_SCRATCH_W1+1
                     sta  $targetVar+1
-                    lda  $targetVar+2
-                    eor  $sourceVar+2
+                    lda  P8ZP_SCRATCH_W2
                     sta  $targetVar+2
-                    lda  $targetVar+3
-                    eor  $sourceVar+3
+                    lda  P8ZP_SCRATCH_W2+1
                     sta  $targetVar+3""")
             }
             else -> {
-                TODO("in-place modify LONG with variable")
+                TODO("in-place modify LONG with variable, operator=$operator")
             }
         }
     }
@@ -994,6 +1055,93 @@ internal class AugmentableAssignmentAsmGen(private val program: PtProgram,
                     }
                 }
             }
+            "*" -> {
+                // long *= constant - use multiplication routine with loop-based copies
+                val lo = value and 0xFFFF
+                val hi = (value ushr 16) and 0xFFFF
+                asmgen.out("""
+                    ; Copy variable to R12R13 (multiplicand)
+                    ldy  #3
+-                   lda  $variable,y
+                    sta  cx16.r12,y
+                    dey
+                    bpl  -
+                    ; Load constant into R14R15 (multiplier)
+                    lda  #<${lo}
+                    sta  cx16.r14
+                    lda  #>${lo}
+                    sta  cx16.r14+1
+                    lda  #<${hi}
+                    sta  cx16.r15
+                    lda  #>${hi}
+                    sta  cx16.r15+1
+                    jsr  prog8_math.multiply_longs
+                    ; Copy result from R14R15 back to variable
+                    ldy  #3
+-                   lda  cx16.r14,y
+                    sta  $variable,y
+                    dey
+                    bpl  -""")
+            }
+            "/" -> {
+                // long /= constant - use division routine
+                val lo = value and 0xFFFF
+                val hi = (value ushr 16) and 0xFFFF
+                asmgen.out("""
+                    ; Copy variable to R12R13 (dividend)
+                    ldy  #3
+-                   lda  $variable,y
+                    sta  cx16.r12,y
+                    dey
+                    bpl  -
+                    ; Load constant into R14R15 (divisor)
+                    lda  #<${lo}
+                    sta  cx16.r14
+                    lda  #>${lo}
+                    sta  cx16.r14+1
+                    lda  #<${hi}
+                    sta  cx16.r15
+                    lda  #>${hi}
+                    sta  cx16.r15+1
+                    jsr  prog8_math.div_longs
+                    ; Copy result from R14R15 back to variable
+                    ldy  #3
+-                   lda  cx16.r14,y
+                    sta  $variable,y
+                    dey
+                    bpl  -""")
+            }
+            "%" -> {
+                // long %= constant - use division routine, remainder is in P8ZP_SCRATCH_W1/W2
+                val lo = value and 0xFFFF
+                val hi = (value ushr 16) and 0xFFFF
+                asmgen.out("""
+                    ; Copy variable to R12R13 (dividend)
+                    ldy  #3
+-                   lda  $variable,y
+                    sta  cx16.r12,y
+                    dey
+                    bpl  -
+                    ; Load constant into R14R15 (divisor)
+                    lda  #<${lo}
+                    sta  cx16.r14
+                    lda  #>${lo}
+                    sta  cx16.r14+1
+                    lda  #<${hi}
+                    sta  cx16.r15
+                    lda  #>${hi}
+                    sta  cx16.r15+1
+                    jsr  prog8_math.div_longs
+                    ; Copy remainder from P8ZP_SCRATCH_W1/W2 back to variable
+                    lda  P8ZP_SCRATCH_W1
+                    sta  $variable
+                    lda  P8ZP_SCRATCH_W1+1
+                    sta  $variable+1
+                    lda  P8ZP_SCRATCH_W2
+                    sta  $variable+2
+                    lda  P8ZP_SCRATCH_W2+1
+                    sta  $variable+3""")
+            }
             "<<" -> if (value > 0) inplaceLongShiftLeft()
             ">>" -> if (value > 0) inplaceLongShiftRight()
             "|" -> {
@@ -1135,9 +1283,9 @@ internal class AugmentableAssignmentAsmGen(private val program: PtProgram,
             val assignValue = AsmAssignment(value,
                 listOf(
                     AsmAssignTarget(TargetStorageKind.REGISTER, asmgen, DataType.UBYTE,
-                    address.definingISub(), Position.DUMMY, register = RegisterOrPair.A)
+                    address.definingISub(), address.position, register = RegisterOrPair.A)
                 ),
-                program.memsizer, Position.DUMMY)
+                program.memsizer, address.position)
             assignmentAsmGen.translateNormalAssignment(assignValue, address.definingISub())   // calculate value into A
         }
 
@@ -1218,6 +1366,33 @@ internal class AugmentableAssignmentAsmGen(private val program: PtProgram,
                     sta  ${arrayVar}_lsb+$index
                     lda  ${arrayVar}_msb+$index
                     sbc  cx16.r0H
+                    sta  ${arrayVar}_msb+$index""")
+            }
+            "|" -> {
+                asmgen.out("""
+                    lda  ${arrayVar}_lsb+$index
+                    ora  cx16.r0L
+                    sta  ${arrayVar}_lsb+$index
+                    lda  ${arrayVar}_msb+$index
+                    ora  cx16.r0H
+                    sta  ${arrayVar}_msb+$index""")
+            }
+            "&" -> {
+                asmgen.out("""
+                    lda  ${arrayVar}_lsb+$index
+                    and  cx16.r0L
+                    sta  ${arrayVar}_lsb+$index
+                    lda  ${arrayVar}_msb+$index
+                    and  cx16.r0H
+                    sta  ${arrayVar}_msb+$index""")
+            }
+            "^" -> {
+                asmgen.out("""
+                    lda  ${arrayVar}_lsb+$index
+                    eor  cx16.r0L
+                    sta  ${arrayVar}_lsb+$index
+                    lda  ${arrayVar}_msb+$index
+                    eor  cx16.r0H
                     sta  ${arrayVar}_msb+$index""")
             }
             else -> TODO("inplace split word array value $operator")
@@ -1710,8 +1885,8 @@ $shortcutLabel:""")
     private fun inplacemodificationRegisterAwithVariableWithSwappedOperands(operator: String, variable: String, signed: Boolean) {
         // A = variable <operator> A
 
-        if(operator in AssociativeOperators)
-            return inplacemodificationRegisterAwithVariable(operator, variable, signed)     // just reuse existing code for associative operators
+        if(operator in CommutativeOperators)
+            return inplacemodificationRegisterAwithVariable(operator, variable, signed)     // just reuse existing code for commutative operators
 
         // now implement the non-assiciative operators...
         when (operator) {
@@ -3095,6 +3270,7 @@ $shortcutLabel:""")
                 lda  $name+1
                 sta  P8ZP_SCRATCH_W1+1
                 txa
+oweroff
                 jsr  prog8_math.divmod_uw_asm
                 lda  P8ZP_SCRATCH_W2
                 ldy  P8ZP_SCRATCH_W2+1

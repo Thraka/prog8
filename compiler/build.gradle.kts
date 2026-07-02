@@ -1,9 +1,7 @@
 plugins {
     id("application")
     kotlin("jvm")
-    // id("com.github.johnrengelman.shadow") version "8.1.1"
-    // id("io.github.goooler.shadow") version "8.1.8"
-    id("com.gradleup.shadow") version "9.3.1"
+    id("com.gradleup.shadow") version "9.3.2"
     id("com.peterabeles.gversion") version "1.10.3"
 }
 
@@ -15,38 +13,22 @@ dependencies {
     implementation(project(":codeGenCpu6502"))
     implementation(project(":codeGenIntermediate"))
     implementation(project(":codeGenExperimental"))
+    implementation(project(":intermediate"))
     implementation(project(":virtualmachine"))
-    // implementation(project(":beanshell"))
-    // implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
-    // implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation("org.jetbrains.kotlinx:kotlinx-cli:0.3.6")
-    implementation("com.michael-bull.kotlin-result:kotlin-result-jvm:2.1.0")
+    implementation("com.michael-bull.kotlin-result:kotlin-result-jvm:2.3.1")
 
     testImplementation(project(":codeCore"))
+    testImplementation(testFixtures(project(":codeCore")))
     testImplementation(project(":intermediate"))
-    testImplementation("io.kotest:kotest-runner-junit5-jvm:5.9.1")
-    testImplementation("io.kotest:kotest-framework-datatest:5.9.1")
+    testImplementation("io.kotest:kotest-runner-junit5")
+    testImplementation("io.kotest:kotest-framework-datatest")
+    testImplementation("com.github.irmen:ksim65:v2.1")
 }
 
+// Exclude transitive antlr4 dependency (we only need it in parser module)
 configurations.all {
-    exclude(group = "com.ibm.icu", module = "icu4j")
     exclude(group = "org.antlr", module = "antlr4")
-}
-
-sourceSets {
-    main {
-        java {
-            srcDir("${project.projectDir}/src")
-        }
-        resources {
-            srcDir("${project.projectDir}/res")
-        }
-    }
-    test {
-        java {
-            srcDir("${project.projectDir}/test")
-        }
-    }
 }
 
 tasks.startScripts {
@@ -62,16 +44,6 @@ tasks.shadowJar {
     archiveBaseName.set("prog8c")
     archiveVersion.set(version.toString())
     // minimize()
-}
-
-tasks.test {
-    // Enable JUnit 5 (Gradle 4.6+).
-    useJUnitPlatform()
-
-    // Show test results.
-    testLogging {
-        events("skipped", "failed")
-    }
 }
 
 gversion {

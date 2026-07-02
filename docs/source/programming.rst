@@ -85,6 +85,9 @@ Elements of a program
     The global scope can only contain blocks and some directives, while the others can contain variables and subroutines too.
     Some more details about how to deal with scopes and names is discussed below.
 
+Variables
+---------
+How to declare variables in prog8 is explained in a separate chapter :ref:`variables`.
 
 Identifiers
 -----------
@@ -125,7 +128,7 @@ The ``alias`` statement makes it easier to refer to symbols from other places, a
 you from having to type the fully scoped name everytime you need to access that symbol.
 Aliases can be created in any scope except at the module level.
 An alias is created with ``alias <name> = <target>`` and then you can use ``<name>`` as if it were ``<target>``.
-It is possible to alias variables, labels and subroutines, and even whole blocks.words
+It is possible to alias variables, labels and subroutines, and even whole blocks and words
 The name has to be an unscoped identifier name, the target can be any scoped or unscoped symbol.
 Please consider using aliases sparingly because it may lead to confusing code if you alias
 well-known block names for example.
@@ -150,7 +153,7 @@ They can only contain *directives*, *variable declarations*, *subroutines* and *
     }
 
 The <blockname> must be a valid identifier, and must be unique in the entire program (there's
-a directive to merge multiple occurences).
+a directive to merge multiple occurrences).
 The <address> is optional. If specified it must be a valid memory address such as ``$c000``.
 It's used to tell the compiler to put the block at a certain position in memory.
 
@@ -158,9 +161,10 @@ It's used to tell the compiler to put the block at a certain position in memory.
     Using qualified names ("dotted names") to reference symbols defined elsewhere
 
     Every symbol is 'public' and can be accessed from anywhere else, when given its *full* "dotted name".
+    You can use the ``private`` keyword to hide symbols from other blocks - see :ref:`private-symbols`.
     So, accessing a variable ``counter`` defined in subroutine ``worker`` in block ``main``,
     can be done from anywhere by using ``main.worker.counter``.
-    Unlike most other programming langues, as soon as a name is scoped,
+    Unlike most other programming languages, as soon as a name is scoped,
     Prog8 treats it as a name starting in the *global* namespace.
     Relative name lookup is only performed for *non-scoped* names.
 
@@ -368,7 +372,7 @@ Directives
 
     Level: not at module scope.
     Defines a debugging breakpoint at this location. See :ref:`debugging`
-    The version with the explamation point '!' at the end can be used even
+    The version with the exclamation point '!' at the end can be used even
     if the breakpoint follows an expression. If you don't use the '!' version in this case
     the compiler may think it is just a term in the expression (modulo operator and breakpoint operand value),
     instead of a breakpoint directive::
@@ -884,7 +888,7 @@ using qualified "dotted names"::
 
     uword address = $4000
     goto  address         ; jump via address variable
-    goto  address + idx   ; jump to an adress that is the result of an expression
+    goto  address + idx   ; jump to an address that is the result of an expression
 
 Notice that this is a valid way to end a subroutine (you can either ``return`` from it, or jump
 to another piece of code that eventually returns).
@@ -897,16 +901,17 @@ Assignments
 -----------
 .. index:: single: Assignments
 
-Assignment statements assign a single value to a target variable or memory location.
+Assignment statements assign a value to a target variable or memory location.
 Augmented assignments (such as ``aa += xx``) are also available, but these are just shorthands
 for normal assignments (``aa = aa + xx``).
 
 It is possible to "chain" assignments: ``x = y = z = 42``, this is just a shorthand
 for the three individual assignments with the same value 42.
 
-For subroutines that return multiple values, you should write a "multi assign" statement
-with comma separated assignment targets, to assigns those multiple values.
-Details can be found here: :ref:`multiassign`.
+It is also possible to do a multi-value assignment: ``x, y, z = 11, 22, 33``. This is
+just a shorter way to write the three separate assignments ``x=11`` followed by ``y=22`` followed by ``z=33``.
+For subroutines that return multiple values, you have to write such a multi-value assignment statement
+as well, to assigns those multiple values. Details can be found here: :ref:`multiassign`.
 
 
 .. attention::
@@ -1015,6 +1020,78 @@ Operators
 ---------
 .. index:: single: Operators
 
+The following table lists the operator precedence in Prog8, from highest to lowest.
+Operators on the same line have the same precedence.
+
+.. list-table:: Operator Precedence
+   :widths: 15 35 50
+   :header-rows: 1
+
+   * - Precedence
+     - Operator(s)
+     - Description
+   * - 1 (highest)
+     - ``( )``, ``sizeof``, ``sub(args)``
+     - Parentheses, size of, subroutine call
+   * - 2
+     - ``.``
+     - Member access / scope traversal
+   * - 3
+     - ``+``, ``-``, ``~`` (unary)
+     - Unary plus, unary minus, bitwise NOT
+   * - 4
+     - ``*``, ``/``, ``%``
+     - Multiplication, division, remainder
+   * - 5
+     - ``+``, ``-`` (binary)
+     - Addition, subtraction
+   * - 6
+     - ``<<``, ``>>``
+     - Bitwise shifts
+   * - 7
+     - ``&``
+     - Bitwise AND
+   * - 8
+     - ``^``
+     - Bitwise XOR
+   * - 9
+     - ``|``
+     - Bitwise OR
+   * - 10
+     - ``<``, ``>``, ``<=``, ``>=``
+     - Comparisons
+   * - 11
+     - ``==``, ``!=``
+     - Equality and inequality
+   * - 12
+     - ``to``, ``downto``
+     - Range creation
+   * - 13
+     - ``in``, ``not in``
+     - Containment check
+   * - 14
+     - ``not``
+     - Logical NOT
+   * - 15
+     - ``and``
+     - Logical AND
+   * - 16
+     - ``or``
+     - Logical OR
+   * - 17
+     - ``xor``
+     - Logical XOR
+   * - 18
+     - ``as``
+     - Type cast
+   * - 19
+     - ``if ... then ... else``
+     - If-expression
+   * - 20 (lowest)
+     - literals, identifiers, etc.
+     - Primary expressions (literals, variables, indexing, etc)
+
+
 arithmetic: ``+``  ``-``  ``*``  ``/``  ``%``
     ``+``, ``-``, ``*``, ``/`` are the familiar arithmetic operations.
     ``/`` is division (will result in integer division when using on integer operands, and a floating point division when at least one of the operands is a float)
@@ -1099,6 +1176,13 @@ address of:  ``&``,   ``&<``,   ``&>``,   ``&&``
     a number from a typed pointer uses *pointer arithmetic* that takes the size of the value that it points to into account.
 
 
+type cast:  ``as``
+    Explicitly convert an expression to another data type.
+    Note that ``as`` has very low precedence, lower than most other operators.
+    This means that ``a + b as long`` is parsed as ``(a + b) as long``.
+    If you want to cast an operand before an operation, use parentheses: ``(a as long) * b``.
+
+
 ternary:
     Prog8 doesn't have a ternary operator to choose one of two values (``x? y : z`` in many other languages)
     instead it provides this feature in the form of an *if expression*.  See below under "Conditional Execution".
@@ -1139,6 +1223,51 @@ There are three different types of subroutines: regular subroutines (the one abo
 external subroutines. These last two are described in detail below.
 
 
+.. _private-symbols:
+
+Private symbols
+^^^^^^^^^^^^^^^
+.. index:: pair: Symbols; Private
+
+You can use the ``private`` keyword to hide a symbol from outside its block.
+Accessing a private symbol from another block results in a compilation error.
+
+The ``private`` keyword can be applied to the following declarations:
+
+- **subroutines** (the keyword must come before ``inline`` if used)::
+
+    private sub helper() {
+        ; only callable from within this block
+    }
+
+    private inline sub fast_helper() {
+        ; private and inlined - note: private comes BEFORE inline
+    }
+
+    private asmsub asm_helper(ubyte a @A) clobbers(Y) -> ubyte @A {
+        ; private asmsub
+    }
+
+- **external subroutines** (``extsub``)::
+
+    private extsub $FFD2 = CHROUT(ubyte char @A)
+
+- **structs**::
+
+    private struct Node {
+        byte x
+        byte y
+    }
+
+- **enums**::
+
+    private enum Color { red, green, blue }
+
+- **aliases**::
+
+    private alias MyReg = cx16.r0
+
+
 .. _reusevirtualregs_params:
 
 Reusing *virtual registers* R0-R15 for parameters
@@ -1156,7 +1285,7 @@ You *can* tell the compiler to not allocate a new variable, but instead to reuse
 (accessible in the code as ``cx16.r0`` - ``cx16.r15``)  for the parameter. This is done by adding a ``@Rx`` tag
 to the parameter. This can only be done for booleans, byte, and word types.
 Note: the R0-R15 *virtual registers* are described in more detail below for the Assembly subroutines.
-Here's an example that reuses the R0 and the R1L (lower byte of R1) virtual registers for the paremeters::
+Here's an example that reuses the R0 and the R1L (lower byte of R1) virtual registers for the parameters::
 
     sub  get_indexed_byte(uword pointer @R0, ubyte index @R1) -> ubyte {
         return @(cx16.r0 + cx16.r1L)
@@ -1186,24 +1315,17 @@ Such subroutines are defined with ``asmsub`` like this::
 
 the statement body of such a subroutine can only consist of just inline assembly.
 
-The ``@ <register>`` part is required for rom and assembly-subroutines, as it specifies for the compiler
-what cpu registers should take the routine's arguments.  You can use the regular set of registers
+The ``@ <register>`` part is required for rom and assembly-subroutines, as it specifies the
+cpu registers that take the arguments.  You can use the regular set of registers
 (A, X, Y), special 16-bit register pairs to take word values (AX, AY and XY) and even a processor status
 flag such as Carry (Pc).
-
-It is not possible to use floating point arguments or return values in an asmsub.
-
-**inline:** Trivial ``asmsub`` routines can be tagged as ``inline`` to tell the compiler to copy their code
-in-place to the locations where the subroutine is called, rather than inserting an actual call and return to the
-subroutine. This may increase code size significantly and can only be used in limited scenarios, so YMMV.
-Note that the routine's code is copied verbatim into the place of the subroutine call in this case,
-so pay attention to any jumps and rts instructions in the inlined code!
 
 .. note::
     Asmsubs can also be tagged as ``inline asmsub`` to make trivial pieces of assembly inserted
     directly instead of a call to them. Note that it is literal copy-paste of code that is done,
     so make sure the assembly is actually written to behave like such - which probably means you
     don't want a ``rts`` or ``jmp`` or ``bra`` in it!
+    Inlining may increase code size significantly and can only be used in limited scenarios
 
 .. note::
     The **sixteen 'virtual' 16-bit registers** from the Commander X16 can also be specified as ``R0`` .. ``R15`` .
@@ -1230,12 +1352,33 @@ so pay attention to any jumps and rts instructions in the inlined code!
     For example, you can use R0+R1, R2+R3, R4+R5 and so on to take a long value instead.
     The syntax to use as a 'register' name for those pairs is ``R0R1``, ``R2R3``, ``R4R5`` and so on.
 
+.. caution::
+    **Virtual register clobbering by compiler operations:**
+
+    Various compiler operations and builtin routines use the virtual registers R0-R15 as
+    temporary storage or for placing return values. If you are using the virtual registers
+    directly in your program (or via ``@R0..@R15`` parameter annotations), be aware of the
+    fact that they will not always preserve their value!
+
+    ========================== ================================================
+    Register(s)                When clobbered
+    ========================== ================================================
+    ``R0-R3``                  Many library routines use these as scratch
+    ``R12-R15``                Several long value operations and arithmetic expressions
+    ``R14-R15``                Several long value operations / word '%', '/', divmod 
+    ``R0..R15``                if specified: multi-value subroutine return values, parameter reuse.
+                               several library routines may clobber one or more of these registers too.
+    ========================== ================================================
+
+    Additionally, on all targets, the virtual registers R0-R15 are **not preserved** across IRQ
+    handler calls. Use ``cx16.save_virtual_registers()`` / ``cx16.restore_virtual_registers()``
+    if your IRQ handler needs to use them.
 
 External subroutines
 ^^^^^^^^^^^^^^^^^^^^
 .. index:: pair: Subroutines; External
 
-Thse define an external subroutine that's implemented outside of the program
+These define an external subroutine that's implemented outside of the program
 (for instance, a ROM routine, or a routine in a library loaded elsewhere in RAM).
 External subroutines are usually defined by compiler library files, with the following syntax::
 
@@ -1243,15 +1386,17 @@ External subroutines are usually defined by compiler library files, with the fol
          -> bool @Pc, ubyte @ A, ubyte @ X, ubyte @ Y
 
 This defines the ``LOAD`` subroutine at memory address $FFD5, taking arguments in all three registers A, X and Y,
-and returning stuff in several registers as well. The ``clobbers`` clause is used to signify to the compiler
-what CPU registers are clobbered by the call instead of being unchanged or returning a meaningful result value.
+and returning stuff in several registers as well. The ``clobbers`` clause is used to tell what CPU registers
+are clobbered by the call instead of being unchanged or returning a meaningful result value.
+This register clobber information currently is only for documentation purposes.
+
 Note that the address ($ffd5 in the example above) can actually be an expression as long as it is a compile time constant. This can
 make it easier to define jump tables for example, like this::
 
     const uword APIBASE = $8000
     extsub APIBASE+0 = firstroutine()
-    extsub APIBASE+10 = secondroutine()
-    extsub APIBASE+20 = thirdroutine()
+    extsub APIBASE+3 = secondroutine()
+    extsub APIBASE+6 = thirdroutine()
 
 **Banks:** it is possible to declare a non-standard ROM or RAM bank that the routine is living in, with ``@bank`` like this:
 ``extsub @bank 10  $C09F = audio_init()`` to define a routine at $C09F in bank 10. You can also specify a variable for the bank.
@@ -1321,14 +1466,13 @@ Remember that you can use ``void`` to skip a value. So for instance::
 .. sidebar:: register usage
 
     Subroutines with multiple return values use cpu registers A, Y, and the R0-R15 "virtual registers" to return those,
-    depending on the number of values returend.  A floating point value is passed via the FAC 'register'
-    (only a single floating point value is supported).
-    Using these during the calculation of the values in the return statement should be avoided.
-    Otherwise you risk overwriting an earlier return value in the sequence.
+    depending on the number of values returned.  A floating point value is passed via the FAC 'register'.
+    Multiple float return values are supported on the virtual target, but limited to a single float on 6502 targets
+    (because the ROM float routines use FAC1/FAC2 as operand registers which would clobber earlier return values).
 
 
 **Using just one of the values:**
-Sometimes it is easier to just have a single return value in a subroutine's signagure (even though it
+Sometimes it is easier to just have a single return value in a subroutine's signature (even though it
 actually may return multiple values): this avoids having to put ``void`` for all other values if you aren't really interested in those.
 It also allows it to be called in expressions such as if-statements again.
 Examples of these second 'convenience' definition are library routines such as ``cbm.STOP2`` and ``cbm.GETIN2``,
@@ -1395,6 +1539,10 @@ It's possible to write a defer for a block of statements, but the advice is to k
     Defers only work for subroutines that are written in regular Prog8 code.
     If a piece of inlined assembly somehow causes the routine to exit, the compiler cannot detect this,
     and defers won't be handled in such cases.
+
+.. attention::
+    you cannot use anything in a defer statement that depends on values on the CPU stack, for example pop() to use a previously push()-ed value.
+    This is because defers are handled using an internal subroutine call so a return address is pushed on the stack before the defer code is executed.
 
 .. attention::
     Using defer always has a slight code overhead.

@@ -8,12 +8,14 @@ import prog8.ast.FatalAstException
 import prog8.ast.Program
 import prog8.ast.expressions.*
 import prog8.ast.statements.*
+import prog8.ast.walk.IAstVisitor
+import prog8.code.StMemorySlab
 import prog8.code.ast.*
 import prog8.code.core.*
 import prog8.code.sanitize
 import prog8.code.source.ImportFileSystem
 import prog8.code.source.SourceCode
-import prog8.compiler.builtinFunctionReturnType
+import prog8.compiler.builtinFunctionReturnTypes
 import java.io.File
 import kotlin.io.path.Path
 import kotlin.io.path.isRegularFile
@@ -24,7 +26,18 @@ import kotlin.math.log2
  *  Convert 'old' compiler-AST into the 'new' simplified AST with baked types.
  */
 class SimplifiedAstMaker(private val program: Program, private val errors: IErrorReporter) {
+    private val slabDefs = mutableMapOf<String, StMemorySlab>()
     fun transform(): PtProgram {
+        // Pre-collect all memory slab reservations from the entire program
+        val collector = object : IAstVisitor {
+            override fun visit(reservation: MemorySlabReservation) {
+                if (reservation.slabName !in slabDefs) {
+                    slabDefs[reservation.slabName] = StMemorySlab("memory_${reservation.slabName}", reservation.size, reservation.align, null)
+                }
+            }
+        }
+        program.modules.forEach { collector.visit(it) }
+
         val ptProgram = PtProgram(
             program.name,
             program.memsizer,
@@ -77,9 +90,12 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
             is VarDecl -> transform(statement)
             is StructDecl -> transform(statement)
             is When -> transform(statement)
+            is Swap -> transform(statement)
             is WhileLoop -> throw FatalAstException("while loops must have been converted to jumps")
             is OnGoto -> throw FatalAstException("ongoto must have been converted to array and separate call/goto")
+            is MemorySlabReservation -> transform(statement)
             is StructFieldRef -> throw FatalAstException("should not occur as part of the actual AST")
+            is Enumeration -> throw FatalAstException("should have been converted to recular const vardecls")
         }
     }
 
@@ -103,13 +119,22 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
             is BranchConditionExpression -> transform(expr)
             is PtrDereference -> transform(expr)
             is StaticStructInitializer -> transform(expr)
+            is MemorySlabRef -> transform(expr)
             is ArrayIndexedPtrDereference -> throw FatalAstException("this should have been converted to some other ast nodes")
+            is ExpressionTuple -> throw FatalAstException("this should have been converted to some other ast nodes")
         }
+    }
+
+    private fun transform(swap: Swap): PtSwap {
+        val ptswap = PtSwap(swap.position)
+        ptswap.add(transform(swap.t1))
+        ptswap.add(transform(swap.t2))
+        return ptswap
     }
 
     private fun transform(deref: PtrDereference): PtPointerDeref {
         val type = deref.inferType(program).getOrElse {
-            throw FatalAstException("unknown dt")
+            throw FatalAstException("unknown dt ${deref.position}")
         }
 
         val targetVar = deref.definingScope.lookup(deref.chain) as? VarDecl
@@ -159,6 +184,44 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
     }
 
     private fun transform(srcAssign: Assignment): PtNode {
+        // Handle augmented assignments with DirectMemoryWrite targets (from indexed pointer dereferences).
+        // CodeDesugarer sets the isAugmentedMemoryAssign marker when converting an augmented assignment
+        // on an indexed pointer like sprptr[2]^^.y++ to DirectMemoryWrite form.
+        if(srcAssign.target.memoryAddress!=null && srcAssign.isAugmentable && srcAssign.isAugmentedMemoryAssign) {
+            val address = srcAssign.target.memoryAddress!!.addressExpression
+            val srcExpr = srcAssign.value
+
+            // The structure is: DirectMemoryRead(addr) op value  or  value op DirectMemoryRead(addr)
+            val (operator: String, augmentedValue: Expression?) = when(srcExpr) {
+                is BinaryExpression -> {
+                    val leftIsMemRead = srcExpr.left is DirectMemoryRead
+                    val rightIsMemRead = srcExpr.right is DirectMemoryRead
+                    if(leftIsMemRead || rightIsMemRead) {
+                        val oper = if(srcExpr.operator in ComparisonOperators) srcExpr.operator else srcExpr.operator+'='
+                        val value = if(leftIsMemRead) srcExpr.right else srcExpr.left
+                        Pair(oper, value)
+                    } else {
+                        Pair("", null)
+                    }
+                }
+                is PrefixExpression -> {
+                    // ~@(addr) or -@(addr) etc.
+                    Pair(srcExpr.operator, srcExpr.expression)
+                }
+                else -> Pair("", null)
+            }
+            if(augmentedValue!=null) {
+                val assign = PtAugmentedAssign(operator, srcAssign.position)
+                val memByte = PtMemoryByte(srcAssign.position)
+                memByte.add(transformExpression(address))
+                val target = PtAssignTarget(false, srcAssign.position)
+                target.add(memByte)
+                assign.add(target)
+                assign.add(transformExpression(augmentedValue))
+                return assign
+            }
+        }
+
         if(srcAssign.isAugmentable) {
             require(srcAssign.target.multi==null)
             val srcExpr = srcAssign.value
@@ -220,12 +283,20 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
                             }
                         } else {
                             if(structSize>1) {
-                                val multiplication = PtBinaryExpression("*", DataType.UWORD, srcAssign.position)
-                                multiplication.add(transformExpression(augmentedValue))
-                                multiplication.add(PtNumber(BaseDataType.UWORD, structSize.toDouble(), srcAssign.position))
+                                val offset: PtBinaryExpression
+                                if(structSize in powersOfTwoInt) {
+                                    // use shift instead of multiply for powers of two
+                                    offset = PtBinaryExpression("<<", DataType.UWORD, srcAssign.position)
+                                    offset.add(transformExpression(augmentedValue))
+                                    offset.add(PtNumber(BaseDataType.UBYTE, log2(structSize.toDouble()), srcAssign.position))
+                                } else {
+                                    offset = PtBinaryExpression("*", DataType.UWORD, srcAssign.position)
+                                    offset.add(transformExpression(augmentedValue))
+                                    offset.add(PtNumber(BaseDataType.UWORD, structSize.toDouble(), srcAssign.position))
+                                }
                                 val assign = PtAugmentedAssign(operator, srcAssign.position)
                                 assign.add(transform(srcAssign.target))
-                                assign.add(multiplication)
+                                assign.add(offset)
                                 return assign
                             } else {
                                 // size = 1, no multiplication needed
@@ -277,7 +348,8 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
     }
 
     private fun transform(identifier: IdentifierReference): PtExpression {
-        val (target, type) = identifier.targetNameAndType(program)
+        val (target, types) = identifier.targetNameAndTypes(program)
+        val type = if(types.size==1) types[0] else DataType.UNDEFINED
         return PtIdentifier(target, type, identifier.position)
     }
 
@@ -301,7 +373,7 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
         }
 
 
-        val (vardecls, statements) = srcBlock.statements.partition { it is VarDecl }
+        val (vardecls, statements) = srcBlock.statements.partition { it is VarDecl || it is MemorySlabReservation }
         val src = srcBlock.definingModule.source
         val block = PtBlock(srcBlock.name, srcBlock.isInLibrary, src,
             PtBlock.Options(srcBlock.address, forceOutput, noSymbolPrefixing, veraFxMuls, ignoreUnused),
@@ -318,15 +390,36 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
         makeScopeVarsDecls(vardecls).forEach { block.add(it) }
         for (stmt in statements)
             block.add(transformStatement(stmt))
+        recombineMemorySlabAssignments(block)
         return block
     }
 
-    private fun makeScopeVarsDecls(vardecls: Iterable<Statement>): Iterable<PtNamedNode> {
-        val decls = mutableListOf<PtNamedNode>()
+    private fun makeScopeVarsDecls(vardecls: Iterable<Statement>): Iterable<PtNode> {
+        val decls = mutableListOf<PtNode>()
         vardecls.forEach {
-            decls.add(transformStatement(it as VarDecl) as PtNamedNode)
+            decls.add(transformStatement(it))
         }
         return decls
+    }
+
+    private fun recombineMemorySlabAssignments(container: PtNode) {
+        val children = container.children
+        var i = 0
+        while (i < children.size) {
+            val varNode = children[i] as? PtVariable ?: run { i++; continue }
+            if (varNode.value != null) { i++; continue }
+            val assignNode = children.getOrNull(i + 1) as? PtAssignment ?: run { i++; continue }
+            if (!assignNode.isVarInitializer) { i++; continue }
+            val target = assignNode.children.getOrNull(0) as? PtAssignTarget
+            val targetIdent = target?.children?.getOrNull(0) as? PtIdentifier
+            if (targetIdent == null || targetIdent.name != varNode.name) { i++; continue }
+            val value = assignNode.children.getOrNull(1) as? PtConstant
+            if (value == null || value.memorySlab == null) { i++; continue }
+            val constant = PtConstant(varNode.name, varNode.type, null, value.memorySlab, varNode.position)
+            container.removeChildAt(i)
+            container.removeChildAt(i)
+            container.add(i, constant)
+        }
     }
 
     private fun transform(srcBranch: ConditionalBranch): PtConditionalBranch {
@@ -389,21 +482,21 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
         return forloop
     }
 
-    private fun transform(srcCall: FunctionCallStatement): PtExpression {
+    private fun transform(srcCall: FunctionCallStatement): PtNode {
         val singleName = srcCall.target.nameInSource.singleOrNull()
         if(singleName!=null && singleName in BuiltinFunctions) {
             // it is a builtin function. Create a special Ast node for that.
-            val type = builtinFunctionReturnType(singleName).getOrUndef()
+            val types = builtinFunctionReturnTypes(singleName).map { it.getOrUndef() }.toTypedArray()
             val noSideFx = BuiltinFunctions.getValue(singleName).pure
-            val call = PtBuiltinFunctionCall(singleName, true, noSideFx, type, srcCall.position)
+            val call = PtFunctionCall(singleName, true, noSideFx, types, srcCall.position)
             for (arg in srcCall.args)
                 call.add(transformExpression(arg))
             return call
         }
 
-        // regular function call
-        val (target, type) = srcCall.target.targetNameAndType(program)
-        val call = PtFunctionCall(target, true, type, srcCall.position)
+        // regular function call, and because it's a statement, it's void
+        val (target, _) = srcCall.target.targetNameAndTypes(program)
+        val call = PtFunctionCall(target, false, false, emptyArray(), srcCall.position)
         for (arg in srcCall.args)
             call.add(transformExpression(arg))
         return call
@@ -416,25 +509,24 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
             if (builtinFunc != null) {
                 // it's a builtin function. Create special node type for this.
                 val noSideFx = builtinFunc.pure
-                val type = srcCall.inferType(program).getOrElse { throw FatalAstException("unknown dt") }
-                val call = PtBuiltinFunctionCall(singleName, false, noSideFx, type, srcCall.position)
+                val types = builtinFunctionReturnTypes(singleName).map { it.getOrUndef() }.toTypedArray()
+                val call = PtFunctionCall(singleName, true, noSideFx, types, srcCall.position)
                 for (arg in srcCall.args)
                     call.add(transformExpression(arg))
                 return call
             }
         }
 
-        val (target, _) = srcCall.target.targetNameAndType(program)
-        val iType = srcCall.inferType(program)
-        val call = PtFunctionCall(target, iType.isUnknown && srcCall.parent !is Assignment, iType.getOrElse { DataType.UNDEFINED }, srcCall.position)
+        val (target, returntypes) = srcCall.target.targetNameAndTypes(program)
+        val call = PtFunctionCall(target, false, false, returntypes, srcCall.position)
         for (arg in srcCall.args)
             call.add(transformExpression(arg))
         return call
     }
 
-    private fun transform(initializer: StaticStructInitializer): PtBuiltinFunctionCall {
+    private fun transform(initializer: StaticStructInitializer): PtFunctionCall {
         val targetStruct = initializer.structname.targetStructDecl()!!
-        val call = PtBuiltinFunctionCall("prog8_lib_structalloc", false, true, DataType.pointer(targetStruct), initializer.position)
+        val call = PtFunctionCall("prog8_lib_structalloc", true, true, arrayOf(DataType.pointer(targetStruct)), initializer.position)
         for (arg in initializer.args)
             call.add(transformExpression(arg))
         return call
@@ -643,7 +735,7 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
     }
 
     private fun transformSub(srcSub: Subroutine): PtSub {
-        val (vardecls, statements) = srcSub.statements.partition { it is VarDecl }
+        val (vardecls, statements) = srcSub.statements.partition { it is VarDecl || it is MemorySlabReservation }
         // if a sub returns 'str', replace with uword.  Simplified AST and I.R. don't contain 'str' datatype anymore.
         val returnTypes = srcSub.returntypes.map {
             if(it.isString) DataType.UWORD else it
@@ -656,6 +748,7 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
         makeScopeVarsDecls(vardecls).forEach { sub.add(it) }
         for (statement in statements)
             sub.add(transformStatement(statement))
+        recombineMemorySlabAssignments(sub)
         return sub
     }
 
@@ -678,7 +771,30 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
                     srcVar.position
                 )
             }
-            VarDeclType.CONST -> return PtConstant(srcVar.name, srcVar.datatype, (srcVar.value as NumericLiteral).number, srcVar.position)
+            VarDeclType.CONST -> {
+                val cv = srcVar.value?.constValue(program)
+                if (cv != null) {
+                    return PtConstant(srcVar.name, srcVar.datatype, cv.number, null, srcVar.position)
+                }
+                when (val constVal = srcVar.value) {
+                    is NumericLiteral -> {
+                        return PtConstant(srcVar.name, srcVar.datatype, constVal.number, null, srcVar.position)
+                    }
+                    is AddressOf -> {
+                        val numericValue = constVal.constValue(program)?.number
+                        if(numericValue!=null) {
+                            return PtConstant(srcVar.name, srcVar.datatype, numericValue, null, srcVar.position)
+                        }
+                        throw FatalAstException("const pointer address could not be computed at ${srcVar.position}")
+                    }
+                    is MemorySlabRef -> {
+                        val slab = slabDefs[constVal.slabName] ?: throw FatalAstException("referenced memory slab '${constVal.slabName}' not defined at ${constVal.position}")
+                        return PtConstant(srcVar.name, srcVar.datatype, null, slab, srcVar.position)
+                    }
+                    else ->
+                        throw FatalAstException("const value must be a number, address-of, or memory reference")
+                }
+            }
             VarDeclType.MEMORY -> return PtMemMapped(srcVar.name, srcVar.datatype, (srcVar.value as NumericLiteral).number.toUInt(), srcVar.arraysize?.constIndex()?.toUInt(), srcVar.position)
         }
     }
@@ -757,10 +873,23 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
         val arr = PtArray(srcArr.inferType(program).getOrElse { throw FatalAstException("array must know its type") }, srcArr.position)
         for (elt in srcArr.value) {
             val child = transformExpression(elt)
-            require(child is PtAddressOf || child is PtBool || child is PtNumber || (child is PtBuiltinFunctionCall && child.name=="prog8_lib_structalloc")) {"array element invalid type $child" }
+            require(child is PtAddressOf || child is PtBool || child is PtNumber ||
+                    child is PtConstant ||
+                    (child is PtFunctionCall && child.builtin && child.name=="prog8_lib_structalloc")) {"array element invalid type $child" }
             arr.add(child)
         }
         return arr
+    }
+
+    private fun transform(reservation: MemorySlabReservation): PtNode {
+        val slab = StMemorySlab("memory_${reservation.slabName}", reservation.size, reservation.align, null)
+        slabDefs[reservation.slabName] = slab
+        return PtMemorySlabReservation(reservation.slabName, reservation.size, reservation.align, reservation.position)
+    }
+
+    private fun transform(ref: MemorySlabRef): PtConstant {
+        val slab = slabDefs[ref.slabName] ?: throw FatalAstException("referenced memory slab '${ref.slabName}' not defined at ${ref.position}")
+        return PtConstant(ref.slabName, DataType.UWORD, null, slab, ref.position)
     }
 
     private fun transform(srcExpr: BinaryExpression): PtExpression {
@@ -793,7 +922,9 @@ class SimplifiedAstMaker(private val program: Program, private val errors: IErro
                 else -> throw FatalAstException("unknown deref at ${srcExpr.position}")
             }
         } else {
-            if(srcExpr.left.inferType(program).isPointer || srcExpr.right.inferType(program).isPointer) {
+            val leftIsPtr = srcExpr.left.inferType(program).isPointer
+            val rightIsPtr = srcExpr.right.inferType(program).isPointer
+            if(leftIsPtr || rightIsPtr) {
                 if (srcExpr.operator == "+" || srcExpr.operator == "-") return transformWithPointerArithmetic(srcExpr)
                 else if (srcExpr.operator in ComparisonOperators) return transformWithPointerComparison(srcExpr)
             } else if(srcExpr.left.inferType(program).isPointer) {

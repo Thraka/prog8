@@ -56,13 +56,16 @@ fun Program.optimizeStatements(errors: IErrorReporter,
 }
 
 fun Program.inlineSubroutines(options: CompilationOptions): Int {
+    // Skip inlining when optimizations are disabled (-noopt flag)
+    if (!options.optimize) return 0
+
     val inliner = Inliner(this, options)
     inliner.visit(this)
     return inliner.applyModifications()
 }
 
-fun Program.simplifyExpressions(errors: IErrorReporter) : Int {
-    val opti = ExpressionSimplifier(this, errors)
+fun Program.simplifyExpressions(errors: IErrorReporter, options: CompilationOptions) : Int {
+    val opti = ExpressionSimplifier(this, errors, options)
     opti.visit(this)
     return opti.applyModifications()
 }

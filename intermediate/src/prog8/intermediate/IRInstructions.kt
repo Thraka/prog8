@@ -4,6 +4,35 @@ import prog8.code.core.AssemblyError
 import prog8.code.core.RegisterOrStatusflag
 import prog8.code.core.toHex
 
+/**
+ * Inline value class representing a 16-bit memory address (0-$ffff).
+ */
+@JvmInline
+value class MemoryAddress(val value: UInt) {
+    init { require(value <= 0xffffu) { "address out of range: $value" } }
+    override fun toString(): String = "$" + value.toString(16).padStart(2, '0')
+    fun toHex(): String = "$" + value.toString(16)
+    operator fun plus(other: UInt): MemoryAddress = MemoryAddress(value + other)
+    operator fun plus(other: Int): MemoryAddress = MemoryAddress(value + other.toUInt())
+    operator fun minus(other: UInt): MemoryAddress = MemoryAddress(value - other)
+    operator fun minus(other: Int): MemoryAddress = MemoryAddress(value - other.toUInt())
+}
+
+/** Convert a UInt to a MemoryAddress. */
+fun UInt.toAddress(): MemoryAddress = MemoryAddress(this)
+
+/**
+ * Inline value class representing a virtual register number (0-99999).
+ * Supports comparison with Int and other RegisterNum values.
+ */
+@JvmInline
+value class RegisterNum(val value: Int): Comparable<RegisterNum> {
+    init { require(value in 0..99999) { "register number out of range: $value" } }
+    override fun toString(): String = "r$value"
+    override fun compareTo(other: RegisterNum): Int = value.compareTo(other.value)
+    operator fun compareTo(other: Int): Int = value.compareTo(other)
+}
+
 /*
 
 Intermediate Representation instructions for the IR Virtual machine.
@@ -27,10 +56,8 @@ NOTE: status flags are only affected by the CMP instruction or explicit CLC/SEC,
 
 Instruction set is mostly a load/store architecture, there are few instructions operating on memory directly.
 
-Value types: integers (.b=byte=8 bits, .w=word=16 bits) and float (.f=64 bits). Omitting it defaults to b if the instruction requires a type.
-Currently ther is NO support for 24 or 32 bits integers.
-There is no distinction between signed and unsigned integers.
-Instead, a different instruction is used if a distinction should be made (for example div and divs).
+Value types: integers (.b=byte=8 bits, .w=word=16 bits, .l=long=32 bits) and float (.f=64 bits). Omitting it defaults to b if the instruction requires a type.
+There is no distinction between signed and unsigned for many instructions. Instead, a different instruction is used if a distinction should be made (for example div and divs).
 Floating point operations are just 'f' typed regular instructions, however there are a few unique fp conversion instructions.
 
 NOTE: Labels in source text should always start with an underscore.
@@ -38,14 +65,13 @@ NOTE: Labels in source text should always start with an underscore.
 
 LOAD/STORE
 ----------
-All have type b or w or f.
+All have type b or w or l or f.
 
 load        reg1,         value       - load immediate value into register. If you supply a symbol, loads the *address* of the symbol! (variable values are loaded from memory via the loadm instruction)
 loadm       reg1,         address     - load reg1 with value at memory address
-loadi       reg1, reg2                - load reg1 with value at memory indirect, memory pointed to by reg2
+loadi       reg1, reg2,   value       - load reg1 with value in memory indirect, pointed to by reg2 + offsetvalue 0-65535 (often used to read a field from a pointer to a struct, or with offset=0 just straight from the pointer)
 loadx       reg1, reg2,   address     - load reg1 with value at memory address indexed by value in reg2 (0-255, a byte)
 loadr       reg1, reg2                - load reg1 with value in register reg2,  "reg1 = reg2"
-loadfield   reg1, reg2,   value       - load reg1 with value in memory indirect, pointed to by reg2 + value 0-65535 (gets a field from a pointer to a struct, like LOADI with additional field offset 0-65535)
 loadha      reg1                      - load cpu hardware register A into reg1.b
 loadhx      reg1                      - load cpu hardware register X into reg1.b
 loadhy      reg1                      - load cpu hardware register Y into reg1.b
@@ -55,12 +81,11 @@ loadhxy     reg1                      - load cpu hardware register pair XY into 
 loadhfaczero       fpreg1             - load "cpu hardware register" fac0 into freg1.f
 loadhfacone        fpreg1             - load "cpu hardware register" fac1 into freg1.f
 storem      reg1,         address     - store reg1 at memory address
-storei      reg1, reg2                - store reg1 at memory indirect, memory pointed to by reg2
+storei      reg1, reg2,   value       - store reg1 in memory indirect, pointed to by reg2 + offsetvalue 0-65535 (often used to write a field from a pointer to a struct, or with offset=0 just straight to the pointer)
+storezi     reg1,         value       - store zero at memory pointed to by reg1 + offsetvalue 0-65535  (just like storei, but a shorthand to store a constant 0)
 storex      reg1, reg2,   address     - store reg1 at memory address, indexed by value in reg2 (0-255, a byte)
 storezm                   address     - store zero at memory address
-storezi     reg1                      - store zero at memory pointed to by reg1
 storezx     reg1,         address     - store zero at memory address, indexed by value in reg1 (0-255, a byte)
-storefield  reg1, reg2,   value       - store reg1 in memory indirect, pointed to by reg2 + value 0-65535 (set a field from a pointer to a struct, like STOREI with additional field offset 0-65535)
 storeha     reg1                      - store reg1.b into cpu hardware register A
 storehx     reg1                      - store reg1.b into cpu hardware register X
 storehy     reg1                      - store reg1.b into cpu hardware register Y
@@ -99,7 +124,7 @@ returni            number             - like return, but also returns the immedi
 
 BRANCHING and CONDITIONALS
 --------------------------
-All have type b or w except the branches that only check status bits.
+All have type b or w or l except the branches that only check status bits.
 
 bstcc                         address   - branch to location if Status bit Carry is clear
 bstcs                         address   - branch to location if Status bit Carry is set
@@ -133,7 +158,7 @@ bgesr       reg1, reg2,       address   - jump to location in program given by l
 
 ARITHMETIC
 ----------
-All have type b or w or f. Note: result types are the same as operand types! E.g. byte*byte->byte.
+All have type b or w or l or f. Note: result types are the same as operand types! E.g. byte*byte->byte.
 
 exts        reg1, reg2                      - reg1 = signed extension of reg2 (byte to word, or word to long)  (note: unlike M68k, exts.b -> word and exts.w -> long.)
 ext         reg1, reg2                      - reg1 = unsigned extension of reg2 (which in practice just means clearing the MSB / MSW) (note: unlike M68k, ext.b -> word and ext.w -> long. )
@@ -149,34 +174,38 @@ addm        reg1,              address      - memory at address += reg1
 subr        reg1, reg2                      - reg1 -= reg2 
 sub         reg1,              value        - reg1 -= value 
 subm        reg1,              address      - memory at address -= reg1 
-mulr        reg1, reg2                      - unsigned multiply reg1 *= reg2  note: byte*byte->byte, no type extension to word!
-mulsr       reg1, reg2                      - signed multiply reg1 *= reg2  note: byte*byte->byte, no type extension to word!
-mul         reg1,              value        - unsigned multiply reg1 *= value  note: byte*byte->byte, no type extension to word!
-muls        reg1,              value        - signed multiply reg1 *= value  note: byte*byte->byte, no type extension to word!
-mulm        reg1,              address      - unsigned memory at address  *= reg2  note: byte*byte->byte, no type extension to word!
-mulsm       reg1,              address      - signed memory at address  *= reg2  note: byte*byte->byte, no type extension to word!
+mulr        reg1, reg2                      - unsigned multiply reg1 *= reg2  note: byte*byte->byte, no type extension!
+mulsr       reg1, reg2                      - signed multiply reg1 *= reg2  note: byte*byte->byte, no type extension!
+mul         reg1,              value        - unsigned multiply reg1 *= value  note: byte*byte->byte, no type extension!
+muls        reg1,              value        - signed multiply reg1 *= value  note: byte*byte->byte, no type extension!
+mulm        reg1,              address      - unsigned memory at address  *= reg2  note: byte*byte->byte, no type extension!
+mulsm       reg1,              address      - signed memory at address  *= reg2  note: byte*byte->byte, no type extension!
 divr        reg1, reg2                      - unsigned division reg1 /= reg2  note: division by zero yields max int $ff/$ffff
-divsr       reg1, reg2                      - signed division reg1 /= reg2  note: division by zero yields max signed int 127 / 32767
+divsr       reg1, reg2                      - signed division reg1 /= reg2  note: division by zero yields max signed int 127 / 32767 / 2147483647
 div         reg1,              value        - unsigned division reg1 /= value  note: division by zero yields max int $ff/$ffff
-divs        reg1,              value        - signed division reg1 /= value  note: division by zero yields max signed int 127 / 32767
+divs        reg1,              value        - signed division reg1 /= value  note: division by zero yields max signed int 127 / 32767 / 2147483647
 divm        reg1,              address      - memory at address /= reg2  note: division by zero yields max int $ff/$ffff
-divsm       reg1,              address      - signed memory at address /= reg2  note: division by zero yields max signed int 127 / 32767
+divsm       reg1,              address      - signed memory at address /= reg2  note: division by zero yields max signed int 127 / 32767 / 2147483647
 modr        reg1, reg2                      - remainder (modulo) of unsigned division reg1 %= reg2  note: division by zero yields max signed int $ff/$ffff
 mod         reg1,              value        - remainder (modulo) of unsigned division reg1 %= value  note: division by zero yields max signed int $ff/$ffff
+modsr       reg1, reg2                      - remainder (modulo) of signed division reg1 %= reg2  note: division by zero yields max signed long
+mods       reg1,              value        - remainder (modulo) of signed division reg1 %= value  note: division by zero yields max signed long
 divmodr     reg1, reg2                      - unsigned division reg1/reg2, storing division and remainder on value stack (so need to be POPped off)
 divmod      reg1,              value        - unsigned division reg1/value, storing division and remainder on value stack (so need to be POPped off)
+sdivmodr    reg1, reg2                      - signed division reg1/reg2, storing division and remainder on value stack (so need to be POPped off)
+sdivmod     reg1,              value        - signed division reg1/value, storing division and remainder on value stack (so need to be POPped off)
 sqrt        reg1, reg2                      - reg1 is the square root of reg2 (reg2 can be l.1, .w or .b, result type in reg1 is .w or .b)  you can also use it with floating point types, fpreg1 and fpreg2 (result is also .f)
 square      reg1, reg2                      - reg1 is the square of reg2 (reg2 can be .w or .b, result type in reg1 is always .b)  you can also use it with floating point types, fpreg1 and fpreg2 (result is also .f)
 sgn         reg1, reg2                      - reg1.b is the sign of reg2 (or fpreg1, if sgn.f) (0.b, 1.b or -1.b)
 cmp         reg1, reg2                      - set processor status bits C, N, Z according to comparison of reg1 with reg2. (semantics taken from 6502/68000 CMP instruction)
 cmpi        reg1,              value        - set processor status bits C, N, Z according to comparison of reg1 with immediate value. (semantics taken from 6502/68000 CMP instruction)
 
-NOTE: because mul/div are constrained (truncated) to remain in 8 or 16 bits, there is NO NEED for separate signed/unsigned mul and div instructions. The result is identical.
+NOTE: because mul/div are constrained (truncated) to remain in 8 or 16 or 32 bits, there is NO NEED for separate signed/unsigned mul and div instructions. The result is identical.
 
 
 LOGICAL/BITWISE
 ---------------
-All have type b or w.
+All have type b or w or l.
 
 andr        reg1, reg2                       - reg1 = reg1 bitwise and reg2
 and         reg1,          value             - reg1 = reg1 bitwise and value
@@ -253,19 +282,18 @@ lsigw [l]     reg1, reg2                  - reg1 becomes the least significant w
 msigb [w, l]  reg1, reg2                  - reg1 becomes the most significant byte of the word (or long) in reg2
 msigw [l]     reg1, reg2                  - reg1 becomes the most significant word of the long in reg2
 bsigb [l]     reg1, reg2                  - reg1 becomes the bank byte of the long in reg2 (bits 16-23)
+midb  [l]     reg1, reg2                  - reg1 becomes the 'mid' byte of the long in reg2 (bits 8-15)
 concat [b, w] reg1, reg2, reg3            - reg1.w/l = 'concatenate' two registers: lsb/lsw of reg2 (as msb) and lsb/lsw of reg3 (as lsb) into word or int)
 push [b, w, f]   reg1                     - push value in reg1 on the stack
 pop [b, w, f]    reg1                     - pop value from stack into reg1
 pushst                                    - push status register bits to stack
 popst                                     - pop status register bits from stack
-swap          reg1, reg2                  - exchange values in registers 1 and 2 (all datatypes)
  */
 
 enum class Opcode {
     NOP,
     LOAD,       // note: LOAD <symbol>  gets you the address of the symbol, whereas LOADM <symbol> would get you the value stored at that location
     LOADM,
-    LOADI,      // the only opcode that allows r1 and r2 to be the same; because this saves a lot of intermediary registers and loads to dereference a pointer chain
     LOADX,
     LOADR,
     LOADHA,
@@ -274,11 +302,10 @@ enum class Opcode {
     LOADHAX,
     LOADHAY,
     LOADHXY,
-    LOADFIELD,
+    LOADI,
     LOADHFACZERO,
     LOADHFACONE,
     STOREM,
-    STOREI,
     STOREX,
     STOREZM,
     STOREZI,
@@ -289,7 +316,7 @@ enum class Opcode {
     STOREHAX,
     STOREHAY,
     STOREHXY,
-    STOREFIELD,
+    STOREI,
     STOREHFACZERO,
     STOREHFACONE,
 
@@ -351,8 +378,12 @@ enum class Opcode {
     DIVSM,
     MODR,
     MOD,
+    MODSR,
+    MODS,
     DIVMODR,
     DIVMOD,
+    SDIVMODR,
+    SDIVMOD,
     SQRT,
     SQUARE,
     SGN,
@@ -430,8 +461,8 @@ enum class Opcode {
     MSIGB,
     MSIGW,
     BSIGB,
+    MIDB,
     CONCAT,
-    SWAP,
     BREAKPOINT,
     ALIGN
 }
@@ -495,16 +526,17 @@ val OpcodesThatEndSSAblock = OpcodesThatBranchUnconditionally + setOf(
     Opcode.BLES
 )
 
-val OpcodesThatSetStatusbitsIncludingCarry = arrayOf(
+val OpcodesThatSetStatusbitsIncludingCarry = setOf(
     Opcode.BIT,
     Opcode.CMP,
     Opcode.CMPI,
     Opcode.SGN
 )
-val OpcodesThatSetStatusbitsButNotCarry = arrayOf(
+
+// Note: never include CALL, SYSCALL and CONCAT here because they should never be assumed to have set sensible status bits.
+val OpcodesThatSetStatusbitsButNotCarry = setOf(
     Opcode.LOAD,
     Opcode.LOADM,
-    Opcode.LOADI,
     Opcode.LOADX,
     Opcode.LOADR,
     Opcode.LOADHA,
@@ -513,7 +545,7 @@ val OpcodesThatSetStatusbitsButNotCarry = arrayOf(
     Opcode.LOADHAX,
     Opcode.LOADHAY,
     Opcode.LOADHXY,
-    Opcode.LOADFIELD,
+    Opcode.LOADI,
     Opcode.NEG,
     Opcode.NEGM,
     Opcode.INC,
@@ -534,10 +566,10 @@ val OpcodesThatSetStatusbitsButNotCarry = arrayOf(
     Opcode.MSIGB,
     Opcode.MSIGW,
     Opcode.BSIGB,
-    Opcode.CONCAT
+    Opcode.MIDB
 )
 
-val OpcodesThatDependOnCarry = arrayOf(
+val OpcodesThatDependOnCarry = setOf(
     Opcode.BSTCC,
     Opcode.BSTCS,
     Opcode.BSTPOS,
@@ -548,10 +580,9 @@ val OpcodesThatDependOnCarry = arrayOf(
     Opcode.ROXRM
 )
 
-val OpcodesThatLoad = arrayOf(
+val OpcodesThatLoad = setOf(
     Opcode.LOAD,
     Opcode.LOADM,
-    Opcode.LOADI,
     Opcode.LOADX,
     Opcode.LOADR,
     Opcode.LOADHA,
@@ -560,11 +591,24 @@ val OpcodesThatLoad = arrayOf(
     Opcode.LOADHAX,
     Opcode.LOADHAY,
     Opcode.LOADHXY,
-    Opcode.LOADFIELD,
+    Opcode.LOADI,
     Opcode.LOADHFACZERO,
     Opcode.LOADHFACONE
 )
+
 val OpcodesThatSetStatusbits = OpcodesThatSetStatusbitsButNotCarry + OpcodesThatSetStatusbitsIncludingCarry
+
+val OpcodesWithSideEffects = OpcodesThatBranch + setOf(
+    Opcode.PUSH,
+    Opcode.POP,
+    Opcode.PUSHST,
+    Opcode.POPST,
+    Opcode.DIVMOD,
+    Opcode.DIVMODR,
+    Opcode.SDIVMOD,
+    Opcode.SDIVMODR,
+    Opcode.BREAKPOINT
+)
 
 
 enum class IRDataType {
@@ -662,33 +706,29 @@ val instructionFormats = mutableMapOf(
     Opcode.NOP        to InstructionFormat.from("N"),
     Opcode.LOAD       to InstructionFormat.from("BWL,>r1,<i     | F,>fr1,<i"),
     Opcode.LOADM      to InstructionFormat.from("BWL,>r1,<a     | F,>fr1,<a"),
-    Opcode.LOADI      to InstructionFormat.from("BWL,>r1,<r2    | F,>fr1,<r1"),
     Opcode.LOADX      to InstructionFormat.from("BWL,>r1,<r2,<a | F,>fr1,<r1,<a"),
     Opcode.LOADR      to InstructionFormat.from("BWL,>r1,<r2    | F,>fr1,<fr2"),
-    Opcode.LOADHA     to InstructionFormat.from("B,>r1"),
     Opcode.LOADHA     to InstructionFormat.from("B,>r1"),
     Opcode.LOADHX     to InstructionFormat.from("B,>r1"),
     Opcode.LOADHY     to InstructionFormat.from("B,>r1"),
     Opcode.LOADHAX    to InstructionFormat.from("W,>r1"),
     Opcode.LOADHAY    to InstructionFormat.from("W,>r1"),
     Opcode.LOADHXY    to InstructionFormat.from("W,>r1"),
-    Opcode.LOADFIELD  to InstructionFormat.from("BWL,>r1,<r2,<i | F,>fr1,<r1,<i"),
+    Opcode.LOADI  to InstructionFormat.from("BWL,>r1,<r2,<i | F,>fr1,<r1,<i"),
     Opcode.LOADHFACZERO to InstructionFormat.from("F,>fr1"),
     Opcode.LOADHFACONE  to InstructionFormat.from("F,>fr1"),
     Opcode.STOREM     to InstructionFormat.from("BWL,<r1,>a     | F,<fr1,>a"),
-    Opcode.STOREI     to InstructionFormat.from("BWL,<r1,<r2    | F,<fr1,<r1"),
     Opcode.STOREX     to InstructionFormat.from("BWL,<r1,<r2,>a | F,<fr1,<r1,>a"),
     Opcode.STOREZM    to InstructionFormat.from("BWL,>a         | F,>a"),
-    Opcode.STOREZI    to InstructionFormat.from("BWL,<r1        | F,<r1"),
+    Opcode.STOREZI    to InstructionFormat.from("BWL,<r1,<i     | F,<r1,<i"),
     Opcode.STOREZX    to InstructionFormat.from("BWL,<r1,>a     | F,<r1,>a"),
-    Opcode.STOREHA    to InstructionFormat.from("B,<r1"),
     Opcode.STOREHA    to InstructionFormat.from("B,<r1"),
     Opcode.STOREHX    to InstructionFormat.from("B,<r1"),
     Opcode.STOREHY    to InstructionFormat.from("B,<r1"),
     Opcode.STOREHAX   to InstructionFormat.from("W,<r1"),
     Opcode.STOREHAY   to InstructionFormat.from("W,<r1"),
     Opcode.STOREHXY   to InstructionFormat.from("W,<r1"),
-    Opcode.STOREFIELD to InstructionFormat.from("BWL,<r1,<r2,<i | F,<fr1,<r1,<i"),
+    Opcode.STOREI to InstructionFormat.from("BWL,<r1,<r2,<i | F,<fr1,<r1,<i"),
     Opcode.STOREHFACZERO  to InstructionFormat.from("F,<fr1"),
     Opcode.STOREHFACONE  to InstructionFormat.from("F,<fr1"),
     Opcode.JUMP       to InstructionFormat.from("N,<a"),
@@ -750,8 +790,12 @@ val instructionFormats = mutableMapOf(
     Opcode.SGN        to InstructionFormat.from("BWL,>r1,<r2   | F,>r1,<fr1"),
     Opcode.MODR       to InstructionFormat.from("BW,<>r1,<r2"),
     Opcode.MOD        to InstructionFormat.from("BW,<>r1,<i"),
+    Opcode.MODSR      to InstructionFormat.from("BWL,<>r1,<r2"),
+    Opcode.MODS       to InstructionFormat.from("BWL,<>r1,<i"),
     Opcode.DIVMODR    to InstructionFormat.from("BW,<>r1,<r2"),
     Opcode.DIVMOD     to InstructionFormat.from("BW,<>r1,<i"),
+    Opcode.SDIVMODR   to InstructionFormat.from("BW,<>r1,<r2"),
+    Opcode.SDIVMOD    to InstructionFormat.from("BW,<>r1,<i"),
     Opcode.CMP        to InstructionFormat.from("BWL,<r1,<r2"),
     Opcode.CMPI       to InstructionFormat.from("BWL,<r1,<i"),
     Opcode.EXT        to InstructionFormat.from("BWL,>r1,<r2"),
@@ -817,12 +861,12 @@ val instructionFormats = mutableMapOf(
     Opcode.MSIGB      to InstructionFormat.from("WL,>r1,<r2"),
     Opcode.MSIGW      to InstructionFormat.from("L,>r1,<r2"),
     Opcode.BSIGB      to InstructionFormat.from("L,>r1,<r2"),
+    Opcode.MIDB       to InstructionFormat.from("L,>r1,<r2"),
     Opcode.PUSH       to InstructionFormat.from("BWL,<r1       | F,<fr1"),
     Opcode.POP        to InstructionFormat.from("BWL,>r1       | F,>fr1"),
     Opcode.PUSHST     to InstructionFormat.from("N"),
     Opcode.POPST      to InstructionFormat.from("N"),
     Opcode.CONCAT     to InstructionFormat.from("BW,<>r1,<r2,<r3"),
-    Opcode.SWAP       to InstructionFormat.from("BWL,<>r1,<>r2  | F,<>fr1,<>fr2"),
     Opcode.CLC        to InstructionFormat.from("N"),
     Opcode.SEC        to InstructionFormat.from("N"),
     Opcode.CLI        to InstructionFormat.from("N"),
@@ -836,12 +880,10 @@ class FunctionCallArgs(
     var arguments: List<ArgumentSpec>,
     val returns: List<RegSpec>
 ) {
-    class RegSpec(val dt: IRDataType, val registerNum: Int, val cpuRegister: RegisterOrStatusflag?)
-    class ArgumentSpec(val name: String, val address: Int?, val reg: RegSpec) {
+    class RegSpec(val dt: IRDataType, val registerNum: RegisterNum, val cpuRegister: RegisterOrStatusflag?)
+    class ArgumentSpec(val name: String, val address: UInt?, val reg: RegSpec) {
         init {
-            require(address==null || address>=0) {
-                "address must be >=0"
-            }
+            // UInt is always non-negative
         }
     }
 }
@@ -849,14 +891,14 @@ class FunctionCallArgs(
 data class IRInstruction(
     val opcode: Opcode,
     val type: IRDataType?=null,
-    val reg1: Int?=null,        // 0-$ffff
-    val reg2: Int?=null,        // 0-$ffff
-    val reg3: Int?=null,        // 0-$ffff
-    val fpReg1: Int?=null,      // 0-$ffff
-    val fpReg2: Int?=null,      // 0-$ffff
-    val immediate: Int?=null,   // 0-$ff or $ffff if word
+    val reg1: Int?=null,        // 0-99999
+    val reg2: Int?=null,        // 0-99999
+    val reg3: Int?=null,        // 0-99999
+    val fpReg1: RegisterNum?=null,      // 0-99999
+    val fpReg2: RegisterNum?=null,      // 0-99999
+    val immediate: Int?=null,   // 0-$ff or $ffff or $ffffffff
     val immediateFp: Double?=null,
-    val address: Int?=null,       // 0-$ffff
+    val address: MemoryAddress? = null,    // 0-$ffff
     val labelSymbol: String?=null,          // symbolic label name as alternative to address (so only for Branch/jump/call Instructions!)
     private val symbolOffset: Int? = null,     // offset to add on labelSymbol (used to index into an array variable)
     var branchTarget: IRCodeChunkBase? = null,    // Will be linked after loading in IRProgram.linkChunks()! This is the chunk that the branch labelSymbol points to.
@@ -882,11 +924,13 @@ data class IRInstruction(
         require(reg1==null || reg1 in 0..99999) {"reg1 out of bounds"}
         require(reg2==null || reg2 in 0..99999) {"reg2 out of bounds"}
         require(reg3==null || reg3 in 0..99999) {"reg3 out of bounds"}
-        require(fpReg1==null || fpReg1 in 0..99999) {"fpReg1 out of bounds"}
-        require(fpReg2==null || fpReg2 in 0..99999) {"fpReg2 out of bounds"}
-        if(reg1!=null && reg2!=null) require(reg1!=reg2 || opcode==Opcode.LOADI) {"reg1 must not be same as reg2"}  // note: this is ok for fpRegs as these are always the same type.  LOADI is also an exception, hopefully this can work, because it saves a lot of intermediary registers when dereferencing a pointer chain
-        if(reg1!=null && reg3!=null) require(reg1!=reg3) {"reg1 must not be same as reg3"}  // note: this is ok for fpRegs as these are always the same type
-        if(reg2!=null && reg3!=null) require(reg2!=reg3) {"reg2 must not be same as reg3"}  // note: this is ok for fpRegs as these are always the same type
+        // fpReg1/fpReg2 ranges are validated by RegisterNum init block
+        // enforce SSA discipline: output register must differ from input registers
+        // (fpRegs are exempt because float ops always use the same register type and there's no aliasing concern;
+        //  LOADI is also exempt because it saves intermediary registers in pointer chain dereferencing)
+        if(reg1!=null && reg2!=null) require(reg1!=reg2 || opcode==Opcode.LOADI) {"reg1 must not be same as reg2"}
+        if(reg1!=null && reg3!=null) require(reg1!=reg3) {"reg1 must not be same as reg3"}
+        if(reg2!=null && reg3!=null) require(reg2!=reg3) {"reg2 must not be same as reg3"}
 
         val formats = instructionFormats.getValue(opcode)
         require (type != null || formats.containsKey(null)) { "missing type" }
@@ -904,13 +948,13 @@ data class IRInstruction(
         if(format.fpReg2==OperandDirection.UNUSED) require(fpReg2==null) { "invalid fpReg2" }
         if(format.immediate) {
             if(type==IRDataType.FLOAT) {
-                if(opcode!=Opcode.LOADFIELD && opcode!=Opcode.STOREFIELD)
+                if(opcode !in setOf(Opcode.LOAD, Opcode.LOADI, Opcode.STOREI, Opcode.STOREZI))
                     requireNotNull(immediateFp) { "missing immediate fp value" }
             }
             else
                 require(immediate!=null || labelSymbol!=null) {"missing immediate value or labelsymbol"}
         }
-        if(opcode==Opcode.LOADFIELD || opcode==Opcode.STOREFIELD) {
+        if(opcode in setOf(Opcode.LOADI, Opcode.STOREI, Opcode.STOREZI)) {
             require(immediate != null) {
                 "missing immediate value for $opcode" }
         }
@@ -920,8 +964,8 @@ data class IRInstruction(
             require(address!=null || labelSymbol!=null) {
                 "missing an address or labelsymbol"}
         if(format.immediate && (immediate!=null || immediateFp!=null)) {
-            if(opcode==Opcode.LOADFIELD || opcode==Opcode.STOREFIELD) {
-                require(immediate in 0..65535) { "immediate value out of range for loadfield/storefield: $immediate" }
+            if(opcode in setOf(Opcode.LOADI, Opcode.STOREI, Opcode.STOREZI)) {
+                require(immediate in 0..65535) { "immediate value out of range for loadi/storei/storezi: $immediate" }
             } else if(opcode!=Opcode.SYSCALL) {
                 when (type) {
                     IRDataType.BYTE -> require(immediate in -128..255) { "immediate value out of range for byte: $immediate" }
@@ -937,9 +981,7 @@ data class IRInstruction(
             else
                 require(immediate != null || immediateFp != null) { "missing immediate value" }
         }
-        require(address==null || address>=0) {
-            "address must be >=0"
-        }
+        // address range is validated by MemoryAddress init block
 
         reg1direction = format.reg1
         reg2direction = format.reg2
@@ -967,146 +1009,90 @@ data class IRInstruction(
     }
 
     fun addUsedRegistersCounts(
-        readRegsCounts: MutableMap<Int, Int>,
-        writeRegsCounts: MutableMap<Int, Int>,
-        readFpRegsCounts: MutableMap<Int, Int>,
-        writeFpRegsCounts: MutableMap<Int, Int>,
-        regsTypes: MutableMap<Int, IRDataType>,
+        readRegsCounts: MutableMap<RegisterNum, Int>,
+        writeRegsCounts: MutableMap<RegisterNum, Int>,
+        readFpRegsCounts: MutableMap<RegisterNum, Int>,
+        writeFpRegsCounts: MutableMap<RegisterNum, Int>,
+        regsTypes: MutableMap<RegisterNum, IRDataType>,
         chunk: IRCodeChunk?
     ) {
+        fun incReadReg(reg: RegisterNum) = readRegsCounts.merge(reg, 1, Int::plus)
+        fun incWriteReg(reg: RegisterNum) = writeRegsCounts.merge(reg, 1, Int::plus)
+        fun incReadFp(reg: RegisterNum) = readFpRegsCounts.merge(reg, 1, Int::plus)
+        fun incWriteFp(reg: RegisterNum) = writeFpRegsCounts.merge(reg, 1, Int::plus)
+        fun setRegType(reg: RegisterNum, type: IRDataType) {
+            val existingType = regsTypes[reg]
+            if (existingType != null && existingType != type)
+                throw IllegalArgumentException("register $reg given multiple types! $existingType and $type in $chunk")
+            else
+                regsTypes[reg] = type
+        }
+
         when (this.reg1direction) {
             OperandDirection.UNUSED -> {}
             OperandDirection.READ -> {
-                readRegsCounts[this.reg1!!] = readRegsCounts.getValue(this.reg1)+1
-                val actualtype = determineReg1Type()
-                if(actualtype!=null) {
-                    val existingType = regsTypes[reg1]
-                    if (existingType!=null) {
-                        if (existingType != actualtype)
-                            throw IllegalArgumentException("register $reg1 given multiple types! $existingType and $actualtype  in $chunk")
-                    } else
-                        regsTypes[reg1] = actualtype
-                }
+                incReadReg(RegisterNum(this.reg1!!))
+                determineReg1Type()?.let { setRegType(RegisterNum(this.reg1), it) }
             }
             OperandDirection.WRITE -> {
-                writeRegsCounts[this.reg1!!] = writeRegsCounts.getValue(this.reg1)+1
-                val actualtype = determineReg1Type()
-                if(actualtype!=null) {
-                    val existingType = regsTypes[reg1]
-                    if (existingType!=null) {
-                        if (existingType != actualtype)
-                            throw IllegalArgumentException("register $reg1 given multiple types! $existingType and $actualtype  in chunk $chunk")
-                    } else
-                        regsTypes[reg1] = actualtype
-
-                }
+                incWriteReg(RegisterNum(this.reg1!!))
+                determineReg1Type()?.let { setRegType(RegisterNum(this.reg1), it) }
             }
             OperandDirection.READWRITE -> {
-                readRegsCounts[this.reg1!!] = readRegsCounts.getValue(this.reg1)+1
-                writeRegsCounts[this.reg1] = writeRegsCounts.getValue(this.reg1)+1
-                val actualtype = determineReg1Type()
-                if(actualtype!=null) {
-                    val existingType = regsTypes[reg1]
-                    if (existingType!=null) {
-                        if (existingType != actualtype)
-                            throw IllegalArgumentException("register $reg1 given multiple types! $existingType and $actualtype  in $chunk")
-                    } else
-                        regsTypes[reg1] = actualtype
-
-                }
+                incReadReg(RegisterNum(this.reg1!!))
+                incWriteReg(RegisterNum(this.reg1))
+                determineReg1Type()?.let { setRegType(RegisterNum(this.reg1), it) }
             }
         }
         when (this.reg2direction) {
             OperandDirection.UNUSED -> {}
             OperandDirection.READ -> {
-                readRegsCounts[this.reg2!!] = readRegsCounts.getValue(this.reg2)+1
-                val actualtype = determineReg2Type()
-                if(actualtype!=null) {
-                    val existingType = regsTypes[reg2]
-                    if (existingType!=null) {
-                        if (existingType != actualtype)
-                            throw IllegalArgumentException("register $reg2 given multiple types! $existingType and $actualtype  in $chunk")
-                    } else
-                        regsTypes[reg2] = actualtype
-                }
+                incReadReg(RegisterNum(this.reg2!!))
+                determineReg2Type()?.let { setRegType(RegisterNum(this.reg2), it) }
             }
             OperandDirection.READWRITE -> {
-                readRegsCounts[this.reg2!!] = readRegsCounts.getValue(this.reg2)+1
-                writeRegsCounts[this.reg2] = writeRegsCounts.getValue(this.reg2)+1
-                val actualtype = determineReg2Type()
-                if(actualtype!=null) {
-                    val existingType = regsTypes[reg2]
-                    if (existingType!=null) {
-                        if (existingType != actualtype)
-                            throw IllegalArgumentException("register $reg2 given multiple types! $existingType and $actualtype  in $chunk")
-                    } else
-                        regsTypes[reg2] = actualtype
-                }
+                incReadReg(RegisterNum(this.reg2!!))
+                incWriteReg(RegisterNum(this.reg2))
+                determineReg2Type()?.let { setRegType(RegisterNum(this.reg2), it) }
             }
             else -> throw IllegalArgumentException("reg2 can only be read or readwrite")
         }
         when (this.reg3direction) {
             OperandDirection.UNUSED -> {}
             OperandDirection.READ -> {
-                readRegsCounts[this.reg3!!] = readRegsCounts.getValue(this.reg3)+1
-                val actualtype = determineReg3Type()
-                if(actualtype!=null) {
-                    val existingType = regsTypes[reg3]
-                    if (existingType!=null) {
-                        if (existingType != actualtype)
-                            throw IllegalArgumentException("register $reg3 given multiple types! $existingType and $actualtype  in $chunk")
-                    } else
-                        regsTypes[reg3] = actualtype
-                }
+                incReadReg(RegisterNum(this.reg3!!))
+                determineReg3Type()?.let { setRegType(RegisterNum(this.reg3), it) }
             }
             else -> throw IllegalArgumentException("reg3 can only be read")
         }
         when (this.fpReg1direction) {
             OperandDirection.UNUSED -> {}
-            OperandDirection.READ -> {
-                readFpRegsCounts[this.fpReg1!!] = readFpRegsCounts.getValue(this.fpReg1)+1
-            }
-            OperandDirection.WRITE -> writeFpRegsCounts[this.fpReg1!!] = writeFpRegsCounts.getValue(this.fpReg1)+1
-            OperandDirection.READWRITE -> {
-                readFpRegsCounts[this.fpReg1!!] = readFpRegsCounts.getValue(this.fpReg1)+1
-                writeFpRegsCounts[this.fpReg1] = writeFpRegsCounts.getValue(this.fpReg1)+1
-            }
+            OperandDirection.READ -> incReadFp(this.fpReg1!!)
+            OperandDirection.WRITE -> incWriteFp(this.fpReg1!!)
+            OperandDirection.READWRITE -> { incReadFp(this.fpReg1!!); incWriteFp(this.fpReg1) }
         }
         when (this.fpReg2direction) {
             OperandDirection.UNUSED -> {}
-            OperandDirection.READ -> readFpRegsCounts[this.fpReg2!!] = readFpRegsCounts.getValue(this.fpReg2)+1
-            OperandDirection.READWRITE -> {
-                readFpRegsCounts[this.fpReg2!!] = readFpRegsCounts.getValue(this.fpReg2)+1
-                writeFpRegsCounts[this.fpReg2] = writeFpRegsCounts.getValue(this.fpReg2)+1
-            }
+            OperandDirection.READ -> incReadFp(this.fpReg2!!)
+            OperandDirection.READWRITE -> { incReadFp(this.fpReg2!!); incWriteFp(this.fpReg2) }
             else -> throw IllegalArgumentException("fpReg2 can only be read or readwrite")
         }
 
         if(fcallArgs!=null) {
             fcallArgs.returns.forEach {
                 if (it.dt == IRDataType.FLOAT)
-                    writeFpRegsCounts[it.registerNum] = writeFpRegsCounts.getValue(it.registerNum) + 1
+                    incWriteFp(it.registerNum)
                 else {
-                    writeRegsCounts[it.registerNum] = writeRegsCounts.getValue(it.registerNum) + 1
-                    val existingType = regsTypes[it.registerNum]
-                    if (existingType!=null) {
-                        if (existingType != it.dt)
-                            throw IllegalArgumentException("register ${it.registerNum} given multiple types! $existingType and ${it.dt}  in $chunk")
-                    } else
-                        regsTypes[it.registerNum] = it.dt
+                    incWriteReg(it.registerNum)
+                    setRegType(it.registerNum, it.dt)
                 }
             }
             fcallArgs.arguments.forEach {
                 if(it.reg.dt==IRDataType.FLOAT)
-                    readFpRegsCounts[it.reg.registerNum] = readFpRegsCounts.getValue(it.reg.registerNum)+1
+                    incReadFp(it.reg.registerNum)
                 else {
-                    readRegsCounts[it.reg.registerNum] = readRegsCounts.getValue(it.reg.registerNum) + 1
-                    val existingType = regsTypes[it.reg.registerNum]
-                    if (existingType!=null) {
-                        if (existingType != it.reg.dt)
-                            throw IllegalArgumentException("register ${it.reg.registerNum} given multiple types! $existingType and ${it.reg.dt}  in $chunk")
-                    } else
-                        regsTypes[it.reg.registerNum] = it.reg.dt
+                    incReadReg(it.reg.registerNum)
+                    setRegType(it.reg.registerNum, it.reg.dt)
                 }
             }
         }
@@ -1149,7 +1135,7 @@ data class IRInstruction(
             return if (type == IRDataType.BYTE) IRDataType.WORD else null
         if(opcode==Opcode.CONCAT)
             return if (type == IRDataType.BYTE) IRDataType.WORD else null
-        if(opcode in setOf(Opcode.ASRNM, Opcode.LSRNM, Opcode.LSLNM, Opcode.SQRT, Opcode.LSIGB, Opcode.MSIGB, Opcode.BSIGB))
+        if(opcode in setOf(Opcode.ASRNM, Opcode.LSRNM, Opcode.LSLNM, Opcode.SQRT, Opcode.LSIGB, Opcode.MSIGB, Opcode.BSIGB, Opcode.MIDB))
             return IRDataType.BYTE
         return this.type
     }
@@ -1157,7 +1143,7 @@ data class IRInstruction(
     private fun determineReg2Type(): IRDataType? {
         if(opcode==Opcode.LOADX || opcode==Opcode.STOREX)
             return IRDataType.BYTE
-        if(opcode==Opcode.LOADI || opcode==Opcode.STOREI || opcode==Opcode.LOADFIELD || opcode==Opcode.STOREFIELD)
+        if(opcode==Opcode.LOADI || opcode==Opcode.STOREI)
             return IRDataType.WORD
         if(opcode==Opcode.ASRN || opcode==Opcode.LSRN || opcode==Opcode.LSLN)
             return IRDataType.BYTE
@@ -1168,27 +1154,27 @@ data class IRInstruction(
         return this.type
     }
 
-    override fun toString(): String {
-        val result = mutableListOf(opcode.name.lowercase())
+    override fun toString(): String = buildString {
+        append(opcode.name.lowercase())
 
         when(type) {
-            IRDataType.BYTE -> result.add(".b ")
-            IRDataType.WORD -> result.add(".w ")
-            IRDataType.LONG -> result.add(".l ")
-            IRDataType.FLOAT -> result.add(".f ")
-            else -> result.add(" ")
+            IRDataType.BYTE -> append(".b ")
+            IRDataType.WORD -> append(".w ")
+            IRDataType.LONG -> append(".l ")
+            IRDataType.FLOAT -> append(".f ")
+            else -> append(" ")
         }
 
-        if(this.fcallArgs!=null) {
-            immediate?.let { result.add(it.toHex()) }       // syscall
+        if(this@IRInstruction.fcallArgs!=null) {
+            immediate?.let { append(it.toHex()) }       // syscall
             if(labelSymbol!=null) {
                 // regular subroutine call
-                result.add(labelSymbol)
+                append(labelSymbol)
                 if(labelSymbolOffset!=null)
-                    result.add("+$labelSymbolOffset")
+                    append("+$labelSymbolOffset")
             }
-            address?.let { result.add(address.toHex()) }    // romcall
-            result.add("(")
+            address?.let { append(it.toHex()) }    // romcall
+            append("(")
             fcallArgs.arguments.forEach {
                 val location = if(it.address==null) {
                     if(it.name.isBlank()) "" else it.name+"="
@@ -1202,20 +1188,21 @@ data class IRInstruction(
                 }
 
                 when(it.reg.dt) {
-                    IRDataType.BYTE -> result.add("${location}r${it.reg.registerNum}.b$cpuReg,")
-                    IRDataType.WORD -> result.add("${location}r${it.reg.registerNum}.w$cpuReg,")
-                    IRDataType.LONG -> result.add("${location}r${it.reg.registerNum}.l$cpuReg,")
-                    IRDataType.FLOAT -> result.add("${location}fr${it.reg.registerNum}.f$cpuReg,")
+                    IRDataType.BYTE -> append("${location}r${it.reg.registerNum.value}.b$cpuReg,")
+                    IRDataType.WORD -> append("${location}r${it.reg.registerNum.value}.w$cpuReg,")
+                    IRDataType.LONG -> append("${location}r${it.reg.registerNum.value}.l$cpuReg,")
+                    IRDataType.FLOAT -> append("${location}fr${it.reg.registerNum.value}.f$cpuReg,")
                 }
             }
-            if(result.last().endsWith(',')) {
-                result.add(result.removeLastOrNull()!!.trimEnd(','))
+            if(last() == ',') {
+                setLength(length - 1)
             }
-            result.add(")")
+            append(")")
             val returns = fcallArgs.returns
             if(returns.isNotEmpty()) {
-                result.add(":")
-                val resultParts = returns.map { returnspec ->
+                append(":")
+                returns.forEachIndexed { index, returnspec ->
+                    if (index > 0) append(",")
                     val cpuReg = if (returnspec.cpuRegister == null) "" else {
                         if (returnspec.cpuRegister.registerOrPair != null)
                             returnspec.cpuRegister.registerOrPair.toString()
@@ -1224,64 +1211,66 @@ data class IRInstruction(
                     }
                     if (cpuReg.isEmpty()) {
                         when (returnspec.dt) {
-                            IRDataType.BYTE -> "r${returnspec.registerNum}.b"
-                            IRDataType.WORD -> "r${returnspec.registerNum}.w"
-                            IRDataType.LONG -> "r${returnspec.registerNum}.l"
-                            IRDataType.FLOAT -> "fr${returnspec.registerNum}.f"
+                            IRDataType.BYTE -> append("r${returnspec.registerNum.value}.b")
+                            IRDataType.WORD -> append("r${returnspec.registerNum.value}.w")
+                            IRDataType.LONG -> append("r${returnspec.registerNum.value}.l")
+                            IRDataType.FLOAT -> append("fr${returnspec.registerNum.value}.f")
                         }
                     } else {
                         when (returnspec.dt) {
-                            IRDataType.BYTE -> "r${returnspec.registerNum}.b@" + cpuReg
-                            IRDataType.WORD -> "r${returnspec.registerNum}.w@" + cpuReg
-                            IRDataType.LONG -> "r${returnspec.registerNum}.l@" + cpuReg
-                            IRDataType.FLOAT -> "r${returnspec.registerNum}.f@" + cpuReg
+                            IRDataType.BYTE -> append("r${returnspec.registerNum.value}.b@$cpuReg")
+                            IRDataType.WORD -> append("r${returnspec.registerNum.value}.w@$cpuReg")
+                            IRDataType.LONG -> append("r${returnspec.registerNum.value}.l@$cpuReg")
+                            IRDataType.FLOAT -> append("fr${returnspec.registerNum.value}.f@$cpuReg")
                         }
                     }
                 }
-                result.add(resultParts.joinToString(","))
             }
         } else {
+            // Output operands in dest-then-source order for human readability (matches assembly convention)
+            val formats = instructionFormats.getValue(opcode)
+            val format = formats.getOrElse(type) { formats.getValue(null) }
 
-            reg1?.let {
-                result.add("r$it")
-                result.add(",")
-            }
-            reg2?.let {
-                result.add("r$it")
-                result.add(",")
-            }
-            reg3?.let {
-                result.add("r$it")
-                result.add(",")
-            }
-            fpReg1?.let {
-                result.add("fr$it")
-                result.add(",")
-            }
-            fpReg2?.let {
-                result.add("fr$it")
-                result.add(",")
-            }
+            // Pass 1: WRITE destinations
+            if (format.reg1 == OperandDirection.WRITE) reg1?.let { append("r$it,") }
+            if (format.reg2 == OperandDirection.WRITE) reg2?.let { append("r$it,") }
+            if (format.reg3 == OperandDirection.WRITE) reg3?.let { append("r$it,") }
+            if (format.fpReg1 == OperandDirection.WRITE) fpReg1?.let { append("fr${it.value},") }
+            if (format.fpReg2 == OperandDirection.WRITE) fpReg2?.let { append("fr${it.value},") }
+
+            // Pass 2: READWRITE (in-place) destinations
+            if (format.reg1 == OperandDirection.READWRITE) reg1?.let { append("r$it,") }
+            if (format.reg2 == OperandDirection.READWRITE) reg2?.let { append("r$it,") }
+            if (format.reg3 == OperandDirection.READWRITE) reg3?.let { append("r$it,") }
+            if (format.fpReg1 == OperandDirection.READWRITE) fpReg1?.let { append("fr${it.value},") }
+            if (format.fpReg2 == OperandDirection.READWRITE) fpReg2?.let { append("fr${it.value},") }
+
+            // Pass 3: READ sources — float (values) before int (addresses) for readability
+            if (format.fpReg1 == OperandDirection.READ) fpReg1?.let { append("fr${it.value},") }
+            if (format.fpReg2 == OperandDirection.READ) fpReg2?.let { append("fr${it.value},") }
+            if (format.reg1 == OperandDirection.READ) reg1?.let { append("r$it,") }
+            if (format.reg2 == OperandDirection.READ) reg2?.let { append("r$it,") }
+            if (format.reg3 == OperandDirection.READ) reg3?.let { append("r$it,") }
+
             immediate?.let {
-                result.add("#${it.toHex()}")
-                result.add(",")
+                append("#${it.toHex()},")
             }
             immediateFp?.let {
-                result.add("#${it}")
-                result.add(",")
+                append("#${it},")
             }
             address?.let {
-                result.add(it.toHex())
-                result.add(",")
+                append(it.toHex())
+                append(",")
             }
             labelSymbol?.let {
-                result.add(it)
+                append(it)
                 if(labelSymbolOffset!=null)
-                    result.add("+$labelSymbolOffset")
+                    append("+$labelSymbolOffset")
             }
         }
-        if(result.last() == ",")
-            result.removeLastOrNull()
-        return result.joinToString("").trimEnd()
-    }
+        if(last() == ',')
+            setLength(length - 1)
+    }.trimEnd()
 }
+
+

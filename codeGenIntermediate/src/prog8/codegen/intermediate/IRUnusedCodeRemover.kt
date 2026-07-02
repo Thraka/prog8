@@ -40,10 +40,10 @@ class IRUnusedCodeRemover(
             }
 
             irprog.st.allVariables().forEach { variable ->
-                val initValue = variable.onetimeInitializationArrayValue
-                if(!initValue.isNullOrEmpty()) {
-                    if(initValue.any {
-                        it.addressOfSymbol?.startsWith(blockLabel)==true
+                val initValue = variable.initializationValue
+                if(initValue is IRVariableInitializer.Array) {
+                    if(initValue.elements.any {
+                        it is IRStSymbolicReference.Symbol && it.name.startsWith(blockLabel)
                     })
                         return   // symbol occurs in an initializer value (address-of this symbol)_
                 }
@@ -85,7 +85,7 @@ class IRUnusedCodeRemover(
                         instructions.remove(ins)
                     }
                 }
-                else if(ins.fpReg1!=0) {
+                else if(ins.fpReg1!=null) {
                     if (instructions.count { it.fpReg1 == ins.fpReg1 || it.fpReg2 == ins.fpReg1 } < 2) {
                         if(ins.labelSymbol!=null)
                             code.st.removeIfExists(ins.labelSymbol!!)
@@ -106,12 +106,16 @@ class IRUnusedCodeRemover(
         irprog.blocks.forEach { block ->
             block.children.filterIsInstance<IRSubroutine>().reversed().forEach { sub ->
                 if(sub.isEmpty()) {
-                    if(!block.options.ignoreUnused) {
-                        errors.info("unused subroutine '${sub.label}'", sub.position)
+                    // Don't remove subroutines with @shared variables
+                    val hasVariables = irprog.st.allVariables().any { it.name.startsWith(sub.label + ".") }
+                    if(!hasVariables) {
+                        if(!block.options.ignoreUnused) {
+                            errors.info("unused subroutine '${sub.label}'", sub.position)
+                        }
+                        block.children.remove(sub)
+                        irprog.st.removeTree(sub.label)
+                        numRemoved++
                     }
-                    block.children.remove(sub)
-                    irprog.st.removeTree(sub.label)
-                    numRemoved++
                 }
             }
         }
@@ -200,10 +204,11 @@ class IRUnusedCodeRemover(
         irprog.st.allVariables()
             .filter { !it.uninitialized }
             .forEach {
-                it.onetimeInitializationArrayValue?.let { array ->
-                    array.forEach {elt ->
-                        if(elt.addressOfSymbol!=null && irprog.st.lookup(elt.addressOfSymbol!!)==null)
-                            reachable.add(irprog.getChunkWithLabel(elt.addressOfSymbol!!))
+                val initValue = it.initializationValue
+                if(initValue is IRVariableInitializer.Array) {
+                    initValue.elements.forEach {elt ->
+                        if(elt is IRStSymbolicReference.Symbol && irprog.st.lookup(elt.name)==null)
+                            reachable.add(irprog.getChunkWithLabel(elt.name))
                     }
                 }
             }
@@ -246,10 +251,11 @@ class IRUnusedCodeRemover(
         irprog.st.allVariables()
             .filter { !it.uninitialized }
             .forEach {
-                it.onetimeInitializationArrayValue?.let { array ->
-                    array.forEach {elt ->
-                        if(elt.addressOfSymbol!=null && irprog.st.lookup(elt.addressOfSymbol!!)==null)
-                            linkedChunks += irprog.getChunkWithLabel(elt.addressOfSymbol!!)
+                if(it.initializationValue is IRVariableInitializer.Array) {
+                    val initValue = it.initializationValue as IRVariableInitializer.Array
+                    initValue.elements.forEach {elt ->
+                        if(elt is IRStSymbolicReference.Symbol && irprog.st.lookup(elt.name)==null)
+                            linkedChunks += irprog.getChunkWithLabel(elt.name)
                     }
                 }
             }

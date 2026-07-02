@@ -15,10 +15,12 @@ which aims to provide many conveniences over raw assembly code (even when using 
 
 **Want to buy me a coffee or a pizza perhaps?**
 
-This project was created over the last couple of years by dedicating thousands of hours of my free time to it, to make it the best I possibly can.
+This project was created over the last couple of years by dedicating a huge amoung of my free time to it, to make it the best I possibly can.
 If you like Prog8, and think it's worth a nice cup of hot coffee or a delicious pizza, 
 you can help me out a little bit over at [ko-fi.com/irmen](https://ko-fi.com/irmen) or [PayPal](https://paypal.me/irmendejong)
 
+[![JetBrains logo.](https://resources.jetbrains.com/storage/products/company/brand/logos/jetbrains.svg)](https://jb.gg/OpenSource)
+ I am using JetBrains products to develop the Prog8 compiler.
 
 Documentation
 -------------
@@ -63,8 +65,10 @@ What does Prog8 provide?
 - programs run very fast because it's compiled to native machine code
 - compiled code is very small; much smaller than equivalent C code compiled with CC65, and usually runs faster as well
 - modularity, symbol scoping, subroutines. No need for forward declarations.
+- Can make vars and routines private, as a simple way to restrict access and hide implementation details
 - various data types other than just bytes (16-bit words, long integers, floats, strings)
 - Structs and typed pointers
+- 2D arrays (`matrix[row][col]` syntax)
 - floating point math is supported on certain targets
 - access to most Kernal ROM routines as external subroutine definitions you can call normally
 - tight control over Zeropage usage
@@ -205,3 +209,10 @@ Here is a performance comparison with various C compilers for the 6502/C64 so yo
 an idea of how Prog8 stacks up.
 
 [comparison](benchmark-c/benchmark.md)
+
+
+Agent context instructions
+--------------------------
+
+[Agent context instructions](AGENTS.md)
+

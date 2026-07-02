@@ -99,15 +99,16 @@ _negative	lda  #-1
 		rts
 		.pend
 
-func_sign_l_r14r15_into_A      .proc
-    lda  cx16.r14+3              ; msb
+func_sign_l_into_A      .proc
+	; NOTE: takes long argument in _arg_value
+    lda  _arg_value+3              ; msb
     bmi  _negative
     bne  _positive
-    lda  cx16.r14+2
+    lda  _arg_value+2
     bne  _positive
-    lda  cx16.r14+1
+    lda  _arg_value+1
     bne  _positive
-    lda  cx16.r14
+    lda  _arg_value
     beq  _zero
     lda  #1
 _zero
@@ -118,6 +119,8 @@ _negative
 _positive
     lda  #1
     rts
+
+_arg_value  .byte 0,0,0,0
 
 .pend
 
@@ -479,7 +482,7 @@ from_scratchW1
 	.pend
 
 func_peekl   .proc
-	; -- read the ;pmg value on the address in AY, into R14:R15
+	; -- read the long value on the address in AY, into R14:R15
 	sta  P8ZP_SCRATCH_W1
 	sty  P8ZP_SCRATCH_W1+1
 from_scratchW1
@@ -645,4 +648,51 @@ func_clamp_uword .proc
 	lda  P8ZP_SCRATCH_W1
 	rts
 
+	.pend
+
+func_clamp_long .proc
+	; signed long value in R14:R15, result in R14:R15
+	; minimum in R10:R11
+	; maximum in R12:R13
+    ; val = max(val, low)
+    lda  cx16.r14L
+    cmp  cx16.r10L
+    lda  cx16.r14H
+    sbc  cx16.r10H
+    lda  cx16.r15L
+    sbc  cx16.r11L
+    lda  cx16.r15H
+    sbc  cx16.r11H
+    bvc  +
+    eor  #$80
++   bpl  +                       ; if val >= low, val is already >= low
+    lda  cx16.r10L
+    sta  cx16.r14L
+    lda  cx16.r10H
+    sta  cx16.r14H
+    lda  cx16.r11L
+    sta  cx16.r15L
+    lda  cx16.r11H
+    sta  cx16.r15H
++   ; val = min(val, high)
+    lda  cx16.r14L
+    cmp  cx16.r12L
+    lda  cx16.r14H
+    sbc  cx16.r12H
+    lda  cx16.r15L
+    sbc  cx16.r13L
+    lda  cx16.r15H
+    sbc  cx16.r13H
+    bvc  +
+    eor  #$80
++   bmi  +                       ; if val < high, val is already <= high
+    lda  cx16.r12L
+    sta  cx16.r14L
+    lda  cx16.r12H
+    sta  cx16.r14H
+    lda  cx16.r13L
+    sta  cx16.r15L
+    lda  cx16.r13H
+    sta  cx16.r15H
++   rts
 	.pend

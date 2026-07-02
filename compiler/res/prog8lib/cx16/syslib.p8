@@ -564,7 +564,7 @@ extsub $C009 = x16edit_loadfile_options2(ubyte firstbank @X, ubyte lastbank @Y, 
                 uword disknumberAndColors @R3, uword headerAndStatusColors @R4,
                 uword linenumberLM @R5, ubyte linenumberH @R6) clobbers(A,X,Y)
 
-; Audio (rom bank 10)
+; Audio (rom bank 10)  for the Vera PSG and FM YM2151 chips.
 ; NOTE: because these are auto-banked, you should not call them from an IRQ handler routine (due to jsrfar race condition).
 extsub @bank 10  $C09F = audio_init() clobbers(A,X,Y) -> bool @Pc     ; (re)initialize both vera PSG and YM audio chips
 extsub @bank 10  $C000 = bas_fmfreq(ubyte channel @A, uword freq @XY, bool noretrigger @Pc) clobbers(A,X,Y) -> bool @Pc
@@ -756,10 +756,10 @@ asmsub mouse_get_sprite_offset() clobbers(A,X,Y) -> word @R0, word @R1 {
     }}
 }
 
-asmsub getlfs() -> ubyte @X, ubyte @A, ubyte @Y {
+asmsub getlfs() -> ubyte @A, ubyte @X, ubyte @Y {
     ; -- return the result of the last call to SETLFS:  A=logical, X=device, Y=secondary.
     %asm {{
-        lda  #EXTAPI_mouse_set_position
+        lda  #EXTAPI_getlfs
         jmp  cx16.extapi
     }}
 }
@@ -1584,12 +1584,12 @@ sub search_x16edit() -> ubyte {
         ; -- Set the inter-program arguments.
         ; standardized way to pass arguments between programs is in ram bank 0, address $bf00-$bfff.
         ; see https://github.com/X16Community/x16-docs/blob/r49/X16%20Reference%20-%2008%20-%20Memory%20Map.md#bank-0
-        sys.push(getrambank())
+        push(getrambank())
         rambank(0)
         sys.memcopy(args_ptr, $bf00, args_size)
         if args_size<255
             @($bf00+args_size) = 0
-        rambank(sys.pop())
+        rambank(pop())
     }
 
     asmsub get_program_args(^^ubyte buffer @R0, ubyte buf_size @R1, bool binary @Pc) {
@@ -1903,6 +1903,13 @@ _loop       lda  P8ZP_SCRATCH_W1
         }}
     }
 
+    inline asmsub waitirq()  {
+        ; suspend execution until the next interrupt has occurred (any source).
+        %asm {{
+            wai
+        }}
+    }
+
     asmsub waitrasterline(uword line @AY) {
         ; -- CPU busy wait until the given raster line is reached
         %asm {{
@@ -1974,19 +1981,6 @@ _larger
         }}
     }
 
-    inline asmsub push(ubyte value @A) {
-        %asm {{
-            pha
-        }}
-    }
-
-    inline asmsub pushw(uword value @AY) {
-        %asm {{
-            pha
-            phy
-        }}
-    }
-
     inline asmsub push_returnaddress(uword address @XY) {
         %asm {{
             ; push like JSR would:  address-1,  MSB first then LSB
@@ -2008,45 +2002,6 @@ _larger
 +           dex
             tya
             rts
-        }}
-    }
-
-    inline asmsub pop() -> ubyte @A {
-        %asm {{
-            pla
-        }}
-    }
-
-    inline asmsub popw() -> uword @AY {
-        %asm {{
-            ply
-            pla
-        }}
-    }
-
-    inline asmsub pushl(long value @R0R1) {
-        %asm {{
-            lda  cx16.r0
-            pha
-            lda  cx16.r0+1
-            pha
-            lda  cx16.r0+2
-            pha
-            lda  cx16.r0+3
-            pha
-        }}
-    }
-
-    inline asmsub popl() -> long @R0R1 {
-        %asm {{
-            pla
-            sta  cx16.r0+3
-            pla
-            sta  cx16.r0+2
-            pla
-            sta  cx16.r0+1
-            pla
-            sta  cx16.r0
         }}
     }
 

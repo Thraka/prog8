@@ -55,7 +55,11 @@ class IRPeepholeOptimizer(private val irprog: IRProgram, private val retainSSA: 
                                 || cleanupPushPop(chunk1, indexedInstructions)
                                 || simplifyConstantReturns(chunk1, indexedInstructions)
                                 || removeNeedlessLoads(chunk1, indexedInstructions)
-                                || loadfieldsAndStorefields(chunk1, indexedInstructions)
+                                || removeDeadStores(chunk1, indexedInstructions)
+                                // || removeLoadrForwarding(chunk1, indexedInstructions)  // DISABLED - needs debugging
+                                || removeSelfIdentityOps(chunk1, indexedInstructions)
+                                || simplifyShiftByZero(chunk1, indexedInstructions)
+                                || cancelAdjacentOps(chunk1, indexedInstructions)
                                 || removeNops(chunk1, indexedInstructions)   // last time, in case one of the optimizers replaced something with a nop
                     } while (changed)
                 }
@@ -482,7 +486,7 @@ jump p8_label_gen_2
                 else -> {}
             }
 
-            fun optimizeImmediateLoadAssociative(replacementOpcode: Opcode) {
+            fun optimizeImmediateLoad(replacementOpcode: Opcode, isCommutative: Boolean) {
 
                 fun getImmediateLoad(reg: Int): Pair<Int, Int>? {
                     // look if the given register gets an immediate value 1 or 2 istructions back
@@ -501,32 +505,126 @@ jump p8_label_gen_2
                 }
 
                 if(ins.reg1!=null) {
-                    val immediate1 = getImmediateLoad(ins.reg1!!)
-                    if(immediate1!=null) {
-                        chunk.instructions[idx] = IRInstruction(replacementOpcode, ins.type, reg1 = ins.reg2, immediate = immediate1.second)
-                        chunk.instructions.removeAt(immediate1.first)
-                        changed=true
-                    } else {
-                        val immediate2 = getImmediateLoad(ins.reg2!!)
-                        if (immediate2 != null) {
-                            chunk.instructions[idx] = IRInstruction(replacementOpcode, ins.type, reg1 = ins.reg1, immediate = immediate2.second)
-                            chunk.instructions.removeAt(immediate2.first)
-                            changed=true
+                    if (isCommutative) {
+                        val immediate1 = getImmediateLoad(ins.reg1!!)
+                        if (immediate1 != null) {
+                            chunk.instructions[idx] = IRInstruction(replacementOpcode, ins.type, reg1 = ins.reg2, immediate = immediate1.second)
+                            chunk.instructions.removeAt(immediate1.first)
+                            changed = true
+                            return
                         }
+                    }
+                    val immediate2 = getImmediateLoad(ins.reg2!!)
+                    if (immediate2 != null) {
+                        chunk.instructions[idx] = IRInstruction(replacementOpcode, ins.type, reg1 = ins.reg1, immediate = immediate2.second)
+                        chunk.instructions.removeAt(immediate2.first)
+                        changed = true
                     }
                 }
             }
 
             // try to use immediate arithmetic instruction if possible
             when(ins.opcode) {
-                Opcode.ADDR -> optimizeImmediateLoadAssociative(Opcode.ADD)
-                Opcode.MULR -> optimizeImmediateLoadAssociative(Opcode.MUL)
-                Opcode.MULSR -> optimizeImmediateLoadAssociative(Opcode.MULS)
-//                Opcode.SUBR -> TODO("ir peephole Subr")
-//                Opcode.DIVR -> TODO("ir peephole Divr")
-//                Opcode.DIVSR -> TODO("ir peephole Divsr")
-//                Opcode.MODR -> TODO("ir peephole Modr")
-//                Opcode.DIVMODR -> TODO("ir peephole DivModr")
+                Opcode.ADDR -> optimizeImmediateLoad(Opcode.ADD, true)
+                Opcode.MULR -> optimizeImmediateLoad(Opcode.MUL, true)
+                Opcode.MULSR -> optimizeImmediateLoad(Opcode.MULS, true)
+                Opcode.SUBR -> optimizeImmediateLoad(Opcode.SUB, false)
+                Opcode.DIVR -> optimizeImmediateLoad(Opcode.DIV, false)
+                Opcode.DIVSR -> optimizeImmediateLoad(Opcode.DIVS, false)
+                Opcode.MODR -> optimizeImmediateLoad(Opcode.MOD, false)
+                // Opcode.DIVMODR - skipped, no immediate DIVMOD variant exists
+                else -> {}
+            }
+        }
+        return changed
+    }
+
+    private fun removeSelfIdentityOps(chunk: IRCodeChunk, indexedInstructions: List<IndexedValue<IRInstruction>>): Boolean {
+        var changed = false
+        indexedInstructions.reversed().forEach { (idx, ins) ->
+            when(ins.opcode) {
+                Opcode.LOADR -> {
+                    if((ins.reg1 != null && ins.reg1 == ins.reg2) || (ins.fpReg1 != null && ins.fpReg1 == ins.fpReg2)) {
+                        chunk.instructions[idx] = IRInstruction(Opcode.NOP)
+                        changed = true
+                    }
+                }
+                Opcode.ANDR, Opcode.ORR -> {
+                    if(ins.reg1 == ins.reg2) {
+                        chunk.instructions[idx] = IRInstruction(Opcode.NOP)
+                        changed = true
+                    }
+                }
+                Opcode.XORR -> {
+                    if(ins.reg1 == ins.reg2) {
+                        chunk.instructions[idx] = IRInstruction(Opcode.LOAD, ins.type, reg1 = ins.reg1, immediate = 0)
+                        changed = true
+                    }
+                }
+                else -> {}
+            }
+        }
+        return changed
+    }
+
+    private fun simplifyShiftByZero(chunk: IRCodeChunk, indexedInstructions: List<IndexedValue<IRInstruction>>): Boolean {
+        var changed = false
+        indexedInstructions.reversed().forEach { (idx, ins) ->
+            if(idx>0 && ins.opcode in setOf(Opcode.LSLN, Opcode.LSRN, Opcode.ASRN) && ins.reg2 != null) {
+                val prev = indexedInstructions[idx-1].value
+                if(prev.opcode == Opcode.LOAD && prev.reg1 == ins.reg2 && prev.immediate == 0) {
+                    chunk.instructions[idx] = IRInstruction(Opcode.NOP)
+                    chunk.instructions.removeAt(idx-1)
+                    changed = true
+                }
+            }
+        }
+        return changed
+    }
+
+    private fun cancelAdjacentOps(chunk: IRCodeChunk, indexedInstructions: List<IndexedValue<IRInstruction>>): Boolean {
+        var changed = false
+        indexedInstructions.reversed().forEach { (idx, ins) ->
+            if(idx >= chunk.instructions.size - 1)
+                return@forEach
+            val insAfter = chunk.instructions[idx+1]
+
+            when(ins.opcode) {
+                Opcode.INV -> {
+                    if(insAfter.opcode == Opcode.INV && insAfter.reg1 == ins.reg1) {
+                        chunk.instructions[idx] = IRInstruction(Opcode.NOP)
+                        chunk.instructions[idx+1] = IRInstruction(Opcode.NOP)
+                        changed = true
+                    }
+                }
+                Opcode.NEG -> {
+                    val sameReg = (ins.reg1 != null && ins.reg1 == insAfter.reg1) || (ins.fpReg1 != null && ins.fpReg1 == insAfter.fpReg1)
+                    if(insAfter.opcode == Opcode.NEG && sameReg) {
+                        chunk.instructions[idx] = IRInstruction(Opcode.NOP)
+                        chunk.instructions[idx+1] = IRInstruction(Opcode.NOP)
+                        changed = true
+                    }
+                }
+                Opcode.EXT, Opcode.EXTS -> {
+                    if(insAfter.opcode == ins.opcode && insAfter.reg1 == ins.reg1 && insAfter.type == ins.type) {
+                        chunk.instructions[idx+1] = IRInstruction(Opcode.NOP)
+                        changed = true
+                    }
+                }
+                Opcode.INC -> {
+                    if(insAfter.opcode == Opcode.DEC && insAfter.reg1 == ins.reg1) {
+                        chunk.instructions[idx] = IRInstruction(Opcode.NOP)
+                        chunk.instructions[idx+1] = IRInstruction(Opcode.NOP)
+                        changed = true
+                    }
+                }
+                Opcode.DEC -> {
+                    if(insAfter.opcode == Opcode.INC && insAfter.reg1 == ins.reg1) {
+                        chunk.instructions[idx] = IRInstruction(Opcode.NOP)
+                        chunk.instructions[idx+1] = IRInstruction(Opcode.NOP)
+                        changed = true
+                    }
+                }
                 else -> {}
             }
         }
@@ -595,21 +693,96 @@ jump p8_label_gen_2
         return changed
     }
 
-    private fun loadfieldsAndStorefields(chunk: IRCodeChunk, indexedInstructions: List<IndexedValue<IRInstruction>>): Boolean {
-        var changed = false
-        indexedInstructions.reversed().forEach { (idx, ins) ->
-            if (ins.opcode == Opcode.LOADFIELD && ins.immediate==0) {
-                val loadi = IRInstruction(Opcode.LOADI, ins.type, ins.reg1!!, ins.reg2!!)
-                chunk.instructions[idx] = loadi
-                changed = true
+    private fun removeDeadStores(chunk: IRCodeChunk, indexedInstructions: List<IndexedValue<IRInstruction>>): Boolean {
+        // Detect and remove dead stores: when a register is written but never read before being overwritten.
+        // Example:
+        //   LOAD r1, #5      <- dead store (r1 overwritten before use)
+        //   LOAD r1, #10
+        //   USE r1
+        
+        // Track for each register: (index of last write, whether value was read since)
+        val pendingWrites = mutableMapOf<Int, Pair<Int, Boolean>>()  // reg -> (writeIdx, wasRead)
+        val deadStores = mutableSetOf<Int>()
+
+        indexedInstructions.forEach { (idx, ins) ->
+            if (ins.opcode in OpcodesWithSideEffects) {
+                // Instruction has side effects, must never be removed as dead store,
+                // AND it also counts as a "read" of all current pending registers to avoid them being removed
+                pendingWrites.clear()
+                return@forEach
             }
-            else if (ins.opcode == Opcode.STOREFIELD && ins.immediate==0) {
-                val loadi = IRInstruction(Opcode.STOREI, ins.type, ins.reg1!!, ins.reg2!!)
-                chunk.instructions[idx] = loadi
+            val formats = instructionFormats.getValue(ins.opcode)
+            val format = formats[ins.type] ?: formats[null]
+
+            // First, check if this instruction READS any registers
+            if(format?.reg1 == OperandDirection.READ || format?.reg1 == OperandDirection.READWRITE) {
+                val reg = ins.reg1 ?: ins.fpReg1?.value
+                if(reg != null) {
+                    val existing = pendingWrites[reg]
+                    if(existing != null) {
+                        pendingWrites[reg] = existing.first to true
+                    }
+                }
+            }
+            if(format?.reg2 == OperandDirection.READ || format?.reg2 == OperandDirection.READWRITE) {
+                val reg = ins.reg2 ?: ins.fpReg2?.value
+                if(reg != null) {
+                    val existing = pendingWrites[reg]
+                    if(existing != null) {
+                        pendingWrites[reg] = existing.first to true
+                    }
+                }
+            }
+            if(format?.reg3 == OperandDirection.READ || format?.reg3 == OperandDirection.READWRITE) {
+                val reg = ins.reg3
+                if(reg != null) {
+                    val existing = pendingWrites[reg]
+                    if(existing != null) {
+                        pendingWrites[reg] = existing.first to true
+                    }
+                }
+            }
+
+            // Then, check if this instruction WRITES to any registers
+            if(format?.reg1 == OperandDirection.WRITE || format?.reg1 == OperandDirection.READWRITE) {
+                val reg = ins.reg1 ?: ins.fpReg1?.value
+                if(reg != null) {
+                    // Check if previous write to this reg was dead (never read before this overwrite)
+                    val existing = pendingWrites[reg]
+                    if(existing != null && !existing.second) {
+                        deadStores.add(existing.first)
+                    }
+                    // Record this new write as pending (not yet read)
+                    pendingWrites[reg] = idx to false
+                }
+            }
+        }
+        
+        // Any remaining pending writes that were never read are also dead
+        // (unless they're the final value needed - but we can't know that here)
+        // Actually, we should NOT remove these because they might be the final value
+        
+        // Remove dead stores (in reverse order to preserve indices)
+        var changed = false
+        deadStores.sortedDescending().forEach { idx ->
+            if(idx < chunk.instructions.size) {
+                chunk.instructions.removeAt(idx)
                 changed = true
             }
         }
-
         return changed
     }
+
+    //private fun removeLoadrForwarding(chunk: IRCodeChunk, indexedInstructions: List<IndexedValue<IRInstruction>>): Boolean {
+        // Forward LOADR instructions to their original source.
+        // Example:
+        //   LOAD r1, #5
+        //   LOADR r2, r1     -> LOAD r2, #5
+        //   LOADR r3, r2     -> LOAD r3, #5
+        
+        // todo: This needs more careful implementation considering:
+        //     - Cross-chunk register usage
+        //     - Function call side effects
+        //     - Proper invalidation of register tracking
+    //}
 }

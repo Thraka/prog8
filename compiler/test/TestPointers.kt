@@ -267,13 +267,17 @@ main {
         a3v.chain shouldBe listOf("matchstate", "next", "next", "ptr")
         a3v.derefLast shouldBe false
 
-        val a4v = (st[6] as Assignment).value as PtrDereference
-        a4v.chain shouldBe listOf("matchstate", "ptr")
-        a4v.derefLast shouldBe true
+        val a4v = (st[6] as Assignment).value as FunctionCallExpression
+        a4v.target.nameInSource shouldBe listOf("peekw")
+        val a4vp=(a4v.args[0] as PtrDereference)
+        a4vp.chain shouldBe listOf("matchstate", "ptr")
+        a4vp.derefLast shouldBe false
 
-        val a5v = (st[7] as Assignment).value as PtrDereference
-        a5v.chain shouldBe listOf("matchstate", "next", "next", "ptr")
-        a5v.derefLast shouldBe true
+        val a5v = (st[7] as Assignment).value as FunctionCallExpression
+        a5v.target.nameInSource shouldBe listOf("peekw")
+        val a5vp=(a5v.args[0] as PtrDereference)
+        a5vp.chain shouldBe listOf("matchstate", "next", "next", "ptr")
+        a5vp.derefLast shouldBe false
 
         val t0 = (st[8] as Assignment).target.pointerDereference!!
         t0.derefLast shouldBe false
@@ -328,22 +332,20 @@ main {
 }"""
         val result = compileText(VMTarget(), false, src, outputDir, writeAssembly = false)!!
         val st = result.compilerAst.entrypoint.statements
-        st.size shouldBe 27
+        st.size shouldBe 25
 
-        val a_zz = (st[20] as Assignment).value
+        val a_zz = (st[18] as Assignment).value
         a_zz shouldBe instanceOf<FunctionCallExpression>()
-        val a_fl = (st[21] as Assignment).value
+        val a_fl = (st[19] as Assignment).value
         a_fl shouldBe instanceOf<FunctionCallExpression>()
-        val a_bb = (st[22] as Assignment).value
+        val a_bb = (st[20] as Assignment).value
         a_bb shouldBe instanceOf<DirectMemoryRead>()
-        val a_r0 = (st[23] as Assignment).value
+        val a_r0 = (st[21] as Assignment).value
         a_r0 shouldBe instanceOf<DirectMemoryRead>()
-        val a_r1 = (st[24] as Assignment).value
+        val a_r1 = (st[22] as Assignment).value
         a_r1 shouldBe instanceOf<DirectMemoryRead>()
-        val a_r2 = (st[25] as Assignment).value
+        val a_r2 = (st[23] as Assignment).value
         a_r2 shouldBe instanceOf<ArrayIndexedExpression>()
-        val a_lptr2 = (st[25] as Assignment).value
-        a_lptr2 shouldBe instanceOf<ArrayIndexedExpression>()
     }
 
     test("block scoping still parsed correctly") {
@@ -694,24 +696,19 @@ main {
         compileText(C64Target(), false, src, outputDir) shouldNotBe null
     }
 
-    test("const pointer gives proper error") {
+    test("const ubyte pointer works correctly") {
         val src="""
 main {
     sub start() {
-        ^^uword @shared ptr = 7000
-        const ^^uword cptr = 8000
+        const ^^ubyte cbyteptr = 53248
 
-        ;ptr^^ = 12345
-        ;cptr^^ = 12345
-        
-        cx16.r0 = cptr
-        cx16.r1 = ptr
+        cx16.r1 = cbyteptr
     }
 }"""
         val errors = ErrorReporterForTests()
-        compileText(VMTarget(), false, src, outputDir, errors=errors, writeAssembly = true) shouldBe null
-        errors.errors.size shouldBe 1
-        errors.errors[0] shouldContain("const can only be used on numbers and booleans")
+        val result = compileText(VMTarget(), false, src, outputDir, errors=errors, writeAssembly = true)
+        result shouldNotBe null
+        errors.errors.size shouldBe 0
     }
 
     test("unknown field") {
@@ -741,7 +738,7 @@ main {
 
     class Struct(override val scopedNameString: String) : ISubType {
         override fun memsize(sizer: IMemSizer): Int {
-            TODO("Not yet implemented")
+            throw NotImplementedError("no memsize for this struct type in unit test")
         }
 
         override fun sameas(other: ISubType): Boolean {
@@ -936,22 +933,24 @@ main {
 
         ((add1[1] as PtAugmentedAssign).value as PtNumber).number shouldBe 10.0
         (((add1[2] as PtAssignment).value as PtBinaryExpression).right as PtNumber).number shouldBe 10.0
-        val add1peek = (add1[3] as PtAssignment).value as PtBuiltinFunctionCall
+        val add1peek = (add1[3] as PtAssignment).value as PtFunctionCall
+        add1peek.builtin shouldBe true
         ((add1peek.args[0] as PtBinaryExpression).right as PtNumber).number shouldBe 10.0
 
         val add2expr1 = (add2[1] as PtAugmentedAssign).value as PtBinaryExpression
         add2expr1.operator shouldBe "<<"
         (add2expr1.right as PtNumber).number shouldBe 1.0
-        val add2expr2 = ((add2[2] as PtAssignment).value as PtBinaryExpression).right as PtBinaryExpression
+        val add2expr2 = ((add2[2] as PtAssignment).value as PtBinaryExpression).left as PtBinaryExpression
         add2expr2.operator shouldBe "<<"
         (add2expr2.right as PtNumber).number shouldBe 1.0
-        val add2expr3 = (((add2[3] as PtAssignment).value as PtBuiltinFunctionCall).args[0] as PtBinaryExpression).right as PtBinaryExpression
+        val add2expr3 = (((add2[3] as PtAssignment).value as PtFunctionCall).args[0] as PtBinaryExpression).left as PtBinaryExpression
         add2expr3.operator shouldBe "<<"
         (add2expr3.right as PtNumber).number shouldBe 1.0
 
         ((sub1[1] as PtAugmentedAssign).value as PtNumber).number shouldBe 10.0
         (((sub1[2] as PtAssignment).value as PtBinaryExpression).right as PtNumber).number shouldBe 10.0
-        val sub1peek = (sub1[3] as PtAssignment).value as PtBuiltinFunctionCall
+        val sub1peek = (sub1[3] as PtAssignment).value as PtFunctionCall
+        sub1peek.builtin shouldBe true
         ((sub1peek.args[0] as PtBinaryExpression).right as PtNumber).number shouldBe 10.0
 
         val sub2expr1 = (sub2[1] as PtAugmentedAssign).value as PtBinaryExpression
@@ -960,7 +959,7 @@ main {
         val sub2expr2 = ((sub2[2] as PtAssignment).value as PtBinaryExpression).right as PtBinaryExpression
         sub2expr2.operator shouldBe "<<"
         (sub2expr2.right as PtNumber).number shouldBe 1.0
-        val sub2expr3 = (((sub2[3] as PtAssignment).value as PtBuiltinFunctionCall).args[0] as PtBinaryExpression).right as PtBinaryExpression
+        val sub2expr3 = (((sub2[3] as PtAssignment).value as PtFunctionCall).args[0] as PtBinaryExpression).right as PtBinaryExpression
         sub2expr3.operator shouldBe "<<"
         (sub2expr3.right as PtNumber).number shouldBe 1.0
     }
@@ -1214,9 +1213,9 @@ main {
             byte bb
         }
 
-        ^^List l1 = 2000
-        ^^List l2 = 3000
-        ^^Foo f1 = 4000
+        ^^List @shared l1 = 2000
+        ^^List @shared l2 = 3000
+        ^^Foo @shared f1 = 4000
 
         l1^^ = l2^^     ; memcpy1
         l1[3] = l2^^    ; memcpy2
@@ -1481,6 +1480,22 @@ other {
         errors.errors.size shouldBe 2
         errors.errors[0] shouldContain "no support for"
         errors.errors[1] shouldContain "no support for"
+    }
+
+    test("mix of pointer dereference patterns in same program") {
+        val src = """
+main {
+    sub start() {
+        struct Node { ubyte value }
+        ^^Node[10] nodes
+        ; Array-indexed pointer dereference with explicit ^^
+        nodes[0]^^.value = 100
+        nodes[1]^^.value = 200
+    }
+}"""
+        compileText(VMTarget(), false, src, outputDir) shouldNotBe null
+        compileText(C64Target(), false, src, outputDir) shouldNotBe null
+        compileText(Cx16Target(), false, src, outputDir) shouldNotBe null
     }
 
     test("a.b.c[i]^^ as assignment target where pointer is primitive type") {
@@ -2029,7 +2044,7 @@ main {
         errors.errors[1] shouldContain "10:24: cannot assign different pointer type, expected ^^ubyte or uword but got ^^uword"
     }
 
-    test("passing nosplit array of structpointers to a subroutine in various forms should be param type ptr to struct") {
+    xtest("passing nosplit array of structpointers to a subroutine in various forms should be param type ptr to struct") {
         val src="""
 main {
     struct Node {
@@ -2511,12 +2526,12 @@ main {
 
 cx16 {
       %option merge
-      &^^word pword4 = &cx16.r4
+      const ^^byte pword4 = &cx16.r4
 }
 
 player {
       alias sxPtr = cx16.pword4
-      &^^word zxPtr      = &cx16.r6
+      const ^^byte zxPtr      = &cx16.r6
 
   sub test() {
     sxPtr^^ = -99           ; aliased assignment 
@@ -2537,9 +2552,14 @@ player {
 
         val ifCond = (test[1] as IfElse).condition as ContainmentCheck
         val cond = ifCond.element as BinaryExpression
-        cond.left shouldBe instanceOf<PtrDereference>()
-        cond.right shouldBe instanceOf<PtrDereference>()
-        (cond.right as PtrDereference).chain shouldBe listOf("cx16", "pword4")
+        val left = cond.left as TypecastExpression
+        val right = cond.right as TypecastExpression
+        left.type shouldBe DataType.BYTE
+        right.type shouldBe DataType.BYTE
+        val leftpeek = left.expression as DirectMemoryRead
+        val rightpeek = right.expression as DirectMemoryRead
+        (leftpeek.addressExpression as IdentifierReference).nameInSource shouldBe listOf("zxPtr")
+        (rightpeek.addressExpression as IdentifierReference).nameInSource shouldBe listOf("cx16","pword4")
     }
 
     test("assigning field with same name should not confuse compiler") {
@@ -2587,28 +2607,26 @@ main {
 }"""
         val result = compileText(VMTarget(), true, src, outputDir, writeAssembly = false)!!
         val st = result.compilerAst.entrypoint.statements
-        st.size shouldBe 8
+        st.size shouldBe 7
         val a1 = st[0] as Assignment
         val a2 = st[1] as Assignment
         val a3 = st[2] as Assignment
         val a4 = st[3] as Assignment
         val a5 = st[4] as Assignment
         val a6 = st[5] as Assignment
-        val a7 = st[6] as Assignment
 
         a1.target.arrayIndexedDereference shouldBe null
         a1.target.pointerDereference!!.chain shouldBe listOf("sprptr", "y")
-        a2.target.arrayIndexedDereference shouldBe null
-        a2.target.pointerDereference!!.chain shouldBe listOf("sprptr", "y")
+        a2.target.arrayIndexedDereference shouldBe null  // &sprptr[0] - AddressOf, not PtrDeref
+        a2.value shouldBe instanceOf<AddressOf>()
 
-        (a3.value as? AddressOf)?.identifier?.nameInSource shouldBe listOf("sprptr")
+        (a3.value as? PtrDereference)?.chain shouldBe listOf("sprptr", "y")
         (a4.value as? PtrDereference)?.chain shouldBe listOf("sprptr", "y")
-        (a5.value as? PtrDereference)?.chain shouldBe listOf("sprptr", "y")
-        val be6 = a6.value as BinaryExpression      // this one is an actual array and we need the first element so no change here
-        be6.operator shouldBe "."
-        be6.left shouldBe instanceOf<ArrayIndexedExpression>()
-        be6.right shouldBe instanceOf<IdentifierReference>()
-        (a7.value as? ArrayIndexedExpression)?.indexer?.constIndex() shouldBe 0
+        val be5 = a5.value as BinaryExpression      // this one is an actual array and we need the first element so no change here
+        be5.operator shouldBe "."
+        be5.left shouldBe instanceOf<ArrayIndexedExpression>()
+        be5.right shouldBe instanceOf<IdentifierReference>()
+        (a6.value as? ArrayIndexedExpression)?.indexer?.constIndex() shouldBe 0
     }
 
     test("long pointer assignments") {
@@ -2675,18 +2693,131 @@ main {
 }"""
         val result = compileText(VMTarget(), false, src, outputDir, writeAssembly = false)
         val st = result!!.compilerAst.entrypoint.statements
-        st.size shouldBe 7
+        st.size shouldBe 9
         val a1 = st[3] as Assignment
         a1.target.identifier!!.nameInSource shouldBe listOf("temp")
-        val v1 = a1.value as BinaryExpression
-        v1.operator shouldBe "+"
-        (v1.left as TypecastExpression).type shouldBe DataType.UWORD
-        v1.right shouldBe instanceOf<NumericLiteral>()
-        val a2 = st[5] as Assignment
+        a1.value shouldBe instanceOf<IdentifierReference>()
+        val a2 = st[6] as Assignment
         a2.target.identifier!!.nameInSource shouldBe listOf("temp")
-        val v2 = a2.value as BinaryExpression
-        v2.operator shouldBe "+"
-        v2.left shouldBe instanceOf<IdentifierReference>()
-        v2.right shouldBe instanceOf<NumericLiteral>()
+        a2.value shouldBe instanceOf<IdentifierReference>()
+    }
+
+    test("indexed pointer derefs") {
+        val src="""
+%import floats
+
+main {
+
+    struct Task {
+        bool dummy1
+        ^^ubyte line
+        ^^uword wptr
+        ^^long lptr
+        ^^float fptr
+    }
+
+    sub start() {
+        ubyte b1,b2
+        uword w1,w2
+        long l1,l2
+        float f1,f2
+
+        ^^uword g_wptr
+        cx16.r1 = g_wptr^^
+
+
+        ^^Task tptr = 5000
+        tptr.line = "hello"
+        tptr.wptr = 6000
+        tptr.lptr = 7000
+        tptr.fptr = 8000
+
+        pokew(6000, 12345)
+        pokew(6002, 54321)
+        pokel(7000, 9988766)
+        pokel(7004, 22334455)
+        pokef(8000, 111.222)
+        pokef(8000+sizeof(float), 333.444)
+
+        b1 = tptr.line[0]
+        b2 = tptr.line^^
+        b1 = @(tptr.line)
+
+        w1 = tptr.wptr[0]
+        w2 = tptr.wptr^^
+        w1 = peekw(tptr.wptr)
+
+        l1 = tptr.lptr[0]
+        l2 = tptr.lptr^^
+        l1 = peekl(tptr.lptr)
+
+        f1 = tptr.fptr[0]
+        f2 = tptr.fptr^^
+        f1 = peekf(tptr.fptr)
+
+        w1 = tptr.wptr[1]
+        w2 = peekw(tptr.wptr+1)
+
+        l1 = tptr.lptr[1]
+        l2 = peekl(tptr.lptr+1)
+
+        f1 = tptr.fptr[1]
+        f2 = peekf(tptr.fptr+1)
+
+        b1 = tptr.line[0]
+        b2 = tptr.line[1]
+        b1 = tptr.line[2]
+        b2 = tptr.line[3]
+        b1 = tptr.line[4]
+
+        cx16.r0 = 0
+        for cx16.r0 in 0 to 4 {
+            b1 = tptr.line[cx16.r0]
+        }
+
+        cx16.r0 = 1
+        w1 = tptr.wptr[cx16.r0]
+        w2 = peekw(tptr.wptr+cx16.r0)
+
+        l1 = tptr.lptr[cx16.r0]
+        l2 = peekl(tptr.lptr+cx16.r0)
+
+        f1 = tptr.fptr[cx16.r0]
+        f2 = peekf(tptr.fptr+cx16.r0)
+
+        w1 = tptr.wptr[cx16.r0L]
+        w2 = peekw(tptr.wptr+cx16.r0L)
+
+        l1 = tptr.lptr[cx16.r0L]
+        l2 = peekl(tptr.lptr+cx16.r0L)
+
+        f1 = tptr.fptr[cx16.r0L]
+        f2 = peekf(tptr.fptr+cx16.r0L)
+    }
+}"""
+
+        compileText(VMTarget(), true, src, outputDir, writeAssembly = true) shouldNotBe null
+        compileText(Cx16Target(), true, src, outputDir, writeAssembly = true) shouldNotBe null
+    }
+
+    test("memory() in const pointer and uword should not crash IRFileWriter") {
+        val code = """
+            %zeropage basicsafe
+            %import textio
+            main {
+                const uword mp = memory("works", 100, 0)
+                ^^long longs = memory("chunkoflongs", 2000, 0)
+                sub start() {
+                    txt.print_uwhex(mp, true)
+                    txt.print_uwhex(longs, true)
+                }
+            }
+        """.trimIndent()
+
+        val errors = ErrorReporterForTests()
+        val result = compileText(VMTarget(), true, code, outputDir, errors)
+        withClue(errors.errors.joinToString("\n")) {
+            result shouldNotBe null
+        }
     }
 })

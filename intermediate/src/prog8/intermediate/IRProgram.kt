@@ -72,6 +72,23 @@ class IRProgram(val name: String,
         allAsmSubs().forEach { operation(it.asmChunk) }
         operation(globalInits)
     }
+
+    fun countCodeElements(): Pair<Int, Int> {
+        var numInstr = 0
+        var numChunks = 0
+        foreachCodeChunk { chunk ->
+            numChunks++
+            numInstr += chunk.instructions.size
+        }
+        return Pair(numInstr, numChunks)
+    }
+
+    fun countUsedRegisters(): Int {
+        val used = registersUsed()
+        return (used.readRegs.keys + used.writeRegs.keys).size +
+               (used.readFpRegs.keys + used.writeFpRegs.keys).size
+    }
+
     fun getChunkWithLabel(label: String): IRCodeChunkBase {
         for(sub in allSubs()) {
             for(chunk in sub.chunks) {
@@ -105,11 +122,16 @@ class IRProgram(val name: String,
             blocks.forEach { block ->
                 block.children.forEach { child ->
                     when(child) {
-                        is IRAsmSubroutine -> result[child.asmChunk.label] = child.asmChunk
+                        is IRAsmSubroutine -> result[child.label] = child.asmChunk
                         is IRCodeChunk -> result[child.label] = child
                         is IRInlineAsmChunk -> result[child.label] = child
                         is IRInlineBinaryChunk -> result[child.label] = child
-                        is IRSubroutine -> result.putAll(child.chunks.associateBy { it.label })
+                        is IRSubroutine -> {
+                            result.putAll(child.chunks.associateBy { it.label })
+                            if (child.chunks.isNotEmpty()) {
+                                result[child.label] = child.chunks.first()
+                            }
+                        }
                     }
                 }
             }
@@ -143,17 +165,12 @@ class IRProgram(val name: String,
 
         fun linkCodeChunk(chunk: IRCodeChunk, next: IRCodeChunkBase?) {
             // link sequential chunks
-            val jump = chunk.instructions.lastOrNull()?.opcode
-            if (jump == null || jump !in OpcodesThatBranchUnconditionally) {
+            val lastInstr = chunk.instructions.lastOrNull()
+            if (lastInstr == null || lastInstr.opcode !in OpcodesThatBranchUnconditionally) {
                 // no jump at the end, so link to next chunk (if it exists)
-                if(next!=null) {
-                    when (next) {
-                        is IRCodeChunk if chunk.instructions.lastOrNull()?.opcode !in OpcodesThatBranchUnconditionally -> chunk.next = next
-                        is IRInlineAsmChunk -> chunk.next = next
-                        is IRInlineBinaryChunk -> chunk.next =next
-                        else -> throw AssemblyError("code chunk followed by invalid chunk type $next")
-                    }
-                }
+                chunk.next = next
+            } else {
+                chunk.next = null
             }
 
             // link all jump and branching instructions to their target
@@ -163,46 +180,48 @@ class IRProgram(val name: String,
                         // it's a call to an address (extsub most likely)
                         requireNotNull(it.address)
                     } else {
-                        it.branchTarget = labeledChunks.getValue(it.labelSymbol)
+                        it.branchTarget = labeledChunks[it.labelSymbol] ?: throw AssemblyError("Missing jump/call target: ${it.labelSymbol}")
                     }
+                }
+            }
+        }
+
+        fun linkBaseChunk(chunk: IRCodeChunkBase, next: IRCodeChunkBase?) {
+            when (chunk) {
+                is IRCodeChunk -> linkCodeChunk(chunk, next)
+                is IRInlineAsmChunk -> {
+                    val lastInstr = chunk.instructions.lastOrNull()
+                    if (lastInstr == null || lastInstr.opcode !in OpcodesThatBranchUnconditionally)
+                        chunk.next = next
+                    else
+                        chunk.next = null
+                }
+                is IRInlineBinaryChunk -> {
+                    chunk.next = next
                 }
             }
         }
 
         fun linkSubroutineChunks(sub: IRSubroutine) {
             sub.chunks.withIndex().forEach { (index, chunk) ->
-
-                val next = if(index<sub.chunks.size-1) sub.chunks[index + 1] else null
-
-                when (chunk) {
-                    is IRCodeChunk -> {
-                        linkCodeChunk(chunk, next)
-                    }
-                    is IRInlineAsmChunk -> {
-                        if(next!=null) {
-                            val lastInstr = chunk.instructions.lastOrNull()
-                            if(lastInstr==null || lastInstr.opcode !in OpcodesThatBranchUnconditionally)
-                                chunk.next = next
-                        }
-                    }
-                    is IRInlineBinaryChunk -> { }
-                }
+                val next = if(index < sub.chunks.size - 1) sub.chunks[index + 1] else null
+                linkBaseChunk(chunk, next)
             }
         }
 
         blocks.forEach { block ->
             block.children.forEachIndexed { index, child ->
-                val next = if(index<block.children.lastIndex) block.children[index+1] as? IRCodeChunkBase else null
+                val next = if(index < block.children.lastIndex) block.children[index+1] as? IRCodeChunkBase else null
                 when (child) {
-                    is IRAsmSubroutine -> child.asmChunk.next = next
-                    is IRCodeChunk -> child.next = next
-                    is IRInlineAsmChunk -> child.next = next
-                    is IRInlineBinaryChunk -> child.next = next
+                    is IRAsmSubroutine -> linkBaseChunk(child.asmChunk, next)
+                    is IRCodeChunk -> linkBaseChunk(child, next)
+                    is IRInlineAsmChunk -> linkBaseChunk(child, next)
+                    is IRInlineBinaryChunk -> linkBaseChunk(child, next)
                     is IRSubroutine -> linkSubroutineChunks(child)
                 }
             }
         }
-        linkCodeChunk(globalInits, globalInits.next)
+        linkBaseChunk(globalInits, globalInits.next)
     }
 
     fun validate() {
@@ -226,10 +245,11 @@ class IRProgram(val name: String,
             chunk.instructions.forEach { instr ->
                 if(instr.labelSymbol!=null && instr.opcode in OpcodesThatBranch) {
                     if(instr.opcode==Opcode.JUMPI) {
-                        when(val pointervar = st.lookup(instr.labelSymbol)!!) {
-                            is IRStStaticVariable -> require(pointervar.dt.isUnsignedWord)
-                            is IRStMemVar -> require(pointervar.dt.isUnsignedWord)
-                            else -> throw AssemblyError("weird pointervar type")
+                        val symbol = st.lookup(instr.labelSymbol) ?: throw AssemblyError("Missing jump target symbol: ${instr.labelSymbol}")
+                        when(symbol) {
+                            is IRStStaticVariable -> require(symbol.dt.isUnsignedWord)
+                            is IRStMemVar -> require(symbol.dt.isUnsignedWord)
+                            else -> throw AssemblyError("Invalid jump target symbol type: ${instr.labelSymbol}")
                         }
                     }
                     else if(!instr.labelSymbol.startsWith('$') && !instr.labelSymbol.first().isDigit())
@@ -256,11 +276,11 @@ class IRProgram(val name: String,
     }
 
     fun registersUsed(): RegistersUsed {
-        val readRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
-        val regsTypes = mutableMapOf<Int, IRDataType>()
-        val readFpRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
-        val writeRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
-        val writeFpRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
+        val readRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
+        val regsTypes = mutableMapOf<RegisterNum, IRDataType>()
+        val readFpRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
+        val writeRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
+        val writeFpRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
 
         fun addUsed(usedRegisters: RegistersUsed, child: IIRBlockElement) {
             usedRegisters.readRegs.forEach{ (reg, count) -> readRegsCounts[reg] = readRegsCounts.getValue(reg) + count }
@@ -411,29 +431,25 @@ class IRProgram(val name: String,
             else
                 require(chunk===split.subParent!!.chunks[split.chunkIndex])
             val totalSize = chunk.instructions.size
-            val first = chunk.instructions.dropLast(totalSize-split.splitAt-1)
-            val second = chunk.instructions.drop(split.splitAt+1)
-            chunk.instructions.clear()
-            chunk.instructions.addAll(first)
+            val splitPoint = split.splitAt + 1
             val secondChunk = IRCodeChunk(null, chunk.next)
-            secondChunk.instructions.addAll(second)
+            // Move instructions from splitPoint onward to secondChunk without copying
+            secondChunk.instructions.addAll(chunk.instructions.subList(splitPoint, totalSize))
+            chunk.instructions.subList(splitPoint, totalSize).clear()
             require(chunk.instructions.last().opcode in OpcodesThatEndSSAblock)
             require(chunk.instructions.size + secondChunk.instructions.size == totalSize)
             if(chunk.instructions.last().opcode !in OpcodesThatBranchUnconditionally) {
                 chunk.next = secondChunk
                 if(split.blockParent!=null) split.blockParent.children.add(split.chunkIndex+1, secondChunk)
                 else split.subParent!!.chunks.add(split.chunkIndex+1, secondChunk)
-                // println("split chunk ${chunk.label} at ${split.splitAt}:   ${chunk.instructions[split.splitAt]}   ${totalSize} = ${chunk.instructions.size}+${secondChunk.instructions.size}")
             } else {
-                // shouldn't occur , unreachable code in second chunk?
                 chunk.next = null
-                // println("REMOVED UNREACHABLE CODE")
             }
         }
     }
 
 
-    fun verifyRegisterTypes(registerTypes: Map<Int, IRDataType>) {
+    fun verifyRegisterTypes(registerTypes: Map<RegisterNum, IRDataType>) {
         for(block in blocks) {
             for(bc in block.children) {
                 when(bc) {
@@ -554,11 +570,11 @@ class IRCodeChunk(label: String?, next: IRCodeChunkBase?): IRCodeChunkBase(label
     override fun isEmpty() = instructions.isEmpty()
     override fun isNotEmpty() = instructions.isNotEmpty()
     override fun usedRegisters(): RegistersUsed {
-        val readRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
-        val regsTypes = mutableMapOf<Int, IRDataType>()
-        val readFpRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
-        val writeRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
-        val writeFpRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
+        val readRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
+        val regsTypes = mutableMapOf<RegisterNum, IRDataType>()
+        val readFpRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
+        val writeRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
+        val writeFpRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
         instructions.forEach { it.addUsedRegistersCounts(readRegsCounts, writeRegsCounts, readFpRegsCounts, writeFpRegsCounts, regsTypes, this) }
         return RegistersUsed(readRegsCounts, writeRegsCounts, readFpRegsCounts, writeFpRegsCounts, regsTypes)
     }
@@ -623,11 +639,11 @@ internal class IRSubtypePlaceholder(override val scopedNameString: String, val s
 
 class RegistersUsed(
     // register num -> number of uses
-    val readRegs: Map<Int, Int>,
-    val writeRegs: Map<Int, Int>,
-    val readFpRegs: Map<Int, Int>,
-    val writeFpRegs: Map<Int, Int>,
-    val regsTypes: Map<Int, IRDataType>
+    val readRegs: Map<RegisterNum, Int>,
+    val writeRegs: Map<RegisterNum, Int>,
+    val readFpRegs: Map<RegisterNum, Int>,
+    val writeFpRegs: Map<RegisterNum, Int>,
+    val regsTypes: Map<RegisterNum, IRDataType>
 ) {
 
     override fun toString(): String {
@@ -637,10 +653,10 @@ class RegistersUsed(
     fun isEmpty() = readRegs.isEmpty() && writeRegs.isEmpty() && readFpRegs.isEmpty() && writeFpRegs.isEmpty()
     fun isNotEmpty() = !isEmpty()
 
-    fun used(register: Int) = register in readRegs || register in writeRegs
-    fun usedFp(fpRegister: Int) = fpRegister in readFpRegs || fpRegister in writeFpRegs
+    fun used(register: RegisterNum) = register in readRegs || register in writeRegs
+    fun usedFp(fpRegister: RegisterNum) = fpRegister in readFpRegs || fpRegister in writeFpRegs
 
-    fun validate(allowed: Map<Int, IRDataType>, chunk: IRCodeChunkBase?) {
+    fun validate(allowed: Map<RegisterNum, IRDataType>, chunk: IRCodeChunkBase?) {
         for((reg, type) in regsTypes) {
             val allowedType = allowed[reg]
 // can't do this check because %ir {{ .. }} segments may contain registers that the compiler doesn't know about yet.
@@ -653,11 +669,11 @@ class RegistersUsed(
 }
 
 private fun registersUsedInAssembly(isIR: Boolean, assembly: String): RegistersUsed {
-    val readRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
-    val regsTypes = mutableMapOf<Int, IRDataType>()
-    val readFpRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
-    val writeRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
-    val writeFpRegsCounts = mutableMapOf<Int, Int>().withDefault { 0 }
+    val readRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
+    val regsTypes = mutableMapOf<RegisterNum, IRDataType>()
+    val readFpRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
+    val writeRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
+    val writeFpRegsCounts = mutableMapOf<RegisterNum, Int>().withDefault { 0 }
 
     if(isIR) {
         assembly.lineSequence().forEach { line ->

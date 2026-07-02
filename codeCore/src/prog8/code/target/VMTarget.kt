@@ -28,7 +28,7 @@ class VMTarget: ICompilationTarget,
 
     override val FLOAT_MAX_POSITIVE = Double.MAX_VALUE
     override val FLOAT_MAX_NEGATIVE = -Double.MAX_VALUE
-    override val FLOAT_MEM_SIZE = VMTarget.FLOAT_MEM_SIZE
+    override val FLOAT_MEM_SIZE = VMTarget.FLOAT_MEM_SIZE.toUInt()
     override val STARTUP_CODE_RESERVED_SIZE = 0u  // not actually used
     override val PROGRAM_LOAD_ADDRESS = 0u      // not actually used
     override val PROGRAM_MEMTOP_ADDRESS = 0xffffu  // not actually used
@@ -38,7 +38,6 @@ class VMTarget: ICompilationTarget,
     override val BSSGOLDENRAM_START = 0u        // not actually used
     override val BSSGOLDENRAM_END = 0u          // not actually used
     override lateinit var zeropage: Zeropage    // not actually used
-    override lateinit var golden: GoldenRam     // not actually used
 
     override fun getFloatAsmBytes(num: Number): String {
         // little endian binary representation
@@ -69,6 +68,10 @@ class VMTarget: ICompilationTarget,
     }
 
     override fun launchEmulator(selectedEmulator: Int, programNameWithPath: Path, quiet: Boolean) {
+        launchEmulatorWithTrace(programNameWithPath, quiet, traceEnabled = false)
+    }
+
+    fun launchEmulatorWithTrace(programNameWithPath: Path, quiet: Boolean, traceEnabled: Boolean) {
         if(!quiet)
             println("\nStarting Virtual Machine...")
 
@@ -76,7 +79,7 @@ class VMTarget: ICompilationTarget,
         val vm = Class.forName("prog8.vm.VmRunner").getDeclaredConstructor().newInstance() as IVirtualMachineRunner
         val withExt = if(programNameWithPath.extension=="p8ir") programNameWithPath else programNameWithPath.resolveSibling("${programNameWithPath.name}.p8ir")
         if(withExt.isReadable())
-            vm.runProgram(withExt.readText(), quiet)
+            vm.runProgram(withExt.readText(), quiet, traceEnabled)
         else
             throw java.nio.file.NoSuchFileException(withExt.name, null, "not a .p8ir file")
     }
@@ -85,14 +88,13 @@ class VMTarget: ICompilationTarget,
 
     override fun initializeMemoryAreas(compilerOptions: CompilationOptions) {
         zeropage = VirtualZeropage(compilerOptions)
-        golden = GoldenRam(compilerOptions, UIntRange.EMPTY)
     }
 }
 
 
 
 interface IVirtualMachineRunner {
-    fun runProgram(irSource: String, quiet: Boolean)
+    fun runProgram(irSource: String, quiet: Boolean, traceEnabled: Boolean = false)
 }
 
 private class VirtualZeropage(options: CompilationOptions): Zeropage(options) {

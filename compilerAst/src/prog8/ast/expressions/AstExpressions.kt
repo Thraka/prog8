@@ -17,10 +17,17 @@ import kotlin.math.truncate
 sealed class Expression: Node {
     abstract override fun copy(): Expression
     abstract fun constValue(program: Program): NumericLiteral?
+    open fun constValues(program: Program): List<NumericLiteral>? {
+        val cv = constValue(program)
+        return if(cv!=null) listOf(cv) else null
+    }
     abstract fun accept(visitor: IAstVisitor)
     abstract fun accept(visitor: AstWalker, parent: Node)
     abstract fun inferType(program: Program): InferredTypes.InferredType
+    abstract fun isIORead(target: ICompilationTarget): Boolean
     abstract val isSimple: Boolean
+
+    open fun hasSideEffects(target: ICompilationTarget): Boolean = isIORead(target)
 
     infix fun isSameAs(assigntarget: AssignTarget) = assigntarget.isSameAs(this)
 
@@ -35,7 +42,7 @@ sealed class Expression: Node {
             is BinaryExpression -> {
                 if(other !is BinaryExpression || other.operator!=operator)
                     false
-                else if(operator in AssociativeOperators)
+                else if(operator in CommutativeOperators)
                     (other.left isSameAs left && other.right isSameAs right) || (other.left isSameAs right && other.right isSameAs left)
                 else
                     other.left isSameAs left && other.right isSameAs right
@@ -58,6 +65,12 @@ sealed class Expression: Node {
                         && other.args.size == args.size
                         && other.args.zip(args).all { it.first isSameAs it.second } )
             }
+            is PtrDereference -> {
+                (other is PtrDereference && other.derefLast == derefLast && other.chain == chain)
+            }
+            is ArrayIndexedPtrDereference -> {
+                (other is ArrayIndexedPtrDereference && other.derefLast == derefLast && other.chain == chain)
+            }
             else -> other==this
         }
     }
@@ -79,6 +92,8 @@ sealed class Expression: Node {
 class PrefixExpression(val operator: String, var expression: Expression, override val position: Position) : Expression() {
     override lateinit var parent: Node
 
+    override fun isIORead(target: ICompilationTarget): Boolean = expression.isIORead(target)
+
     override fun linkParents(parent: Node) {
         this.parent = parent
         expression.linkParents(this)
@@ -91,6 +106,7 @@ class PrefixExpression(val operator: String, var expression: Expression, overrid
     }
 
     override fun copy() = PrefixExpression(operator, expression.copy(), position)
+    override fun hasSideEffects(target: ICompilationTarget): Boolean = expression.hasSideEffects(target)
     override fun constValue(program: Program): NumericLiteral? {
         val constval = expression.constValue(program) ?: return null
         val converted = when(operator) {
@@ -154,6 +170,8 @@ class BinaryExpression(
 ) : Expression() {
     override lateinit var parent: Node
 
+    override fun isIORead(target: ICompilationTarget): Boolean = left.isIORead(target) || right.isIORead(target)
+
     override fun linkParents(parent: Node) {
         this.parent = parent
         left.linkParents(this)
@@ -171,6 +189,7 @@ class BinaryExpression(
     }
 
     override fun copy() = BinaryExpression(left.copy(), operator, right.copy(), position)
+    override fun hasSideEffects(target: ICompilationTarget): Boolean = left.hasSideEffects(target) || right.hasSideEffects(target)
     override fun toString() = "[$left $operator $right]"
 
     override val isSimple = false
@@ -280,6 +299,8 @@ class BinaryExpression(
         }
     }
 
+    fun maySwapOperandOrder(): Boolean = 
+        (operator in CommutativeOperators) && (right.isSimple || left.isSimple)
 
     companion object {
         fun commonDatatype(leftDt: DataType, rightDt: DataType,
@@ -295,6 +316,8 @@ class BinaryExpression(
                 return rightDt to null
 
 
+            // float + anything -> float
+            // long + anything -> long
             // byte + byte -> byte
             // byte + word -> word
             // word + byte -> word
@@ -303,16 +326,16 @@ class BinaryExpression(
 
             // if left or right is a numeric literal, and its value fits in the type of the other operand, use the other's operand type
             // EXCEPTION: if the numeric value is a word and the other operand is a byte type (to allow   v * $0008  for example)
-            if (left is NumericLiteral && rightDt.isNumericOrBool) {
-                if(!(leftDt.isWord && rightDt.isByte)) {
+            if (left is NumericLiteral && !left.type.isLong && !left.type.isFloat && rightDt.isNumericOrBool) {
+                if(!((leftDt.isWord) && rightDt.isByte)) {
                     val optimal = NumericLiteral.optimalNumeric(rightDt.base, null, left.number, left.position)
                     if (optimal.type != leftDt.base && DataType.forDt(optimal.type) isAssignableTo rightDt) {
                         return DataType.forDt(optimal.type) to left
                     }
                 }
             }
-            if (right is NumericLiteral && leftDt.isNumericOrBool) {
-                if(!(rightDt.isWord && leftDt.isByte)) {
+            if (right is NumericLiteral && !right.type.isLong && !right.type.isFloat && leftDt.isNumericOrBool) {
+                if(!((rightDt.isWord) && leftDt.isByte)) {
                     val optimal = NumericLiteral.optimalNumeric(leftDt.base, null, right.number, right.position)
                     if (optimal.type != rightDt.base && DataType.forDt(optimal.type) isAssignableTo leftDt) {
                         return DataType.forDt(optimal.type) to right
@@ -392,40 +415,82 @@ class BinaryExpression(
 }
 
 class ArrayIndexedExpression(var plainarrayvar: IdentifierReference?,
+                             var nestedArray: ArrayIndexedExpression?,  // For chained indexing like matrix[i][j]
                              var pointerderef: PtrDereference?,
-                             val indexer: ArrayIndex,
+                             var indexer: ArrayIndex,
                              override val position: Position) : Expression() {
     override lateinit var parent: Node
+    override fun isIORead(target: ICompilationTarget): Boolean = plainarrayvar?.isIORead(target) == true ||
+                                                                 nestedArray?.isIORead(target) == true ||
+                                                                 indexer.indexExpr.isIORead(target)
+
     override fun linkParents(parent: Node) {
         this.parent = parent
         plainarrayvar?.linkParents(this)
+        nestedArray?.linkParents(this)
         pointerderef?.linkParents(this)
         indexer.linkParents(this)
     }
 
-    override val isSimple = indexer.indexExpr is NumericLiteral || indexer.indexExpr is IdentifierReference
+    override val isSimple = (indexer.indexExpr is NumericLiteral || indexer.indexExpr is IdentifierReference) && nestedArray == null
 
     override fun replaceChildNode(node: Node, replacement: Node) {
         when (replacement) {
             is IdentifierReference -> {
                 plainarrayvar = replacement
+                nestedArray = null
+                pointerderef = null
+            }
+            is ArrayIndexedExpression -> {
+                plainarrayvar = null
+                nestedArray = replacement
                 pointerderef = null
             }
             is PtrDereference -> {
                 plainarrayvar = null
+                nestedArray = null
                 pointerderef = replacement
             }
-            else -> throw FatalAstException("invalid replace")
+            is ArrayIndex -> {
+                // Replacing the whole ArrayIndex
+                indexer = replacement
+            }
+            is Expression -> {
+                if(node===indexer.indexExpr) {
+                    // Replacing just the index expression
+                    indexer.indexExpr = replacement
+                } else {
+                    throw FatalAstException("invalid replace: $node -> $replacement")
+                }
+            }
+            else -> throw FatalAstException("invalid replace: $node -> $replacement")
         }
         replacement.parent = this
     }
 
-    override fun constValue(program: Program): NumericLiteral? = null
+    override fun constValue(program: Program): NumericLiteral? {
+        val arrayVar = plainarrayvar?.targetVarDecl()
+        if (arrayVar != null && arrayVar.type == VarDeclType.CONST) {
+            val constIndex = indexer.constIndex()
+            if (constIndex != null) {
+                val arrayLiteral = arrayVar.value as? ArrayLiteral
+                if (arrayLiteral != null && constIndex in arrayLiteral.value.indices) {
+                    return arrayLiteral.value[constIndex].constValue(program)
+                }
+            }
+        }
+        return null
+    }
     override fun accept(visitor: IAstVisitor) = visitor.visit(this)
     override fun accept(visitor: AstWalker, parent: Node)= visitor.visit(this, parent)
 
-    override fun referencesIdentifier(nameInSource: List<String>) =
-        plainarrayvar?.referencesIdentifier(nameInSource)==true || pointerderef?.referencesIdentifier(nameInSource)==true || indexer.referencesIdentifier(nameInSource)
+    override fun referencesIdentifier(nameInSource: List<String>): Boolean {
+        val plainRef = plainarrayvar?.referencesIdentifier(nameInSource) == true
+        val nestedRef: Boolean = nestedArray?.referencesIdentifier(nameInSource) == true
+        val ptrRef = pointerderef?.referencesIdentifier(nameInSource) == true
+        val idxRef = indexer.referencesIdentifier(nameInSource)
+        return plainRef || nestedRef || ptrRef || idxRef
+    }
 
     override fun inferType(program: Program): InferredTypes.InferredType {
         if(plainarrayvar!=null) {
@@ -446,6 +511,10 @@ class ArrayIndexedExpression(var plainarrayvar: IdentifierReference?,
                 return if(subparam!=null) InferredTypes.knownFor(subparam.type) else InferredTypes.unknown()
             } else
                 TODO("infer type from target $target   ${target.position}    arrayindexed @ ${this.position}")
+        } else if(nestedArray!=null) {
+            // For nested array indexing like matrix[i][j], infer type from the nested expression
+            val nestedType: InferredTypes.InferredType = nestedArray!!.inferType(program)
+            return nestedType
         } else if(pointerderef!=null) {
             val dt= pointerderef!!.inferType(program).getOrUndef()
             return when {
@@ -461,18 +530,29 @@ class ArrayIndexedExpression(var plainarrayvar: IdentifierReference?,
     override fun toString(): String {
         return if(plainarrayvar!=null)
             "ArrayIndexed(arrayvar=$plainarrayvar, idx=$indexer; pos=$position)"
+        else if(nestedArray!=null)
+            "ArrayIndexed(nested=$nestedArray, idx=$indexer; pos=$position)"
         else if(pointerderef!=null)
             "ArrayIndexed(ptr=$pointerderef, idx=$indexer; pos=$position)"
         else
             "??????"
     }
 
-    override fun copy() = ArrayIndexedExpression(plainarrayvar?.copy(), pointerderef?.copy(), indexer.copy(), position)
+    override fun copy(): ArrayIndexedExpression {
+        val copyNested: ArrayIndexedExpression? = nestedArray?.copy()
+        return ArrayIndexedExpression(plainarrayvar?.copy(), copyNested, pointerderef?.copy(), indexer.copy(), position)
+    }
+
+    override fun hasSideEffects(target: ICompilationTarget): Boolean = true
 
     fun isSameArrayIndexedAs(other: Expression): Boolean {
         if(other !is ArrayIndexedExpression || !(other.indexer.indexExpr isSameAs indexer.indexExpr))
             return false
         if(plainarrayvar?.nameInSource != other.plainarrayvar?.nameInSource)
+            return false
+        if(nestedArray != null && other.nestedArray != null)
+            return nestedArray!!.isSameArrayIndexedAs(other.nestedArray!!)
+        if(nestedArray != null || other.nestedArray != null)
             return false
         if(pointerderef!=null)
             return pointerderef!!.isSamePointerDeref(other.pointerderef)
@@ -483,6 +563,8 @@ class ArrayIndexedExpression(var plainarrayvar: IdentifierReference?,
 
 class TypecastExpression(var expression: Expression, var type: DataType, val implicit: Boolean, override val position: Position) : Expression() {
     override lateinit var parent: Node
+
+    override fun isIORead(target: ICompilationTarget): Boolean = expression.isIORead(target)
 
     override fun linkParents(parent: Node) {
         this.parent = parent
@@ -498,6 +580,7 @@ class TypecastExpression(var expression: Expression, var type: DataType, val imp
     }
 
     override fun copy() = TypecastExpression(expression.copy(), type, implicit, position)
+    override fun hasSideEffects(target: ICompilationTarget): Boolean = expression.hasSideEffects(target)
     override fun accept(visitor: IAstVisitor) = visitor.visit(this)
     override fun accept(visitor: AstWalker, parent: Node)= visitor.visit(this, parent)
 
@@ -551,6 +634,19 @@ data class AddressOf(var identifier: IdentifierReference?, var arrayIndex: Array
                 require(replacement is ArrayIndex)
                 arrayIndex = replacement
             }
+            node===dereference -> {
+                if(replacement is IdentifierReference) {
+                    identifier = replacement
+                    dereference = null
+                } else if(replacement is ArrayIndex) {
+                    arrayIndex = replacement
+                    dereference = null
+                } else if(replacement is PtrDereference) {
+                    dereference = replacement
+                } else {
+                    throw FatalAstException("invalid replace $node")
+                }
+            }
             else -> {
                 throw FatalAstException("invalid replace, no child node $node")
             }
@@ -565,7 +661,7 @@ data class AddressOf(var identifier: IdentifierReference?, var arrayIndex: Array
         val target = this.identifier?.targetStatement()
         val targetVar = target as? VarDecl
         if(targetVar!=null) {
-            if (targetVar.type == VarDeclType.MEMORY || targetVar.type == VarDeclType.CONST) {
+            if (targetVar.type == VarDeclType.MEMORY || (targetVar.type == VarDeclType.CONST && arrayIndex != null)) {
                 var address = targetVar.value?.constValue(program)?.number
                 if (address != null) {
                     if (arrayIndex != null) {
@@ -573,7 +669,7 @@ data class AddressOf(var identifier: IdentifierReference?, var arrayIndex: Array
                         if (index != null) {
                             address += when {
                                 target.datatype.isInteger -> index
-                                target.datatype.isArray -> program.memsizer.memorySize(targetVar.datatype, index)
+                                target.datatype.isPointer || target.datatype.isArray -> index * targetVar.datatype.size(program.memsizer)
                                 else -> throw FatalAstException("need array or ptr")
                             }
                         } else
@@ -607,6 +703,8 @@ data class AddressOf(var identifier: IdentifierReference?, var arrayIndex: Array
         } else
             throw FatalAstException("invalid addressof")
     }
+
+    override fun isIORead(target: ICompilationTarget) = false
     override fun accept(visitor: IAstVisitor) = visitor.visit(this)
     override fun accept(visitor: AstWalker, parent: Node)= visitor.visit(this, parent)
 }
@@ -628,13 +726,19 @@ class DirectMemoryRead(var addressExpression: Expression, override val position:
     }
 
     override fun copy() = DirectMemoryRead(addressExpression.copy(), position)
+    override fun hasSideEffects(target: ICompilationTarget): Boolean = isIORead(target)
     override fun accept(visitor: IAstVisitor) = visitor.visit(this)
     override fun accept(visitor: AstWalker, parent: Node)= visitor.visit(this, parent)
 
     override fun referencesIdentifier(nameInSource: List<String>) = addressExpression.referencesIdentifier(nameInSource)
     override fun inferType(program: Program) = InferredTypes.knownFor(BaseDataType.UBYTE)
     override fun constValue(program: Program): NumericLiteral? = null
-
+    override fun isIORead(target: ICompilationTarget): Boolean {
+        if (addressExpression is NumericLiteral) {
+            return target.isIOAddress((addressExpression as NumericLiteral).number.toUInt())
+        }
+        return true // assume worst case if address is not constant
+    }
     override fun toString(): String {
         return "DirectMemoryRead($addressExpression)"
     }
@@ -663,6 +767,7 @@ class NumericLiteral(val type: BaseDataType,    // only numerical types allowed 
     }
 
     override val isSimple = true
+    override fun isIORead(target: ICompilationTarget) = false
     override fun copy() = NumericLiteral(type, number, position)
 
     companion object {
@@ -783,7 +888,7 @@ class NumericLiteral(val type: BaseDataType,    // only numerical types allowed 
     operator fun compareTo(other: NumericLiteral): Int = number.compareTo(other.number)
 
     class ValueAfterCast(val isValid: Boolean, val whyFailed: String?, private val value: NumericLiteral?) {
-        fun valueOrZero() = if(isValid) value!! else NumericLiteral(BaseDataType.UBYTE, 0.0, Position.DUMMY)
+        fun valueOrZero() = if(isValid) value!! else NumericLiteral(BaseDataType.UBYTE, 0.0, value?.position ?: Position.DUMMY)
         fun linkParent(parent: Node) {
             value?.linkParents(parent)
         }
@@ -796,6 +901,8 @@ class NumericLiteral(val type: BaseDataType,    // only numerical types allowed 
     }
 
     private fun internalCast(targettype: BaseDataType, implicit: Boolean): ValueAfterCast {
+        // NOTE: do not add targettype.isPointer checks to the other numeric types in the 'when' block below,
+        // like in the UBYTE case. It causes an endless loop in the compiler.
 
         // NOTE: this MAY convert a value into another when switching from singed to unsigned!!!
 
@@ -1028,7 +1135,8 @@ class CharLiteral private constructor(val value: Char,
     }
 
     override val isSimple = true
-
+    override fun isIORead(target: ICompilationTarget) = false
+    
     override fun replaceChildNode(node: Node, replacement: Node) {
         throw FatalAstException("can't replace here")
     }
@@ -1078,6 +1186,7 @@ class StringLiteral private constructor(val value: String,
     }
 
     override val isSimple = true
+    override fun isIORead(target: ICompilationTarget) = false
     override fun copy() = StringLiteral(value, encoding, position)
 
     override fun replaceChildNode(node: Node, replacement: Node) {
@@ -1111,8 +1220,10 @@ class ArrayLiteral(val type: InferredTypes.InferredType,     // inferred because
     }
 
     override fun copy(): ArrayLiteral = ArrayLiteral(type, value.map { it.copy() }.toTypedArray(), position)
+    override fun hasSideEffects(target: ICompilationTarget): Boolean = value.any { it.hasSideEffects(target) }
     override val isSimple = true
-
+    override fun isIORead(target: ICompilationTarget) = false
+    
     override fun replaceChildNode(node: Node, replacement: Node) {
         require(replacement is Expression)
         val idx = value.indexOfFirst { it===node }
@@ -1125,6 +1236,7 @@ class ArrayLiteral(val type: InferredTypes.InferredType,     // inferred because
     override fun accept(visitor: IAstVisitor) = visitor.visit(this)
     override fun accept(visitor: AstWalker, parent: Node)= visitor.visit(this, parent)
 
+    @Suppress("KotlinArrayToString")
     override fun toString(): String = "$value"
     override fun inferType(program: Program): InferredTypes.InferredType = if(type.isKnown) type else guessDatatype(program)
 
@@ -1255,6 +1367,7 @@ class RangeExpression(var from: Expression,
     }
 
     override val isSimple = true
+    override fun isIORead(target: ICompilationTarget) = false
 
     override fun replaceChildNode(node: Node, replacement: Node) {
         require(replacement is Expression)
@@ -1336,59 +1449,99 @@ class RangeExpression(var from: Expression,
     }
 }
 
+class MemorySlabRef(val slabName: String, override val position: Position) : Expression() {
+    override lateinit var parent: Node
+    override val isSimple = true
+    override fun copy() = MemorySlabRef(slabName, position)
+    override fun constValue(program: Program): NumericLiteral? = null
+    override fun inferType(program: Program): InferredTypes.InferredType = InferredTypes.knownFor(BaseDataType.UWORD)
+    override fun accept(visitor: IAstVisitor) = visitor.visit(this)
+    override fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)
+    override fun linkParents(parent: Node) { this.parent = parent }
+    override fun replaceChildNode(node: Node, replacement: Node) {}
+    override fun referencesIdentifier(nameInSource: List<String>) = false
+    override fun isIORead(target: ICompilationTarget) = false
+}
+
 data class IdentifierReference(val nameInSource: List<String>, override val position: Position) : Expression() {
     override lateinit var parent: Node
 
     override val isSimple = true
 
+    override fun isIORead(target: ICompilationTarget): Boolean {
+        return try {
+            val decl = targetVarDecl() ?: return false
+            if (decl.type == VarDeclType.MEMORY && decl.value is NumericLiteral)
+                target.isIOAddress((decl.value as NumericLiteral).number.toUInt())
+            else
+                false
+        } catch (_: FatalAstException) {
+            false
+        }
+    }
+
     fun targetStatement(builtins: IBuiltinFunctions? = null): Statement? =
-        if(builtins!=null && nameInSource.singleOrNull() in builtins.names)
-            BuiltinFunctionPlaceholder(nameInSource[0], position, parent)
+        if(builtins!=null && nameInSource.singleOrNull() in builtins.names) {
+            val returntypes = builtins.returnTypes(nameInSource[0]).map { it.getOrUndef() }
+            BuiltinFunctionPlaceholder(nameInSource[0], returntypes, position, parent)
+        }
         else
             definingScope.lookup(nameInSource)
-    fun targetVarDecl(): VarDecl? {
+    fun targetVarDecl(visitedAliases: MutableSet<Alias> = mutableSetOf()): VarDecl? {
         // follows aliases
         val t = targetStatement()
-        return if(t is Alias)
-            t.target.targetVarDecl()
-        else
+        return if (t is Alias) {
+            if (t in visitedAliases) return null
+            visitedAliases.add(t)
+            t.target.targetVarDecl(visitedAliases)
+        } else
             t as? VarDecl
     }
-    fun targetSubroutine(): Subroutine? {
+    fun targetSubroutine(visitedAliases: MutableSet<Alias> = mutableSetOf()): Subroutine? {
         // follows aliases
         val t = targetStatement()
-        return if(t is Alias)
-            t.target.targetSubroutine()
-        else
+        return if (t is Alias) {
+            if (t in visitedAliases) return null
+            visitedAliases.add(t)
+            t.target.targetSubroutine(visitedAliases)
+        } else
             t as? Subroutine
     }
-    fun targetStructDecl(): StructDecl? {
+    fun targetStructDecl(visitedAliases: MutableSet<Alias> = mutableSetOf()): StructDecl? {
         // follows aliases
         val t = targetStatement()
-        return if(t is Alias)
-            t.target.targetStructDecl()
-        else
+        return if (t is Alias) {
+            if (t in visitedAliases) return null
+            visitedAliases.add(t)
+            t.target.targetStructDecl(visitedAliases)
+        } else
             t as? StructDecl
-    }
-    fun targetStructFieldRef(): StructFieldRef? {
-        if(nameInSource.size<2) return null
-        return targetStatement() as? StructFieldRef
     }
 
     fun firstTarget(builtins: IBuiltinFunctions? = null): Statement? =
-        if(builtins!=null && nameInSource.singleOrNull() in builtins.names)
-            BuiltinFunctionPlaceholder(nameInSource[0], position, parent)
+        if(builtins!=null && nameInSource.singleOrNull() in builtins.names) {
+            val returntypes = builtins.returnTypes(nameInSource[0]).map { it.getOrUndef() }
+            BuiltinFunctionPlaceholder(nameInSource[0], returntypes, position, parent)
+        }
         else
-            definingScope.lookup(nameInSource.take(1))
+            definingScope.lookup(nameInSource[0])
 
-    fun targetNameAndType(program: Program): Pair<String, DataType> {
+    fun targetNameAndTypes(program: Program): Pair<String, Array<DataType>> {
         val target = targetStatement(program.builtinFunctions) as? INamedStatement  ?: throw FatalAstException("can't find target for $nameInSource")
         val targetname: String = if(target.name in program.builtinFunctions.names)
             "<builtin>.${target.name}"
         else
             target.scopedName.joinToString(".")
-        val type = inferType(program).getOrUndef()
-        return Pair(targetname, type)
+
+        val sub = target as? Subroutine
+        if(sub!=null) {
+            return targetname to sub.returntypes.toTypedArray()
+        }
+        val type = inferType(program)
+        return if(type.isKnown && !type.isVoid)
+            targetname to arrayOf(type.getOrUndef())
+        else
+            targetname to emptyArray()
     }
 
     override fun linkParents(parent: Node) {
@@ -1476,10 +1629,13 @@ data class IdentifierReference(val nameInSource: List<String>, override val posi
             struct = startStruct
         }
         else {
-            val vardecl = definingScope.lookup(nameInSource.take(1)) as? VarDecl
+            val vardecl = definingScope.lookup(nameInSource[0]) as? VarDecl
             if (vardecl?.datatype?.isPointer != true)
                 return DataType.UNDEFINED
-            require(vardecl.datatype.subType!=null) { "pointer type should point to a struct ${vardecl.position}" }
+            if(vardecl.datatype.subType==null) {
+                // Pointer to primitive type - return the pointer type itself
+                return vardecl.datatype
+            }
             struct = vardecl.datatype.subType!!
             fieldDt = vardecl.datatype
         }
@@ -1492,7 +1648,8 @@ data class IdentifierReference(val nameInSource: List<String>, override val posi
                 // was last path element
                 return fieldDt
             }
-            struct = fieldDt.subType ?: return DataType.UNDEFINED
+            // If field is pointer to primitive (like str), we can't deref further
+            struct = fieldDt.subType ?: return fieldDt
         }
         return fieldDt ?: DataType.UNDEFINED
     }
@@ -1513,6 +1670,9 @@ class FunctionCallExpression(override var target: IdentifierReference,
                              override val position: Position) : Expression(), IFunctionCall {
     override lateinit var parent: Node
 
+    // Function calls might have side effects, so they always count as IO reads
+    override fun isIORead(target: ICompilationTarget): Boolean = true
+
     override fun linkParents(parent: Node) {
         this.parent = parent
         target.linkParents(this)
@@ -1520,6 +1680,7 @@ class FunctionCallExpression(override var target: IdentifierReference,
     }
 
     override fun copy() = FunctionCallExpression(target.copy(), args.map { it.copy() }.toMutableList(), position)
+    override fun hasSideEffects(target: ICompilationTarget): Boolean = true
     override val isSimple = if (target.nameInSource.singleOrNull() in SimpleBuiltinFunctions) this.args.all { it.isSimple } else false
     override fun replaceChildNode(node: Node, replacement: Node) {
         if(node===target)
@@ -1532,6 +1693,14 @@ class FunctionCallExpression(override var target: IdentifierReference,
     }
 
     override fun constValue(program: Program) = constValue(program, true)
+
+    override fun constValues(program: Program): List<NumericLiteral>? {
+        if (target.nameInSource.size > 1)
+            return null
+        val values = program.builtinFunctions.constValues(target.nameInSource[0], args, position)
+        values?.forEach { it.parent = this.parent }
+        return values
+    }
 
     private fun constValue(program: Program, withDatatypeCheck: Boolean): NumericLiteral? {
         // if the function is a built-in function and the args are consts, should try to const-evaluate!
@@ -1564,10 +1733,18 @@ class FunctionCallExpression(override var target: IdentifierReference,
         val constVal = constValue(program ,false)
         if(constVal!=null)
             return InferredTypes.knownFor(constVal.type)
+        if (args.any { it.inferType(program).isUnknown })
+            return InferredTypes.unknown()
         val stmt = target.targetStatement(program.builtinFunctions) ?: return InferredTypes.unknown()
         when (stmt) {
             is BuiltinFunctionPlaceholder -> {
-                return program.builtinFunctions.returnType(target.nameInSource[0])
+                val types = program.builtinFunctions.returnTypes(target.nameInSource[0])
+                if(types.isEmpty())
+                    return InferredTypes.void()
+                else if(types.size==1)
+                    return types[0]
+                else
+                    return InferredTypes.unknown()     // has multiple return types... so not a single resulting datatype possible
             }
             is Subroutine -> {
                 if(stmt.returntypes.isEmpty())
@@ -1575,7 +1752,7 @@ class FunctionCallExpression(override var target: IdentifierReference,
                 if(stmt.returntypes.size==1)
                     return InferredTypes.knownFor(stmt.returntypes[0])
 
-                return InferredTypes.unknown()     // has multiple return types... so not a single resulting datatype possible
+                return InferredTypes.unknown()     // has multiple return types... so not a single resulting datatype possible at this point
             }
             is StructDecl -> {
                 // calling a struct is syntax for allocating a static instance, and returns a pointer to that (not the instance itself)
@@ -1600,6 +1777,7 @@ class ContainmentCheck(var element: Expression,
     }
 
     override val isSimple: Boolean = false
+    override fun isIORead(target: ICompilationTarget) = false
     override fun copy() = ContainmentCheck(element.copy(), iterable.copy(), position)
     override fun constValue(program: Program): NumericLiteral? {
         val elementConst = element.constValue(program)
@@ -1668,6 +1846,8 @@ class IfExpression(var condition: Expression, var truevalue: Expression, var fal
 
     override lateinit var parent: Node
 
+    override fun isIORead(target: ICompilationTarget): Boolean = condition.isIORead(target) || truevalue.isIORead(target) || falsevalue.isIORead(target)
+
     override fun linkParents(parent: Node) {
         this.parent = parent
         condition.linkParents(this)
@@ -1690,6 +1870,8 @@ class IfExpression(var condition: Expression, var truevalue: Expression, var fal
     }
 
     override fun copy(): Expression = IfExpression(condition.copy(), truevalue.copy(), falsevalue.copy(), position)
+
+    override fun hasSideEffects(target: ICompilationTarget): Boolean = condition.hasSideEffects(target) || truevalue.hasSideEffects(target) || falsevalue.hasSideEffects(target)
 
     override fun constValue(program: Program): NumericLiteral? {
         val cond = condition.constValue(program)
@@ -1720,7 +1902,7 @@ class BranchConditionExpression(var condition: BranchCondition, var truevalue: E
     }
 
     override val isSimple: Boolean = truevalue.isSimple && falsevalue.isSimple
-
+    override fun isIORead(target: ICompilationTarget) = false
     override fun constValue(program: Program) = null
     override fun toString() = "BranchExpr(cond=$condition, true=$truevalue, false=$falsevalue, pos=$position)"
     override fun accept(visitor: IAstVisitor) = visitor.visit(this)
@@ -1745,6 +1927,47 @@ class BranchConditionExpression(var condition: BranchCondition, var truevalue: E
     }
 }
 
+/**
+ * Represents a single element in a pointer dereference chain.
+ * Each element consists of an identifier and an optional array index.
+ * 
+ * Example: In `foo.bar[0]^^.baz^^`, this represents:
+ * - `PtrDerefElement("foo", null)` 
+ * - `PtrDerefElement("bar", ArrayIndex(...))`
+ * - `PtrDerefElement("baz", null)`
+ */
+data class PtrDerefElement(
+    val identifier: String,
+    val arrayIndex: ArrayIndex? = null
+)
+
+/**
+ * Represents a postfix operation in a pointer dereference chain.
+ * This is used to represent the chain in a way that matches how the future grammar will parse it.
+ * 
+ * Example: `foo.bar[0]^^.baz^^` becomes:
+ * [Name("foo"), Name("bar"), Index(...), Deref, Name("baz"), Deref]
+ */
+sealed class PtrPostfixOp {
+    data class Name(val identifier: String) : PtrPostfixOp()
+    data class Index(val indexExpr: ArrayIndex) : PtrPostfixOp()
+    object Deref : PtrPostfixOp()
+}
+
+// TODO: Unify `PtrDereference` and `ArrayIndexedPtrDereference` into a single class that uses
+// List<PtrDerefElement> for the chain instead of having two separate representations.
+// This unification should happen when the grammar is redesigned to use postfix operators
+// (see PtrPostfixOp) instead of the current "cursed" grammar structure.
+// See: parser/README-IMPROVEMENTS.md section 3 "Pointer Dereference Grammar is Admittedly Cursed"
+//
+// Steps for future grammar transition:
+// 1. Update .g4 file to use postfix operators (pointerderefchain with primary + postfix ops)
+// 2. Replace PtrDereference + ArrayIndexedPtrDereference with single unified PtrDereferenceExpression
+// 3. Update AssignTarget to use single pointerDereference field instead of two separate fields
+// 4. Update CodeDesugarer to handle new unified structure
+// 5. Update SimplifiedAstMaker.transform() to convert to PtPointerDeref
+// 6. Consider simplifying PtPointerDeref in SimpleAst to match new representation
+
 class PtrDereference(
     val chain: List<String>,
     val derefLast: Boolean,
@@ -1758,14 +1981,34 @@ class PtrDereference(
     }
 
     override val isSimple = false
+    override fun hasSideEffects(target: ICompilationTarget): Boolean = true
+    override fun isIORead(target: ICompilationTarget) = false
     override fun copy(): PtrDereference = PtrDereference(chain.toList(), derefLast, position)
-    override fun constValue(program: Program): NumericLiteral? = null
+    override fun constValue(program: Program): NumericLiteral? {
+        if (derefLast) return null
+        val target = definingScope.lookup(chain) as? VarDecl
+        if (target?.type == VarDeclType.CONST) {
+            return target.value?.constValue(program)
+        }
+        return null
+    }
     override fun accept(visitor: IAstVisitor) = visitor.visit(this)
     override fun accept(visitor: AstWalker, parent: Node) = visitor.visit(this, parent)
 
     override fun inferType(program: Program): InferredTypes.InferredType {
 
-        fun resultType(dt: DataType?) = if(dt==null) InferredTypes.unknown() else InferredTypes.knownFor(if(derefLast) dt.dereference() else dt)
+        fun resultType(dt: DataType?): InferredTypes.InferredType {
+            return if (dt == null) InferredTypes.unknown()
+                else {
+                    if(derefLast) {
+                        if(dt.isPointer || dt.isUnsignedWord)
+                            InferredTypes.knownFor(dt.dereference())
+                        else
+                            InferredTypes.unknown()
+                    } else
+                        InferredTypes.knownFor(dt)
+            }
+        }
 
         val target = definingScope.lookup(chain) ?: return InferredTypes.unknown()
         return when (target) {
@@ -1790,7 +2033,55 @@ class PtrDereference(
             true
     }
 
-    fun firstTarget(): Statement? = definingScope.lookup(chain.take(1))
+    fun firstTarget(): Statement? = if(chain.isEmpty()) null else definingScope.lookup(chain[0])
+
+    // === Helper methods for future grammar transition ===
+
+    /**
+     * Returns the chain as a list of PtrDerefElement objects.
+     * For PtrDereference, all elements have null arrayIndex.
+     */
+    fun toElements(): List<PtrDerefElement> = chain.map { PtrDerefElement(it, null) }
+
+    /**
+     * Returns true if this is a simple field access with no array indexing.
+     * Always true for PtrDereference (use ArrayIndexedPtrDereference for indexing).
+     */
+    fun isSimpleFieldAccess(): Boolean = true
+
+    /**
+     * Returns true if any element in the chain has an array index.
+     * Always false for PtrDereference.
+     */
+    fun hasArrayIndexing(): Boolean = false
+
+    /**
+     * Returns the first identifier in the chain (the base variable).
+     */
+    fun baseIdentifier(): String = chain.firstOrNull() ?: ""
+
+    /**
+     * Returns all identifiers in the chain except the first one (the field access path).
+     */
+    fun fieldIdentifiers(): List<String> = chain.drop(1)
+
+    /**
+     * Converts this dereference chain to a postfix representation.
+     * This matches how the future grammar will parse pointer dereferences.
+     * 
+     * Example: `foo.bar.baz^^` becomes:
+     * [Name("foo"), Name("bar"), Name("baz"), Deref]
+     */
+    fun toPostfixRepresentation(): List<PtrPostfixOp> {
+        val result = mutableListOf<PtrPostfixOp>()
+        chain.forEach { name ->
+            result.add(PtrPostfixOp.Name(name))
+        }
+        if (derefLast) {
+            result.add(PtrPostfixOp.Deref)
+        }
+        return result
+    }
 }
 
 class ArrayIndexedPtrDereference(
@@ -1806,7 +2097,8 @@ class ArrayIndexedPtrDereference(
     }
 
     override val isSimple = false
-
+    override fun hasSideEffects(target: ICompilationTarget): Boolean = true
+    override fun isIORead(target: ICompilationTarget) = false
     override fun replaceChildNode(node: Node, replacement: Node) = throw FatalAstException("can't replace here")
     override fun referencesIdentifier(nameInSource: List<String>) = chain.size==1 && chain==nameInSource
     override fun copy(): ArrayIndexedPtrDereference = ArrayIndexedPtrDereference(chain.toList(), derefLast, position)
@@ -1867,6 +2159,54 @@ class ArrayIndexedPtrDereference(
         // too hard to determine the type....?
         return InferredTypes.unknown()
     }
+
+    // === Helper methods for future grammar transition ===
+
+    /**
+     * Returns the chain as a list of PtrDerefElement objects.
+     */
+    fun toElements(): List<PtrDerefElement> = chain.map { PtrDerefElement(it.first, it.second) }
+
+    /**
+     * Returns true if this is a simple field access with no array indexing.
+     */
+    fun isSimpleFieldAccess(): Boolean = chain.all { it.second == null }
+
+    /**
+     * Returns true if any element in the chain has an array index.
+     */
+    fun hasArrayIndexing(): Boolean = chain.any { it.second != null }
+
+    /**
+     * Returns the first identifier in the chain (the base variable).
+     */
+    fun baseIdentifier(): String = chain.firstOrNull()?.first ?: ""
+
+    /**
+     * Returns all identifiers in the chain except the first one (the field access path).
+     */
+    fun fieldIdentifiers(): List<String> = chain.drop(1).map { it.first }
+
+    /**
+     * Converts this dereference chain to a postfix representation.
+     * This matches how the future grammar will parse pointer dereferences.
+     * 
+     * Example: `foo.bar[0]^^.baz^^` becomes:
+     * [Name("foo"), Name("bar"), Index(ArrayIndex), Deref, Name("baz"), Deref]
+     */
+    fun toPostfixRepresentation(): List<PtrPostfixOp> {
+        val result = mutableListOf<PtrPostfixOp>()
+        chain.forEach { (name, index) ->
+            result.add(PtrPostfixOp.Name(name))
+            if (index != null) {
+                result.add(PtrPostfixOp.Index(index))
+            }
+        }
+        if (derefLast) {
+            result.add(PtrPostfixOp.Deref)
+        }
+        return result
+    }
 }
 
 
@@ -1883,6 +2223,7 @@ class StaticStructInitializer(var structname: IdentifierReference,
 
     override fun copy() = StaticStructInitializer(structname.copy(), args.map { it.copy() }.toMutableList(), position)
     override val isSimple = args.all { it.isSimple }
+    override fun isIORead(target: ICompilationTarget) = false
     override fun replaceChildNode(node: Node, replacement: Node) {
         if(node===structname)
             structname=replacement as IdentifierReference
@@ -1922,4 +2263,29 @@ fun invertCondition(cond: Expression, program: Program): Expression {
         PrefixExpression("not", cond, cond.position)
     else
         BinaryExpression(cond, "==", NumericLiteral(BaseDataType.UBYTE, 0.0, cond.position), cond.position)
+}
+
+
+class ExpressionTuple(val expressions: List<Expression>, override val position: Position): Expression() {
+
+    override lateinit var parent: Node
+    override fun linkParents(parent: Node) {
+        this.parent = parent
+        expressions.forEach { it.linkParents(this) }
+    }
+
+    override fun replaceChildNode(node: Node, replacement: Node) {
+        throw FatalAstException("can't replace anything in a ExpressionTuple node")
+    }
+
+    override val isSimple = expressions.all { it.isSimple }
+    override fun isIORead(target: ICompilationTarget) = expressions.any { it.isIORead(target) }
+    override fun referencesIdentifier(nameInSource: List<String>) = expressions.any { it.referencesIdentifier(nameInSource) }
+    override fun copy(): ExpressionTuple = ExpressionTuple(expressions.map { it.copy() }, position)
+
+    override fun constValue(program: Program): NumericLiteral? { throw FatalAstException("should not be called ever") }
+    override fun accept(visitor: IAstVisitor)  { throw FatalAstException("should not be called ever") }
+    override fun accept(visitor: AstWalker, parent: Node)  { throw FatalAstException("should not be called ever") }
+    override fun inferType(program: Program): InferredTypes.InferredType  { throw FatalAstException("should not be called ever") }
+
 }

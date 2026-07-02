@@ -53,7 +53,7 @@ The path you need to provide for the ``library`` variable can be relative (to th
 and you can use a tilde ``~`` in it like in a shell path, to refer to a user's home directory.
 Note that library modules not unique to a specific compilation target (for example, `buffers`, `sorting` or `strings`) will
 be picked up from the internal library files just fine as was always the case. You can still provide custom versions of them
-in your own library folder ofcourse, like you already could with using the ``-srcdirs`` compiler flag.
+in your own library folder of course, like you already could with using the ``-srcdirs`` compiler flag.
 
 Most of the things discussed in the :ref:`portingguide` can and must be configured properly in the target configuration file.
 You also need to create some essential ``syslib`` library module for the configured target if its name does not match
@@ -110,6 +110,7 @@ Footnotes for the Commander X16
     $00 and $01 are hardwired as Rom and Ram banking registers.
 
     $02 - $21 are the 16 virtual cx16 registers R0-R15.
+    Note: these virtual registers are not automatically initialized to zero at program startup.
 
     $22 - $7F are used by Prog8 to put variables in.
 
@@ -136,6 +137,20 @@ Footnotes for the Commodore 64
     Consider the full zero page to be reserved for use by the Kernal and Basic in normal operation.
     Zero page use by Prog8 can be manipulated with the ``%zeropage`` directive, various options
     may free up more locations for use by Prog8 or to reserve them for other things.
+
+
+Footnotes for the Commodore 128
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. index:: single: Targets; Commodore 128 notes
+
+*Golden Ram $1300 - $1BDF*
+    Application RAM area, free to use if you don't use BASIC variables or strings.
+    Note: $1BE0 - $1BFF are used for the 16 virtual registers cx16.r0 .. cx16.r15.
+    There is no "high ram" defined on the C128.
+
+*Program RAM $1C00 - $BFFF*
+    On the C128 the Basic ROM is banked out by default, reclaiming the RAM area from $1C00 to $BFFF.
+    This gives about 41 Kb of contiguous RAM for Prog8 programs.
 
 
 Zero page usage by the Prog8 compiler
@@ -293,7 +308,7 @@ Here they are, all available in ``cx16``:
     The order in which the handlers are invoked if multiple interrupts occur simultaneously is: LINE, TIMER1(VIA1), VSYNC, SPRCOL, AFLOW.
 
 ``set_vsync_irq_handler (uword address)``
-    Sets the verical sync interrupt handler routine.  Also enables VSYNC interrupts.
+    Sets the vertical sync interrupt handler routine.  Also enables VSYNC interrupts.
 
 ``set_line_irq_handler (uword rasterline, uword address)``
     Sets the rasterline interrupt handler routine to trigger on the specified raster line.

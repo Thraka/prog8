@@ -79,6 +79,7 @@ io_error:
     sub list_filenames(str pattern_ptr, uword filenames_buffer, uword filenames_buf_size) -> ubyte {
         ; -- fill the provided buffer with the names of the files on the disk (until buffer is full).
         ;    Files in the buffer are separated by a 0 byte. You can provide an optional pattern to match against.
+        ;    filenames_buf_size should be > 20!
         ;    After the last filename one additional 0 byte is placed to indicate the end of the list.
         ;    Returns number of files (it skips 'dir' entries i.e. subdirectories).
         ;    Also sets carry on exit: Carry clear = all files returned, Carry set = directory has more files that didn't fit in the buffer.
@@ -86,9 +87,12 @@ io_error:
         ;    If you really need a list of pointers to the names, that is pretty straightforward to construct by iterating over the names
         ;    and registering when the next one starts after the 0-byte separator.
 
+        if filenames_buf_size<=20
+            return 0
+
+        uword filenames_buffer_start = filenames_buffer
         ubyte files_found = 0
-        uword buf_ptr = filenames_buffer
-        @(buf_ptr) = 0
+        @(filenames_buffer) = 0
         cbm.SETNAM(1, "$")
         cbm.SETLFS(READ_IO_CHANNEL, drivenumber, 0)
         ubyte status = 1
@@ -134,8 +138,12 @@ io_error:
             @(name_ptr) = 0
 
             if pattern_ptr==0 or strings.pattern_match(list_filename, pattern_ptr) {
-                buf_ptr += strings.copy(list_filename, buf_ptr) + 1
+                filenames_buffer += strings.copy(list_filename, filenames_buffer) as uword + 1
                 files_found++
+                if filenames_buffer - filenames_buffer_start > filenames_buf_size-20 {
+                    @(filenames_buffer)=0
+                    goto end_listing_more
+                }
             }
 
             while cbm.CHRIN()!=0 {
@@ -151,8 +159,13 @@ io_error:
         }
 
 end_listing:
-        @(buf_ptr) = 0
+        @(filenames_buffer) = 0
         status = cbm.READST()
+        sys.clear_carry()
+        goto io_error
+
+end_listing_more:
+        sys.set_carry()
 
 io_error:
         cbm.CLRCHN()        ; restore default i/o devices
@@ -384,37 +397,26 @@ done:
     ; similar to above, but instead of fetching the entire string, it only fetches the status code and returns it as ubyte
     ; in case of IO error, returns 255 (CMDR-DOS itself is physically unable to return such a value)
     sub status_code() -> ubyte {
-        if cbm.READST()==128 {
+        if cbm.READST()==128
             return 255
-        }
 
         cbm.SETNAM(0, list_filename)
         cbm.SETLFS(15, drivenumber, 15)
-        void cbm.OPEN()          ; open 15,8,15
-        if_cs
-            goto io_error
-        void cbm.CHKIN(15)        ; use #15 as input channel
+        void cbm.OPEN()      ; open 15,8,15
+        void cbm.CHKIN(15)
 
-        list_filename[0] = cbm.CHRIN()
-        list_filename[1] = cbm.CHRIN()
-        list_filename[2] = 0
+        push( (cbm.CHRIN()-'0') *10 + (cbm.CHRIN()-'0') )   ; 2-digit status code is return value
+        while cbm.READST()==0
+            void cbm.CHRIN()    ; clear rest of status message
 
-        while cbm.READST()==0 {
-            void cbm.CHRIN()
-        }
-
-        cbm.CLRCHN()        ; restore default i/o devices
-        cbm.CLOSE(15)
-        return conv.str2ubyte(list_filename)
-
-io_error:
+exit:
         cbm.CLRCHN()
         cbm.CLOSE(15)
-        return 255
+        return pop()
     }
 
     sub get_loadaddress(str filename) -> uword {
-        ; get the load adress from a PRG file (usually $0801 but it can be different)
+        ; get the load address from a PRG file (usually $0801 but it can be different)
 
         cbm.SETNAM(strings.length(filename), filename)
         cbm.SETLFS(READ_IO_CHANNEL, drivenumber, 0)
@@ -437,9 +439,7 @@ io_error:
         cbm.SETNAM(strings.length(filename), filename)
         cbm.SETLFS(READ_IO_CHANNEL, drivenumber, 0)
         void cbm.OPEN()          ; open 12,8,0,"filename"
-        void cbm.CHKIN(READ_IO_CHANNEL)
-        void cbm.CHRIN()
-        cx16.r0bL = cbm.READST()==0
+        cx16.r0bL = status_code()==0
         cbm.CLRCHN()
         cbm.CLOSE(READ_IO_CHANNEL)
         return cx16.r0bL
