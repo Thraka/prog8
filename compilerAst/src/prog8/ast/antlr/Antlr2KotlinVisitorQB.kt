@@ -384,7 +384,9 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         val hasAtClause = ctx.AT() != null
         val initValue = if(ctx.ASSIGN() != null) {
             val exprList = ctx.expression()
-            if(hasAtClause && exprList.size > 1) {
+            if(ctx.tuple_expression() != null) {
+                ctx.tuple_expression().accept(this) as Expression
+            } else if(hasAtClause && exprList.size > 1) {
                 // Has both = value and AT address
                 exprList[0].accept(this) as Expression
             } else if(!hasAtClause && exprList.isNotEmpty()) {
@@ -458,6 +460,34 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     // ============================================================================
 
     override fun visitAssignment(ctx: AssignmentContext): Statement {
+        val tuple = ctx.tuple_expression()
+        if(tuple!=null) {
+            val targets = ctx.multi_assign_target().assign_target().map { it.accept(this) as AssignTarget }
+            val values = tuple.accept(this) as ExpressionTuple
+            if(targets.size!=values.expressions.size) {
+                throw SyntaxError("multivalue assignment: number of values does not match number of targets", ctx.toPosition())
+            } else {
+
+                if (values.expressions.all { it is NumericLiteral }) {
+                    val firstValue = (values.expressions.first() as NumericLiteral).number
+                    if(values.expressions.all { (it as NumericLiteral).number == firstValue }) {
+                        // replace by a chained assignment a=b=c = 42
+                        val value = values.expressions[0]
+                        var chain: Statement = Assignment(targets.last(), value, AssignmentOrigin.USERCODE, ctx.toPosition())
+                        for (target in targets.reversed().drop(1)) {
+                            chain = ChainedAssignment(target, chain, ctx.toPosition())
+                        }
+                        return chain
+                    }
+                }
+
+                val assigns = targets.zip(values.expressions).mapTo(mutableListOf()) { (target, value) ->
+                    Assignment(target, value, AssignmentOrigin.USERCODE, ctx.toPosition()) as Statement
+                }
+                return AnonymousScope(assigns, ctx.toPosition())
+            }
+        }
+
         val multiAssign = ctx.multi_assign_target()
         if(multiAssign!=null) {
             return Assignment(multiAssign.accept(this) as AssignTarget, ctx.expression().accept(this) as Expression, AssignmentOrigin.USERCODE, ctx.toPosition())
@@ -675,6 +705,11 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     override fun visitArrayliteral(ctx: ArrayliteralContext): ArrayLiteral {
         val array = ctx.expression().map { it.accept(this) as Expression }.toTypedArray()
         return ArrayLiteral(InferredTypes.InferredType.unknown(), array, position = ctx.toPosition())
+    }
+
+    override fun visitTuple_expression(ctx: Tuple_expressionContext): ExpressionTuple {
+        val expressions  = ctx.expression().map { it.accept(this) as Expression }
+        return ExpressionTuple(expressions, ctx.toPosition())
     }
 
     override fun visitStringliteral(ctx: StringliteralContext): StringLiteral {

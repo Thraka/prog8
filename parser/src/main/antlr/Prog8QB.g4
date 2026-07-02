@@ -462,7 +462,7 @@ directivearg: stringliteral | identifier | integerliteral ;
 
 // DIM varname[size] AS TYPE [@tags] [= value] [AT address]
 dimstmt:
-    PRIVATE? DIM identifierlist (arrayindex arrayindex? | EMPTYARRAYSIG)? AS datatype TAG* (ASSIGN expression)? (AT expression)?
+    PRIVATE? DIM identifierlist (arrayindex arrayindex? | EMPTYARRAYSIG)? AS datatype TAG* ((ASSIGN expression) | (ASSIGN tuple_expression))? (AT expression)?
     ;
 
 constdecl: PRIVATE? CONST identifierlist AS datatype ASSIGN expression ;
@@ -481,7 +481,7 @@ arrayindex:  LBRACKET expression RBRACKET ;
 
 // Order matters: try chained assignment first so 'a = b = 0' parses as chained assignment
 // rather than 'a = (b == 0)' comparison
-assignment :  (assign_target ASSIGN assignment) | (assign_target ASSIGN expression) | (multi_assign_target ASSIGN expression);
+assignment :  (assign_target ASSIGN assignment) | (assign_target ASSIGN expression) | (multi_assign_target ASSIGN expression) | (multi_assign_target ASSIGN tuple_expression);
 
 augassignment :
     assign_target operator=(PLUSEQ | MINUSEQ | SLASHEQ | STAREQ | MODEQ | ANDEQ | OREQ | XOREQ | SHLEQ | SHREQ) expression
@@ -540,6 +540,8 @@ expression :
     | pointerdereference
     | staticstructinitializer
     ;
+
+tuple_expression: expression (COMMA EOL? expression)+ ;
 
 
 sizeof_argument: basedatatype | expression | pointertype ;
