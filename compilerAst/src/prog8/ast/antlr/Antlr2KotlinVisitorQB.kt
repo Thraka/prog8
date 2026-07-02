@@ -152,7 +152,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     override fun visitAlias(ctx: AliasContext): Alias {
         val identifier = getname(ctx.identifier())
         val target = ctx.scoped_identifier().accept(this) as IdentifierReference
-        return Alias(identifier, target, ctx.toPosition())
+        return Alias(identifier, target, ctx.PRIVATE() != null, ctx.toPosition())
     }
 
     override fun visitDefer(ctx: DeferContext): Defer {
@@ -326,6 +326,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     // ============================================================================
 
     override fun visitDimstmt(ctx: DimstmtContext): VarDecl {
+        val isPrivate = ctx.PRIVATE() != null
         val tags = ctx.TAG().map { it.text }
         val validTags = arrayOf("@zp", "@requirezp", "@nozp", "@nosplit", "@shared", "@alignword", "@alignpage", "@align64", "@dirty", "@split")
         for(tag in tags) {
@@ -377,12 +378,14 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
             zp,
             split,
             arrayIndex,
+            null,
             name,
             if(identifiers.size==1) emptyList() else identifiers,
             initValue,
             tags.any { it.lowercase() == "@shared" },
             if(alignword) 2u else if(align64) 64u else if(alignpage) 256u else 0u,
             tags.any { it.lowercase() == "@dirty" },
+            isPrivate,
             ctx.toPosition()
         )
 
@@ -395,6 +398,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     }
 
     override fun visitConstdecl(ctx: ConstdeclContext): VarDecl {
+        val isPrivate = ctx.PRIVATE() != null
         val datatype = dataTypeFor(ctx.datatype()) ?: DataType.LONG
         val identifiers = ctx.identifierlist().identifier().map { getname(it) }
         val identifiername = identifiers[0]
@@ -412,12 +416,14 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
             ZeropageWish.DONTCARE,
             SplitWish.DONTCARE,
             null,
+            null,
             name,
             if(identifiers.size==1) emptyList() else identifiers,
             actualValue,
             false,
             0u,
             false,
+            isPrivate,
             ctx.toPosition()
         )
     }
@@ -459,7 +465,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         val ax = ctx.arrayindexed()
         val arrayvar = ax.scoped_identifier().accept(this) as IdentifierReference
         val index = ax.arrayindex().accept(this) as ArrayIndex
-        val arrayindexed = ArrayIndexedExpression(arrayvar, null, index, ax.toPosition())
+        val arrayindexed = ArrayIndexedExpression(arrayvar, null, null, index, ax.toPosition())
         return AssignTarget(null, arrayindexed, null, null, false, position=ctx.toPosition())
     }
 
@@ -502,7 +508,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     override fun visitArrayindexed(ctx: ArrayindexedContext): ArrayIndexedExpression {
         val identifier = ctx.scoped_identifier().accept(this) as IdentifierReference
         val index = ctx.arrayindex().accept(this) as ArrayIndex
-        return ArrayIndexedExpression(identifier, null, index, ctx.toPosition())
+        return ArrayIndexedExpression(identifier, null, null, index, ctx.toPosition())
     }
 
     override fun visitDirectmemory(ctx: DirectmemoryContext): DirectMemoryRead {
@@ -711,6 +717,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     // ============================================================================
 
     override fun visitSubroutine(ctx: SubroutineContext): Subroutine {
+        val isPrivate = ctx.PRIVATE() != null
         val name = getname(ctx.identifier())
         val parameters = ctx.sub_params()?.sub_param()?.map { subParam(it) } ?: emptyList()
         val statements = ctx.subroutine_body().statement().map { it.accept(this) as Statement }.toMutableList()
@@ -724,12 +731,14 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
             asmAddress = null,
             isAsmSubroutine = false,
             inline = false,
+            isPrivate = isPrivate,
             statements = statements,
             position = ctx.toPosition()
         )
     }
 
     override fun visitFunctiondecl(ctx: FunctiondeclContext): Subroutine {
+        val isPrivate = ctx.PRIVATE() != null
         val name = getname(ctx.identifier())
         val parameters = ctx.sub_params()?.sub_param()?.map { subParam(it) } ?: emptyList()
         val returntypes = ctx.datatype().map { dataTypeFor(it)!! }
@@ -744,6 +753,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
             asmAddress = null,
             isAsmSubroutine = false,
             inline = false,
+            isPrivate = isPrivate,
             statements = statements,
             position = ctx.toPosition()
         )
@@ -762,6 +772,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
     }
 
     override fun visitAsmsubroutine(ctx: AsmsubroutineContext): Subroutine {
+        val isPrivate = ctx.PRIVATE() != null
         val inline = ctx.INLINE()!=null
         val ad = asmSubDecl(ctx.asmsub_decl())
         val statements = ctx.subroutine_body().statement().map { it.accept(this) as Statement }.toMutableList()
@@ -771,12 +782,13 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
             ad.returntypes.toMutableList(),
             ad.asmParameterRegisters,
             ad.asmReturnvaluesRegisters,
-            ad.asmClobbers, null, true, inline,
+            ad.asmClobbers, null, true, inline, isPrivate = isPrivate,
             statements = statements, position = ctx.toPosition()
         )
     }
 
     override fun visitExtsubroutine(ctx: ExtsubroutineContext): Subroutine {
+        val isPrivate = ctx.PRIVATE() != null
         val subdecl = asmSubDecl(ctx.asmsub_decl())
         val constbank = (ctx.constbank?.accept(this) as NumericLiteral?)?.number?.toUInt()?.toUByte()
         val varbank = ctx.varbank?.accept(this) as IdentifierReference?
@@ -784,7 +796,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         val address = Subroutine.Address(constbank, varbank, addr)
         return Subroutine(subdecl.name, subdecl.parameters.toMutableList(), subdecl.returntypes.toMutableList(),
             subdecl.asmParameterRegisters, subdecl.asmReturnvaluesRegisters,
-            subdecl.asmClobbers, address, true, inline = false, statements = mutableListOf(), position = ctx.toPosition()
+            subdecl.asmClobbers, address, true, inline = false, isPrivate = isPrivate, statements = mutableListOf(), position = ctx.toPosition()
         )
     }
 
@@ -1004,7 +1016,7 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         val name = getname(ctx.identifier())
         val fields: List<Pair<DataType, List<String>>> = ctx.structfielddecl().map { getStructField(it) }
         val flattened = fields.flatMap { (dt, names) -> names.map { dt to it}}
-        return StructDecl(name, flattened.toTypedArray(), ctx.toPosition())
+        return StructDecl(name, flattened.toTypedArray(), ctx.PRIVATE() != null, ctx.toPosition())
     }
 
     private fun getStructField(ctx: StructfielddeclContext): Pair<DataType, List<String>> {

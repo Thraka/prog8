@@ -168,6 +168,7 @@ FUNCTION: F U N C T I O N ;
 ASMSUB: A S M S U B ;
 EXTSUB: E X T S U B ;
 INLINE: I N L I N E ;
+PRIVATE: P R I V A T E ;
 CLOBBERS: C L O B B E R S ;
 SUB: S U B ;
 
@@ -362,7 +363,7 @@ variabledeclaration :
 
 
 structdeclaration:
-    TYPE identifier EOL? (structfielddecl | EOL)+ END TYPE
+    PRIVATE? TYPE identifier EOL? (structfielddecl | EOL)+ END TYPE
     ;
 
 structfielddecl: identifierlist AS datatype ;
@@ -375,7 +376,7 @@ subroutinedeclaration :
     | extsubroutine
     ;
 
-alias: ALIAS identifier ASSIGN scoped_identifier ;
+alias: PRIVATE? ALIAS identifier ASSIGN scoped_identifier ;
 
 defer: DEFER (statement | statement_block) ;
 
@@ -440,10 +441,10 @@ directivearg: stringliteral | identifier | integerliteral ;
 
 // DIM varname[size] AS TYPE [@tags] [= value] [AT address]
 dimstmt:
-    DIM identifierlist (arrayindex | EMPTYARRAYSIG)? AS datatype TAG* (ASSIGN expression)? (AT expression)?
+    PRIVATE? DIM identifierlist (arrayindex | EMPTYARRAYSIG)? AS datatype TAG* (ASSIGN expression)? (AT expression)?
     ;
 
-constdecl: CONST identifierlist AS datatype ASSIGN expression ;
+constdecl: PRIVATE? CONST identifierlist AS datatype ASSIGN expression ;
 
 basedatatype:  UBYTE | BYTE | UWORD | WORD | LONG | FLOAT | STRING | BOOL ;
 
@@ -553,7 +554,7 @@ breakstmt : BREAK | EXIT FOR | EXIT DO | EXIT WHILE ;
 
 continuestmt: CONTINUE ;
 
-identifier :  UNICODEDNAME | UNDERSCORENAME | ON | CALL | INLINE | STEP
+identifier :  UNICODEDNAME | UNDERSCORENAME | ON | CALL | INLINE | PRIVATE | STEP
             | IMPORT | ZEROPAGE | ADDRESS | MEMTOP | ENCODING | OUTPUT | LAUNCHER
             | OPTION | ZPRESERVED | ZPALLOWED | BREAKPOINT | ASMBINARY | ASMINCLUDE
             | ALIGN | JMPTABLE | MERGE | FORCE_OUTPUT | VERAFXMULS ;
@@ -594,12 +595,12 @@ inlineasm :  asmtype=(ASM | IR) EOL? INLINEASMBLOCK
 
 // SUB name(params) ... END SUB
 subroutine :
-    SUB identifier LPAREN sub_params? RPAREN EOL? subroutine_body END SUB
+    PRIVATE? SUB identifier LPAREN sub_params? RPAREN EOL? subroutine_body END SUB
     ;
 
 // FUNCTION name(params) AS returntype[, returntype] ... END FUNCTION
 functiondecl :
-    FUNCTION identifier LPAREN sub_params? RPAREN AS datatype (COMMA datatype)* EOL? subroutine_body END FUNCTION
+    PRIVATE? FUNCTION identifier LPAREN sub_params? RPAREN AS datatype (COMMA datatype)* EOL? subroutine_body END FUNCTION
     ;
 
 subroutine_body: (statement | EOL | COLON)* ;
@@ -610,11 +611,11 @@ sub_param: identifier (arrayindex | EMPTYARRAYSIG)? AS datatype TAG? ;
 
 // ASMSUB name(params) [CLOBBERS(regs)] [AS returntype @reg] ... END ASMSUB
 asmsubroutine :
-    INLINE? ASMSUB asmsub_decl EOL? subroutine_body END ASMSUB
+    PRIVATE? INLINE? ASMSUB asmsub_decl EOL? subroutine_body END ASMSUB
     ;
 
 extsubroutine :
-    EXTSUB (AT BANK (constbank=integerliteral | varbank=scoped_identifier))? address=expression ASSIGN asmsub_decl
+    PRIVATE? EXTSUB (AT BANK (constbank=integerliteral | varbank=scoped_identifier))? address=expression ASSIGN asmsub_decl
     ;
 
 asmsub_decl : identifier LPAREN asmsub_params? RPAREN asmsub_clobbers? asmsub_returns? ;
