@@ -28,6 +28,10 @@ class ModuleImporter(private val program: Program,
                      val quiet: Boolean,
                      val nostdlib: Boolean = false) {
 
+    private class ModuleSourceConflictException(moduleName: String, p8Path: Path, pbPath: Path): Exception(
+        "conflicting module sources for '$moduleName': found both ${p8Path.normalize()} and ${pbPath.normalize()}"
+    )
+
     private val sourcePaths: List<Path> = sourceDirs.map { Path(it).sanitize() }.toSortedSet().toList()
     private val libraryPaths: List<Path> = libraryDirs.map { Path(it).sanitize() }.toSortedSet().toList()
 
@@ -138,10 +142,18 @@ class ModuleImporter(private val program: Program,
         val moduleSrc = getModuleFromFile(moduleName, importingModule)
         return moduleSrc.fold(
             success = { importModule(it) },
-            failure = {
-                val searchPaths = if(nostdlib) "$sourcePaths (internal libraries disabled)" else "$sourcePaths (and internal libraries)"
-                errors.err("no module found with name $moduleName. Searched in: $searchPaths", errorPosition)
-                null
+            failure = { failure ->
+                when(failure) {
+                    is ModuleSourceConflictException -> {
+                        errors.err(failure.message ?: "conflicting module sources for '$moduleName'", errorPosition)
+                        null
+                    }
+                    else -> {
+                        val searchPaths = if(nostdlib) "$sourcePaths (internal libraries disabled)" else "$sourcePaths (and internal libraries)"
+                        errors.err("no module found with name $moduleName. Searched in: $searchPaths", errorPosition)
+                        null
+                    }
+                }
             }
         )
     }
@@ -163,9 +175,7 @@ class ModuleImporter(private val program: Program,
         return result.mapError { NoSuchFileException(File(name)) }
     }
 
-    private fun getModuleFromFile(name: String, importingModule: Module?): Result<SourceCode, NoSuchFileException> {
-        // Try both .p8 (Prog8) and .pb (ProgB) extensions
-        val extensions = listOf(".p8", ".pb")
+    private fun getModuleFromFile(name: String, importingModule: Module?): Result<SourceCode, Exception> {
 
         val normalLocations =
             if (importingModule == null) {
@@ -175,27 +185,30 @@ class ModuleImporter(private val program: Program,
                 listOf(pathFromImportingModule) + sourcePaths
             }
 
-        // Search in library paths first
-        for(ext in extensions) {
-            val fileName = "$name$ext"
-            libraryPaths.forEach {
-                try {
-                    return Ok(ImportFileSystem.getFile(it.resolve(fileName), true))
-                } catch (_: NoSuchFileException) {
-                }
+        fun resolveFromLocations(locations: List<Path>, isLibrary: Boolean): Result<SourceCode, Exception>? {
+            for(location in locations) {
+                val p8File = location.resolve("$name.p8")
+                val pbFile = location.resolve("$name.pb")
+                val hasP8 = p8File.exists()
+                val hasPb = pbFile.exists()
+
+                if(hasP8 && hasPb)
+                    return Err(ModuleSourceConflictException(name, p8File, pbFile))
+
+                if(hasP8)
+                    return Ok(ImportFileSystem.getFile(p8File, isLibrary))
+
+                if(hasPb)
+                    return Ok(ImportFileSystem.getFile(pbFile, isLibrary))
             }
+            return null
         }
 
+        // Search in library paths first
+        resolveFromLocations(libraryPaths, isLibrary = true)?.let { return it }
+
         // Search in normal locations
-        for(ext in extensions) {
-            val fileName = "$name$ext"
-            normalLocations.forEach {
-                try {
-                    return Ok(ImportFileSystem.getFile(it.resolve(fileName)))
-                } catch (_: NoSuchFileException) {
-                }
-            }
-        }
+        resolveFromLocations(normalLocations, isLibrary = false)?.let { return it }
 
         return Err(NoSuchFileException(File(name)))
     }
