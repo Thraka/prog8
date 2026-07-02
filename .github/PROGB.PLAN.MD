@@ -797,6 +797,195 @@ NEXT
 
 ## Implementation Plan
 
+## Gap Analysis: Prog8 v12.1.1 -> v12.2.1
+
+ProgB currently targets Prog8 v12.1.1 behavior. The following items changed in Prog8 up to v12.2.1 and should be accounted for in ProgB.
+
+### Scope Guard (ProgB Frontend Model)
+
+- [ ] Treat ProgB catch-up scope as frontend-only by default:
+    - Grammar: `Prog8QB.g4` mirrors syntax-level changes from `Prog8ANTLR.g4`.
+    - AST mapping: `Antlr2KotlinVisitorQB.kt` mirrors AST-shape/flag mapping from `Antlr2KotlinVisitor.kt`.
+    - Parser wrapper behavior: `ProgBParser.kt` mirrors parser diagnostics/error-collection behavior from `Prog8Parser.kt`.
+- [ ] Do not treat backend/optimizer/IR/stdlib implementation changes as ProgB parser work unless they require new syntax or different AST mapping.
+- [ ] Keep backend/stdlib deltas as `.pb` integration smoke tests, not frontend blockers.
+
+### Priority 0 (Parser/AST Parity Required)
+
+- [ ] `.p8` parsing parity rule: any source parse path must also support `.pb`
+    - Scope: all source-level parsing/loading code paths (compiler entry, module import, daemon/watch mode, tests/helpers).
+    - Non-scope: `.p8ir` flows remain IR-specific and unchanged.
+    - ProgB work:
+        - Audit every source parser invocation and extension check for `.p8` assumptions.
+        - Require equivalent `.pb` behavior for success/error paths and diagnostics.
+
+- [ ] `PRIVATE` visibility support for declarations
+    - Affected forms: `const`, `alias`, `struct`, `enum`, `sub`, `asmsub`, `extsub`, and variable declarations.
+    - ProgB work:
+        - Accept `PRIVATE` prefix in BASIC forms.
+        - Ensure AST nodes set the private flag exactly as Prog8 does.
+
+- [ ] `ENUM` declarations
+    - Prog8 added enum declaration syntax (with optional explicit values).
+    - ProgB work:
+        - Add `ENUM ... END ENUM` form (or equivalent BASIC form).
+        - Map to Prog8 `Enumeration` AST with inferred storage type.
+
+- [ ] `SWAP(a, b)` statement
+    - Prog8 changed `swap()` from builtin-function style to statement semantics.
+    - ProgB work:
+        - Parse as statement.
+        - Emit `Swap` AST node (not function call).
+
+- [ ] 2D array syntax support
+    - Prog8 grammar now allows two array index brackets in declarations and array indexing with multiple dimensions.
+    - ProgB work:
+        - Support `DIM grid[W][H] AS ...`.
+        - Support indexed access parity in expressions and assignment targets.
+
+- [ ] Multi-value tuple expressions in assignment/initialization
+    - Prog8 accepts tuple-style right-hand side forms for multi-target assignment and var init.
+    - ProgB work:
+        - Support parser forms where RHS is a tuple expression.
+        - Keep compatibility with builtin multi-return behavior.
+
+### Priority 1 (Semantic/Frontend Behavior Parity)
+
+- [ ] Private access validation pass parity
+    - Prog8 now enforces private access rules via a dedicated checker.
+    - ProgB work:
+        - Ensure ProgB-generated AST reaches the same checker paths.
+        - Add tests for illegal cross-module/private access.
+
+- [ ] `memory()` syntax/meaning updates
+    - Prog8 refactored memory reservation/reference handling.
+    - One-argument `memory("name")` reference behavior and const interactions changed.
+    - ProgB work:
+        - Verify grammar accepts current forms.
+        - Add tests for memory slab declaration, reference, and const usage.
+
+- [ ] `sizeof()` rule updates
+    - Prog8 tightened supported argument kinds.
+    - ProgB work:
+        - Match accepted forms and errors.
+
+- [ ] Pointer dereference/indexing edge cases
+    - Prog8 parser/visitor fixed several ptr-deref + indexed chain cases.
+    - ProgB work:
+        - Add explicit parser tests for combinations of field access, indexing, and dereference chains.
+
+- [ ] Parse error collection behavior
+    - Prog8 parser reports multiple parse errors in one pass.
+    - ProgB work:
+        - Confirm error strategy parity (including location accuracy).
+
+- [ ] `defer` semantics parity (including exit-point behavior)
+    - Prog8 added dedicated defer processing and interactions with optimization/returns.
+    - ProgB work:
+        - Integration-only: validate `.pb` programs execute with the same defer behavior as equivalent `.p8` programs.
+        - No dedicated frontend work unless defer syntax/AST mapping diverges.
+
+- [ ] Long-loop semantics parity
+    - Prog8 added/fixed long counter `for` loops (including `step` variants and warnings).
+    - ProgB work:
+        - Integration-only: ensure BASIC `FOR ... NEXT` with `LONG` counters compiles/runs identically to `.p8` equivalents.
+        - Treat as frontend work only if grammar/AST mapping changes are needed.
+
+- [ ] Multi-value declarations parity
+    - Prog8 added/fixed explicit multi-value variable declarations and assignments.
+    - ProgB work:
+        - Support and test `DIM a, b AS ... = ...` forms tied to multi-return expressions.
+        - Verify tuple RHS and builtin multi-return declarations behave identically.
+
+- [ ] `asmsub`/`extsub` signature parity
+    - Prog8 refactored/adjusted asm-sub signatures and related lowering details.
+    - ProgB work:
+        - Confirm BASIC asm declaration forms map to updated signature model.
+        - Add tests for parameterized asm calls, clobbers, returns, and banked extsub usage.
+
+### Priority 2 (Stdlib/Builtin Surface Compatibility)
+
+- [ ] Sync new/changed builtins and stdlib APIs exposed since 12.1.1
+    - Highlights from commit range:
+        - `enum` syntax introduction.
+        - Multi-return builtin expansion (including `lmh(long)` and related assignment behavior).
+        - `sys.push()`/`sys.pop()` builtin behavior adjustments.
+        - New CX16 `serial` module.
+        - New `lineclip` module.
+        - Added `wavfile` and `adpcm` library modules.
+        - `strings.isxdigit()` addition.
+        - Virtual target additions such as `txt.iso()` and `poweroff_system()`.
+        - API behavior changes such as `diskio.f_seek()`/`f_seek_w()` return status.
+        - `math.crc16()` signature update (init/xor parameters).
+        - `sys.waitirq()` addition (CX16).
+        - `sys.die()` addition.
+        - Virtual `rambank()`/`rombank()` dummy support.
+    - ProgB work:
+        - Integration-only: add `.pb` smoke tests that exercise changed APIs/modules.
+        - Do not add parser tasks unless an API requires new syntax.
+
+- [ ] Profiling instrumentation compatibility
+    - Prog8 added profiling instrumentation and related output/runtime behavior adjustments.
+    - ProgB work:
+        - Integration-only: verify `.pb` compile/run parity when profiling is enabled.
+        - Not a frontend blocker unless `.pb` entry/parsing path behaves differently.
+
+### Priority 3 (Tooling/CLI Integration)
+
+- [ ] Compiler option parity checks
+    - New options/features in range include `--nostdlib` and `-daemon` mode.
+    - ProgB work:
+        - Verify `.pb` entry and import flow behaves correctly with these options.
+
+- [ ] Daemon/watch/emu integration parity
+    - Prog8 had multiple fixes around `-daemon`, `-watch`, and `-emu` interactions.
+    - ProgB work:
+        - Add regression tests for `.pb` builds in daemon mode.
+        - Cover `-watch` cache behavior and `-emu` invocation path with `.pb` inputs.
+
+- [ ] Module importing edge cases
+    - Import handling got fixes for duplicate/symlink scenarios.
+    - ProgB work:
+        - Add mixed `.pb`/`.p8` import tests for duplicate-resolution and extension preference.
+
+- [ ] Source extension parity in tooling paths (`.p8` <-> `.pb`)
+    - Any source-loading path that currently assumes `.p8` should support `.pb` too.
+    - ProgB work:
+        - Verify compiler entry handling for `.pb` main modules.
+        - Verify daemon/watch workflows behave identically for `.pb` sources.
+        - Verify helper utilities/tests that synthesize source files do not silently force `.p8` when `.pb` is intended.
+
+### Suggested Catch-up Order
+
+1. Parser grammar parity (`PRIVATE`, `ENUM`, `SWAP`, 2D arrays, tuple RHS).
+2. AST visitor updates and semantic parity (private checks, memory/sizeof rules).
+3. Stdlib and builtin compatibility test matrix updates.
+4. CLI/import edge-case coverage (`--nostdlib`, `-daemon`, mixed-language imports).
+
+### Upstream Sync Rule (Maintenance)
+
+- [ ] Treat these three Prog8 files as the primary upstream watchlist for ProgB syntax/AST parity:
+    - `parser/src/main/antlr/Prog8ANTLR.g4` -> mirror in `parser/src/main/antlr/Prog8QB.g4`
+    - `compilerAst/src/prog8/ast/antlr/Antlr2KotlinVisitor.kt` -> mirror in `compilerAst/src/prog8/ast/antlr/Antlr2KotlinVisitorQB.kt`
+    - `compilerAst/src/prog8/parser/Prog8Parser.kt` -> mirror in `compilerAst/src/prog8/parser/ProgBParser.kt`
+- [ ] For each release range, extract commits that touched those three files first, then replicate deltas in the corresponding ProgB files.
+- [ ] After each mirrored change, run parser-focused tests before broader compiler tests.
+- [ ] Use full-range commit list only as a secondary sweep for stdlib/CLI changes that affect `.pb` behavior indirectly.
+
+### Verification Matrix (Minimum)
+
+- [ ] New syntax compiles in both `.p8` and `.pb` with equivalent AST shape.
+- [ ] Parser error reporting parity between `.p8` and `.pb` for equivalent invalid inputs.
+- [ ] Negative tests for private access and invalid `sizeof`/`memory` usage.
+- [ ] Multi-return assignment and tuple RHS behavior tests.
+- [ ] Multi-value variable declaration tests (including builtin multi-return initializers).
+- [ ] 2D array declaration/indexing codegen tests.
+- [ ] Defer behavior tests across `return`, control-flow exits, and optimizer-enabled builds.
+- [ ] Long-loop tests for `LONG` counters with multiple `STEP` scenarios.
+- [ ] Library smoke tests for newly added/changed modules and function signatures.
+- [ ] Mixed import tests (`.pb` <-> `.p8`) under regular and `--nostdlib` builds.
+- [ ] Daemon/watch/emu smoke tests with `.pb` entry modules.
+
 ### Phase 1: Grammar Foundation
 - [ ] Create `Prog8QB.g4` grammar file based on `Prog8ANTLR.g4`
 - [ ] Implement case-insensitive lexing using `CaseChangingCharStream`
