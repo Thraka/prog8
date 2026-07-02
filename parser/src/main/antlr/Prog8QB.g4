@@ -544,7 +544,7 @@ expression :
 tuple_expression: expression (COMMA EOL? expression)+ ;
 
 
-sizeof_argument: basedatatype | expression | pointertype ;
+sizeof_argument: basedatatype | scoped_identifier | pointertype | addressof | addressof_expr;
 
 // ADDRESSOF(var) or TYPEDADDR(var)
 addressof_expr: (ADDRESSOF_KW | TYPEDADDR_KW) LPAREN scoped_identifier arrayindex? RPAREN ;
