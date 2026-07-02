@@ -107,14 +107,14 @@ MODULE btree
         SUB count_node(r AS ^^Node)
             count++
             IF r.left <> 0 THEN
-                sys.pushw(r)
+                pushw(r)
                 count_node(r.left)
-                r = sys.popw()
+                r = popw()
             END IF
             IF r.right <> 0 THEN
-                sys.pushw(r)
+                pushw(r)
                 count_node(r.right)
-                r = sys.popw()
+                r = popw()
             END IF
         END SUB
     END FUNCTION
@@ -175,16 +175,16 @@ MODULE btree
 
         SUB print_tree(r AS ^^Node)
             IF r.left <> 0 THEN
-                sys.pushw(r)
+                pushw(r)
                 print_tree(r.left)
-                r = sys.popw()
+                r = popw()
             END IF
             txt.print_uw(r.value)
             txt.print(", ")
             IF r.right <> 0 THEN
-                sys.pushw(r)
+                pushw(r)
                 print_tree(r.right)
-                r = sys.popw()
+                r = popw()
             END IF
         END SUB
     END SUB
@@ -201,18 +201,18 @@ MODULE btree
             txt.print_uw(r.value)
             txt.nl()
             IF r.left <> 0 THEN
-                sys.pushw(r)
-                sys.push(depth)
+                pushw(r)
+                push(depth)
                 print_tree(r.left, depth + 1)
-                depth = sys.pop()
-                r = sys.popw()
+                depth = pop()
+                r = popw()
             END IF
             IF r.right <> 0 THEN
-                sys.pushw(r)
-                sys.push(depth)
+                pushw(r)
+                push(depth)
                 print_tree(r.right, depth + 1)
-                depth = sys.pop()
-                r = sys.popw()
+                depth = pop()
+                r = popw()
             END IF
         END SUB
     END SUB

@@ -2,10 +2,10 @@
 # Validates that ProgB and Prog8 produce identical assembly output
 
 param(
-    [string]$Target = "c64",
-    [string]$CompilerPath = "",
+    [string]$Target = "c64",         # The folder containing test code (c64 or cx16)
+    [string]$CompilerPath = "",      # Optional: path to the compiler executable (prog8c.bat), Will search if omitted
     [string]$TestName = "",          # Optional: specific test name to run (without extension)
-    [switch]$KeepOutput,
+    [switch]$KeepOutput,             # Keep the output directory after tests
     [switch]$KeepComments,           # Don't strip comments when comparing assembly
     [switch]$SwapOrder,              # Compile Prog8 first instead of ProgB
     [switch]$Verbose

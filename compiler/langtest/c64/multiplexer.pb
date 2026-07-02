@@ -114,7 +114,7 @@ MODULE main
                 sort_virtualsprite[pos-1] = sort_virtualsprite[pos]
                 sort_virtualsprite[pos] = cx16.r0L
                 pos--
-                IF_Z
+                IF_Z THEN
                     pos++
                 END IF
             END IF
