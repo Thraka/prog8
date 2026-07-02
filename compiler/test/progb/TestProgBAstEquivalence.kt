@@ -72,7 +72,7 @@ class TestProgBAstEquivalence : FunSpec({
             val progbSrc = """
                 MODULE main
                     SUB start()
-                        DIM name AS STRING = "hello" @shared
+                        DIM name AS STRING @shared = "hello"
                     END SUB
                 END MODULE
             """
@@ -282,7 +282,7 @@ class TestProgBAstEquivalence : FunSpec({
             val progbSrc = """
                 MODULE main
                     SUB start()
-                        DIM result AS UBYTE = add(10, 20) @shared
+                        DIM result AS UBYTE @shared = add(10, 20) 
                     END SUB
                     
                     FUNCTION add(a AS UBYTE, b AS UBYTE) AS UBYTE
@@ -321,7 +321,7 @@ class TestProgBAstEquivalence : FunSpec({
             val progbSrc = """
                 MODULE main
                     SUB start()
-                        DIM x AS UBYTE = (10 + 5) * 2 @shared
+                        DIM x AS UBYTE @shared = (10 + 5) * 2 
                     END SUB
                 END MODULE
             """
@@ -344,7 +344,7 @@ class TestProgBAstEquivalence : FunSpec({
             val progbSrc = """
                 MODULE main
                     SUB start()
-                        DIM result AS BOOL = true AND false OR true @shared
+                        DIM result AS BOOL @shared = true AND false OR true
                     END SUB
                 END MODULE
             """
