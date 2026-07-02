@@ -1038,6 +1038,11 @@ class Antlr2KotlinVisitorQB(val source: SourceCode): AbstractParseTreeVisitor<No
         return Enumeration(name, largestType, members, ctx.PRIVATE() != null, ctx.toPosition())
     }
 
+    override fun visitSwap(ctx: SwapContext): Swap {
+        val (t1, t2) = ctx.assign_target().map { it.accept(this) as AssignTarget }
+        return Swap(t1, t2, ctx.toPosition())
+    }
+
     // ============================================================================
     // VISITOR OVERRIDES (delegate to children or throw)
     // ============================================================================

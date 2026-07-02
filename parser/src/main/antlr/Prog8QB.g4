@@ -176,6 +176,7 @@ TYPEDADDR_KW: T Y P E D A D D R ;
 TYPE: T Y P E ;
 ALIAS: A L I A S ;
 ENUM: E N U M ;
+SWAP: S W A P ;
 
 ELSEIF: E L S E I F ;
 ELSE: E L S E ;
@@ -296,7 +297,7 @@ TAG: ATSIGN ([a-zA-Z0-9])+ ;
 EMPTYARRAYSIG : LBRACKET [ \t]* RBRACKET ;
 
 // Identifiers (must come after keywords)
-UNICODEDNAME :  [\p{Letter}][\p{Letter}\p{Mark}\p{Digit}_]* ;
+UNICODEDNAME :  [\p{Letter}]([\p{Letter}\p{Mark}\p{Digit}_] | '::')* ;
 UNDERSCORENAME :  '_' UNICODEDNAME ;
 
 
@@ -356,6 +357,7 @@ statement :
     | defer
     | alias
     | enum
+    | swap
     ;
 
 
@@ -394,6 +396,8 @@ enum_separator:
 enum_member:
     identifier (ASSIGN integerliteral)?
     ;
+
+swap: SWAP LPAREN assign_target COMMA assign_target RPAREN ;
 
 defer: DEFER (statement | statement_block) ;
 
