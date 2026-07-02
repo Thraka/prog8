@@ -462,7 +462,7 @@ directivearg: stringliteral | identifier | integerliteral ;
 
 // DIM varname[size] AS TYPE [@tags] [= value] [AT address]
 dimstmt:
-    PRIVATE? DIM identifierlist (arrayindex | EMPTYARRAYSIG)? AS datatype TAG* (ASSIGN expression)? (AT expression)?
+    PRIVATE? DIM identifierlist (arrayindex arrayindex? | EMPTYARRAYSIG)? AS datatype TAG* (ASSIGN expression)? (AT expression)?
     ;
 
 constdecl: PRIVATE? CONST identifierlist AS datatype ASSIGN expression ;
@@ -548,7 +548,7 @@ sizeof_argument: basedatatype | expression | pointertype ;
 addressof_expr: (ADDRESSOF_KW | TYPEDADDR_KW) LPAREN scoped_identifier arrayindex? RPAREN ;
 
 arrayindexed:
-    scoped_identifier arrayindex
+    scoped_identifier arrayindex+
     ;
 
 
@@ -628,7 +628,7 @@ subroutine_body: (statement | EOL | COLON)* ;
 
 sub_params :  sub_param (COMMA EOL? sub_param)* ;
 
-sub_param: identifier (arrayindex | EMPTYARRAYSIG)? AS datatype TAG? ;
+sub_param: identifier (arrayindex arrayindex? | EMPTYARRAYSIG)? AS datatype TAG? ;
 
 // ASMSUB name(params) [CLOBBERS(regs)] [AS returntype @reg] ... END ASMSUB
 asmsubroutine :
@@ -643,7 +643,7 @@ asmsub_decl : identifier LPAREN asmsub_params? RPAREN asmsub_clobbers? asmsub_re
 
 asmsub_params :  asmsub_param (COMMA EOL? asmsub_param)* ;
 
-asmsub_param :  identifier (arrayindex | EMPTYARRAYSIG)? AS datatype TAG ;
+asmsub_param :  identifier (arrayindex arrayindex? | EMPTYARRAYSIG)? AS datatype TAG ;
 
 asmsub_clobbers : CLOBBERS LPAREN clobber? RPAREN ;
 
